@@ -1,0 +1,55 @@
+[project]
+name = "chatbot"
+version = "0.1.0"
+description = "Locally-run RAG chatbot using Chainlit, Haystack, Ollama, and Qdrant"
+requires-python = ">=3.12"
+dependencies = [
+    "chainlit>=2.0",
+    "haystack-ai>=2.0",
+    "qdrant-haystack>=5.0",
+    "ollama>=0.4",
+    "pydantic-settings>=2.0",
+    "structlog>=24.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501", # line too long — handled by formatter
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingImports = true
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

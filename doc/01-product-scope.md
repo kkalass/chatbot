@@ -4,7 +4,7 @@
 Build a chatbot that answers user questions grounded in static, multi-modal company content (initially text/markdown/pdf). The bot must reduce hallucinations by retrieval grounding and provide transparent source references.
 
 ## Product Goal
-Deliver a local-first assistant that can:
+Deliver an assistant that runs on local infrastructure and can:
 - answer domain questions with citation-style references,
 - query a simple external service via a typed tool call,
 - ingest and index static documents reliably,
@@ -43,6 +43,6 @@ Deliver a local-first assistant that can:
 - Reproducible setup from README on a clean machine.
 
 ## Constraints and Assumptions
-- Local-first preference, but architecture should not prevent hosted model substitution later.
+- Models and services run locally for developer experimentation, but the architecture must not prevent substitution with hosted models or cloud services later.
 - Hardcoding provider/model in MVP is acceptable.
 - No strict regulatory privacy requirements for MVP.

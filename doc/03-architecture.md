@@ -1,7 +1,7 @@
 # Architecture
 
 ## High-Level Design
-The application is a local-first RAG chatbot with explicit separation of concerns.
+The application is a locally-run RAG chatbot with explicit separation of concerns.
 
 ## Components
 - UI Layer (Chainlit)
