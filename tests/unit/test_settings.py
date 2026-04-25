@@ -36,4 +36,4 @@ class TestSettingsDefaults:
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            Settings(log_format="invalid")  # type: ignore[call-arg]
+            Settings(log_format="invalid")
