@@ -16,7 +16,9 @@ Research Topics
  * MCP for tool calls, or is this absolute overkill? => yes, overkill
  * If MCP: What are the best practices regarding auth nowadays ("You know: the S in MCP stands for security...")
  * Or rather specific, hardcoded tool (external service), maybe with pydantic model? => yes
- * 
+ * what RAG? How to do the data ingestion etc
+ * what about monitoring? Especially evaluation (e.g. quality monitoring)?
+ * [what are best practices for automated testing of such a tool]
 
 ---
 Assumptions
@@ -35,3 +37,7 @@ Future Improvements
  * Maybe MCP support (just for the fun of it :-))
  * Probably improve auth by integrating actually realistic SSO or such - gradio apparently even supports this natively
  * Use Chainlint instead of Gradio (less simple, but so much more impressive)
+ * Red Teaming my own project
+ * evaluate and improve accuracy
+ * automated tests / CI Pipeline for evaluations (CircleCI)
+ * implement advanced RAG retrieval methods
