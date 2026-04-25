@@ -23,11 +23,19 @@ Research Topics
 ---
 Assumptions
  * It is OK to use RAG/LLM services
+ * Out of personal interest, I try to do everything with local models and tools where possible and try to not use openai etc.
+ * Also due to personal interest I opted for chainlit because I really want to try it out - sorry ;-)
+ * in general, I did take the opportunity to try out some things... I hope that is ok (e.g. pyright strict mode, uv,...)
  * It is OK to hardcode a certain provider/model
  * There are no special privacy requirements (e.g. using hosted llm is fine)
  * This is not about client/server vs desktop/local app, I can choose freely (will probably choose local cli app)
- * There are no special UX or Auth requirements, it is fine to do a username/password to identify the user for our external service
+ * There are no special UX or Auth requirements, it is fine to do a username/password "inline" to identify the user for our external service - I think that env variables would be not very realistic. Of course one could also do a global login - in reality we might want a global auth against a SSO service, but I thought that the two-step tool call might be more interesting and that there might be real usecases for this, too (external systems that do not integrate with SSO).
+ 
 
+---
+Decisions
+ * Multimodal is achieved with document content extraction approach instead of shared embeddings. Reason: it is said to be more reliable
+ * For a real project I would discuss hexagonal (ports & adapters) architecture with colleagues, but I think this is too small for all the ceremony, lets just go with interfaces/protocols to avoid tight coupling
 
 --- 
 Future Improvements
@@ -41,3 +49,28 @@ Future Improvements
  * evaluate and improve accuracy
  * automated tests / CI Pipeline for evaluations (CircleCI)
  * implement advanced RAG retrieval methods
+
+---
+Tech Stack:
+
+* gradio for UI
+* First version: lets see how far we can go with privacy-friendly local solutions
+  * haystack with LLM Document Content Extractor for multimodal
+  * qdrant (faster than chromadb)
+  * ollama
+  * Llama-3.2-Vision
+  * Llama-3.1
+
+--- 
+Soft Requirements:
+ * README shall be well documented, shall contain steps like the instruction on how to start the qdrant docker container etc., to make it easy to play with this.
+
+---
+ Steps:
+
+ 1. pyenv or what to use best nowadays for managing python installation, dependency management etc?
+ 2. basic chatbot that talks to some LLM
+ 3. add toolcalling for external service call (simulate an external "vacation days left" service) with pydantic
+ 4. add RAG ingestion of text documents  (txt, markdown)
+ 5. wire up the RAG with the chatbot
+ 6. add RAG ingestion of pdf documents
