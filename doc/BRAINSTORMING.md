@@ -23,6 +23,7 @@ Research Topics
 ---
 Assumptions
  * It is OK to use RAG/LLM services
+ * It is OK to use "modern" python (3.12) and its features (types!)
  * Out of personal interest, I try to do everything with local models and tools where possible and try to not use openai etc.
  * Also due to personal interest I opted for chainlit because I really want to try it out - sorry ;-)
  * in general, I did take the opportunity to try out some things... I hope that is ok (e.g. pyright strict mode, uv,...)
@@ -30,6 +31,7 @@ Assumptions
  * There are no special privacy requirements (e.g. using hosted llm is fine)
  * This is not about client/server vs desktop/local app, I can choose freely (will probably choose local cli app)
  * There are no special UX or Auth requirements, it is fine to do a username/password "inline" to identify the user for our external service - I think that env variables would be not very realistic. Of course one could also do a global login - in reality we might want a global auth against a SSO service, but I thought that the two-step tool call might be more interesting and that there might be real usecases for this, too (external systems that do not integrate with SSO).
+ * The auth for the vacation days service does not properly hide the password - in a real implementation we would have to discuss other options, but I understood that the UI is no focus anyways...
  
 
 ---

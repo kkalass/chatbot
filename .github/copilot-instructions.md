@@ -9,7 +9,7 @@ See [doc/03-architecture.md](../doc/03-architecture.md) for component boundaries
 - Modules: `src/ui`, `src/app`, `src/retrieval`, `src/ingestion`, `src/tools`, `src/config`
 - Core orchestration must not import infrastructure directly — use `Protocol`-based interfaces at retrieval and tool adapter boundaries
 - Dependencies injected via constructor parameters; composition in a factory function at startup
-- Auth credentials are session-scoped only (`cl.user_session`); never from env per-user, never from model output
+- Auth credentials are session-scoped only (objects created in `on_chat_start`); never from env per-user, never from model output
 
 ## Build and Test
 ```

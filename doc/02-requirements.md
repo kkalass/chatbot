@@ -21,14 +21,16 @@
 ### FR-04 Tool Calling
 - The system shall expose exactly one typed tool in MVP: vacation days lookup.
 - The tool input/output schema shall be defined with Pydantic models.
-- The chatbot shall call the tool only when user intent matches tool semantics.
-- The chatbot shall implement a two-stage execution for auth-protected tools: intent detection/precheck, then tool execution after auth context is available.
+- The LLM shall decide when to invoke a tool based on its declared schema and description; the orchestrator must not apply keyword heuristics or classify intent itself.
+- The orchestrator shall run an agentic loop: send message history + tool schemas to the LLM, execute any returned `tool_calls`, append results to history, and repeat until the LLM produces a plain-text response.
+- Tool implementations must not import UI or infrastructure modules; all session-specific dependencies (such as the `ask_user` callable) are injected at construction time.
 
 ### FR-05 Authentication for External Service Simulation
 - The external service simulation shall require simple username/password identity context at tool-call time.
 - The system shall support session-scoped credentials for the external service without requiring global Chainlit UI login in MVP.
-- The orchestrator shall inject auth context from server-side session state into the tool adapter and must not rely on model-generated credentials.
-- Failed authentication shall be surfaced as a user-safe error message.
+- The vacation-days tool shall use a dedicated session-scoped username/password auth collaborator; it receives an `ask_user` callable at construction time, collects credentials on first use, caches them as instance state, and clears them on authentication failure.
+- Credentials must never be passed as LLM-generated tool arguments; they are managed exclusively by the tool's injected auth collaborator via its own instance state (the auth object is constructed once per session in `on_chat_start`).
+- Failed authentication shall be surfaced as a user-safe error message returned by the tool to the LLM.
 - Optional app-level Chainlit authentication is out of scope for MVP and may be added later.
 
 ### FR-06 Developer Operations

@@ -24,6 +24,7 @@ Implement **${input:phase}** of the RAG chatbot project as defined in [doc/05-de
 ## Hard Rules
 - Never deviate from the agreed architecture or requirements. If something seems infeasible or ambiguous, **stop and ask** before proceeding.
 - Never make trade-off decisions autonomously — present them and wait for explicit approval.
+- We favour clean design over "small diff" or "small amount of files" etc.
 - Never import infrastructure directly in orchestration code — always go through Protocol interfaces.
 - Never use `logging.getLogger()` — always `structlog.get_logger()`.
 - The codebase must pass `pyright` and `ruff check` after every task — do not defer fixes.

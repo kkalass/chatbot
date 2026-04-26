@@ -13,9 +13,18 @@ The application is a locally-run RAG chatbot with explicit separation of concern
 - Ingestion Layer
   - File discovery, content extraction (multi-modal), chunking, embedding, indexing.
 - Tool Integration Layer
-  - Typed tool interface (Pydantic models), authentication/context handling, adapter to external service simulation.
+  - `Tool` Protocol: each tool exposes a `schema: ToolSchema` field (name, description, parameters JSON Schema) and an `execute(args)` coroutine that returns a `dict[str, Any]`.  The orchestrator serialises this to JSON before appending it to message history.
+  - `VacationDaysAuth`: a service-local Protocol used by `VacationDaysTool`. The default implementation is `InteractiveVacationDaysAuthSession`, which receives an `ask_user: AskUser` callable at construction time. On first call it collects one username/password pair from the user, caches it as instance state, and returns it. On adapter rejection it clears the cache so the next call re-collects.
+  - Service adapters (e.g. `SimulatedVacationDaysAdapter`) are wrapped by tool classes; the orchestrator and the LLM never import adapters directly.
 - Model Runtime
   - Ollama-hosted local models for generation and extraction support.
+
+## Binding Points
+- Binding points are documented at consumer boundaries (tool constructor and composition root), not via mandatory nominal inheritance on implementation classes.
+- Vacation-days wiring in `on_chat_start`:
+  - `SimulatedVacationDaysAdapter` is bound to `VacationDaysService`.
+  - `InteractiveVacationDaysAuthSession` is bound to `VacationDaysAuth`.
+- This keeps Protocol usage structural (PEP 544) while making runtime wiring explicit and discoverable.
 
 ## Data Flow
 1. Ingestion flow:
@@ -25,11 +34,11 @@ The application is a locally-run RAG chatbot with explicit separation of concern
    - Generate embeddings and upsert vectors to Qdrant.
 2. Query flow:
    - User message arrives via Chainlit.
-   - Orchestrator classifies whether tool call is needed.
-   - For knowledge queries: retrieve top-k chunks from Qdrant.
-   - Build grounded prompt with retrieved evidence and policy instructions.
-   - Generate answer via LLM and return with citations.
-   - For tool-eligible queries: invoke typed tool and merge result into response.
+   - Orchestrator sends message history and registered tool schemas to the LLM.
+   - LLM either responds with text (streamed to user) or with one or more `tool_calls`.
+   - For each `tool_call`, the orchestrator records the assistant tool-call request in history, then looks up the tool by name, calls `tool.execute(args)`, serialises the returned `dict` to JSON, and appends it to message history as a `role="tool"` message.
+   - Loop continues until the LLM produces a text response with no pending tool calls.
+   - For knowledge queries (Phase 3+): retrieval is integrated as additional context before generation.
 
 ## Authentication Flows (MVP)
 - The Chainlit UI is accessible without mandatory global app-level login in MVP.
@@ -39,15 +48,20 @@ The application is a locally-run RAG chatbot with explicit separation of concern
 - Optional app-level Chainlit authentication can be added later as a separate access-control concern.
 
 ## Auth-Protected Tool Sequence (MVP)
-1. The orchestrator detects that a user request requires the vacation-days tool.
-2. The orchestrator checks server-side session state for valid external-service credentials.
-3. If credentials are missing, the chat flow requests username/password and stores them in session scope.
-4. The orchestrator resumes the pending intent and invokes the tool adapter.
-5. The tool adapter receives typed auth context as explicit function parameters from the orchestrator.
-6. The external service is called, and the structured result is merged into the final assistant response.
+Credential collection is handled inside the tool via `VacationDaysAuth` — the LLM is not involved in the auth flow.
 
-Implementation rule:
-- Credentials must never be sourced from model-generated tool arguments or retrieval context; only orchestrator-managed session state is allowed.
+1. LLM calls `get_vacation_days(year=...)` — no credentials in arguments.
+2. `VacationDaysTool.execute` delegates to `VacationDaysAuth.get_credentials()`.
+3. `InteractiveVacationDaysAuthSession` checks its internal cached credentials field:
+   - If present: returns cached credentials immediately.
+   - If absent: calls the injected `ask_user(...)` callable twice (username, then password), caches the pair, and returns them. If the user cancels either prompt, returns `None` and the tool returns a user-safe cancellation message to the LLM.
+4. The tool calls the service adapter with the credentials.
+5. On `ToolAuthenticationError`: `VacationDaysAuth.clear_credentials()` resets the cache and the tool returns a user-safe auth-failure string to the LLM. The LLM informs the user; on the next vacation-days request the collection path runs again.
+
+Implementation rules:
+- Credentials must never be sourced from model-generated tool arguments or retrieval context; they are managed exclusively by the injected `VacationDaysAuth` implementation via its `ask_user` callable and internal cache.
+- Tools must not import `chainlit` or any UI module directly; all UI interaction is mediated through the `ask_user: AskUser` callable injected at construction time.
+- The auth collaborator is not a tool and is never registered in the tool list exposed to the LLM.
 
 ## Key Design Decisions
 - UI is Chainlit-first for chat-focused UX and rapid conversational iteration.
@@ -62,6 +76,13 @@ Implementation rule:
 - src/retrieval/
 - src/ingestion/
 - src/tools/
+  - Each tool that requires a service adapter is a sub-package: `src/tools/<name>/` with
+    `service.py` (service Protocols, boundary request/response models, and service-level domain errors),
+    `adapter.py` (concrete adapter implementation),
+    `auth.py` (service-local auth Protocol and implementation, when needed),
+    `tool.py` (Tool implementation), and
+    `__init__.py` (re-exports the public surface used by the composition root).
+  - Simple tools with no adapter may be a single `src/tools/<name>.py` file.
 - src/config/
 - tests/unit/
 - tests/integration/

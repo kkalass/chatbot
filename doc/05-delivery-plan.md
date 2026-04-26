@@ -24,9 +24,12 @@
 - Validate end-to-end local chat loop.
 
 ## Phase 2: Tool Calling
-- Implement typed vacation-days tool with Pydantic schemas.
-- Add authentication context handling (username/password for simulation).
-- Add unit tests for tool routing and schema validation.
+- Implement `Tool` Protocol and `ToolSchema` dataclass as the typed boundary between the orchestrator and tools.
+- Implement agentic tool loop in the orchestrator: send tool schemas to the LLM, execute returned `tool_calls` by dispatching to the registered tool by name, loop until plain-text response.
+- Implement `VacationDaysAuth` and `InteractiveVacationDaysAuthSession`: receive `ask_user: AskUser` at construction, collect one username/password pair on first use, cache it as instance state, and clear it on auth failure.
+- Implement typed vacation-days tool with Pydantic schemas; delegates auth to `VacationDaysAuth`.
+- Wire all session-scoped dependencies (model, tools, vacation-days auth session) in `app.py` `on_chat_start`; inject `ask_user` wrapper there as the single Chainlit seam.
+- Add unit tests for vacation-days auth, tool execution paths, and agentic loop behaviour.
 
 ## Phase 3: Text RAG
 - Implement ingestion for txt/md.
@@ -67,6 +70,7 @@
 - Trade-off decisions are never the agent's call to make autonomously; all trade-offs require explicit human approval.
 - Agents must not rationalize deviations as "acceptable" — that is the human's judgment to make.
 - Agreed design decisions are intentional and coordinated; apparent conflicts between pieces are a signal to discuss, not to "fix" silently.
+- We favour clean design over "small diff" or "small amount of files" etc. 
 
 ## Path to Production Readiness
 The following concerns are explicitly out of MVP scope but represent the known gap between the learning/demo build and a production-grade deployment. Documenting them here avoids surprises later.

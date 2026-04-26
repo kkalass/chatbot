@@ -157,5 +157,6 @@ Module boundaries use `Protocol`-based interfaces — orchestration code never i
 - **Local model quality variance**: Answer quality depends on the Ollama model chosen. Model pinning and benchmark-based acceptance gates mitigate regressions.
 - **PDF extraction quality**: Complex layouts (tables, columns) may degrade extraction fidelity, which directly affects retrieval quality.
 - **No production IAM**: Auth is simulated via username/password at tool-call time. Session-scoped only; no OAuth2/OIDC integration.
+- **Password visible in chat**: Chainlit's `AskUserMessage` only supports plain-text input (`AskSpec.type = "text"`); there is no masked/password input in the current API. The user's password is therefore visible as plain text in the chat transcript. Resolution requires either a Chainlit custom element or a future API addition.
 - **Prompt injection**: Partially mitigated via source-grounded answering and instruction policy. Full red-teaming is post-MVP.
 - **No dynamic document upload**: Corpus changes require a CLI re-index. End-user upload is out of MVP scope.

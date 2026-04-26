@@ -27,8 +27,9 @@ Create a small but representative benchmark set:
 - Retrieval filtering and ranking behavior.
 - Prompt assembly with source context.
 - Tool input/output validation with Pydantic.
-- Tool invocation gating logic (intent-based routing).
-- Orchestrator decision flow (RAG vs. tool-call branching, auth-precheck).
+- `InteractiveVacationDaysAuthSession`: cache-hit path, first-use collection path (via fake `ask_user` callable), cancellation path, clear-on-auth-failure path.
+- `VacationDaysTool`: happy path (credentials present), auth-failure path, cancellation path.
+- Orchestrator agentic loop: single tool call round-trip, multi-tool sequence, loop termination on plain-text response.
 
 ### Integration Tests
 - Ingest fixture corpus and query known facts.
