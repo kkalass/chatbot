@@ -7,9 +7,9 @@ session-specific dependencies are injected at construction time.
 import structlog
 from pydantic import ValidationError
 
-from src.app.protocols import JsonObject, ToolSchema
-from src.tools.vacation_days.auth import VacationDaysAuth
-from src.tools.vacation_days.service import (
+from src.chatbot.app.protocols import JsonObject, ToolContext, ToolEvent, ToolSchema
+from src.chatbot.tools.vacation_days.auth import VacationDaysAuth
+from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
     VacationDaysInput,
     VacationDaysService,
@@ -56,16 +56,18 @@ class VacationDaysTool:
             parameters_schema=VacationDaysInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
 
-    async def execute(self, args: JsonObject) -> JsonObject:
+    async def execute(
+        self, args: JsonObject, context: ToolContext
+    ) -> tuple[JsonObject, list[ToolEvent]]:
         """Validate *args*, collect credentials if needed, and call the adapter."""
         try:
             tool_input = VacationDaysInput.model_validate(args)
         except ValidationError as exc:
-            return {"error": f"Invalid arguments: {exc}"}
+            return {"error": f"Invalid arguments: {exc}"}, []
 
         credentials = await self._auth.get_credentials()
         if credentials is None:
-            return {"error": "Credential collection was canceled by the user."}
+            return {"error": "Credential collection was canceled by the user."}, []
 
         try:
             result = await self._service.get_vacation_days(
@@ -81,7 +83,7 @@ class VacationDaysTool:
                     "Authentication failed. The stored credentials were cleared. "
                     "Please try again — you will be prompted for your credentials."
                 )
-            }
+            }, []
 
         logger.info("tool.success", username=credentials.username, year=tool_input.year)
-        return result.model_dump()
+        return result.model_dump(), []

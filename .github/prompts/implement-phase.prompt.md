@@ -28,3 +28,4 @@ Implement **${input:phase}** of the RAG chatbot project as defined in [doc/05-de
 - Never import infrastructure directly in orchestration code — always go through Protocol interfaces.
 - Never use `logging.getLogger()` — always `structlog.get_logger()`.
 - The codebase must pass `pyright` and `ruff check` after every task — do not defer fixes.
+- **Never add backward-compatibility shims, legacy parameters, or adapter layers to preserve old call sites.** When an interface changes, update every call site — including tests — to use the new interface directly. Backward compatibility is never an acceptable substitute for fixing callers.

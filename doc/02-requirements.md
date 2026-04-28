@@ -8,21 +8,32 @@
 - The system shall persist conversation context for the active session.
 
 ### FR-02 Retrieval-Augmented Generation
-- The system shall retrieve relevant chunks from indexed content for each question.
-- The system shall include source references in responses.
+- The system shall retrieve relevant chunks from indexed content by exposing retrieval as a tool (`search_documents`) that the LLM invokes with its own query formulation.
+- The LLM shall explicitly declare which sources it used by calling the `cite_sources` tool with the referenced filenames.
+- `cite_sources` validates declared filenames against the `search_documents` results present in the conversation history and emits a `SourceCitationEvent` carrying only the validated `SourceChunk` objects.
+- If the LLM does not call `cite_sources` in its primary response **and** the full conversation history contains at least one `search_documents` tool-result, the orchestrator shall re-run the same agentic loop code with only `cite_sources` registered as a tool (text output discarded) to collect citations. If no `search_documents`-result exists in history, the citation pass is skipped entirely.
+- If the model returns no citations after the fallback call, no sources shall be displayed — this is not an error (the answer may have been derived from a non-RAG tool call). The system shall not fabricate or guess cited sources.
+- The system prompt shall instruct the model to restrict answers to information available from tools and retrieved documents, and to express uncertainty when evidence is insufficient rather than drawing on parametric knowledge.
 - The system shall use a retrieval strategy configurable via constants/env for top-k and similarity threshold.
 
 ### FR-03 Multi-Modal Ingestion
 - The system shall ingest txt, md, and pdf files from a configured corpus path.
-- The system shall extract content via a document content extraction approach for robust multi-modal handling.
-- The system shall chunk, embed, and index extracted content into Qdrant.
+- The system shall route files to type-specific converters (at minimum: txt -> text converter, md -> markdown converter).
+- The system shall support document-character-aware chunking strategies instead of enforcing one splitter for all inputs.
+- The system shall use an injected embedder boundary for ingestion, not a hard dependency on a single provider implementation.
+- The system shall process ingestion in bounded micro-batches to avoid unbounded in-memory growth.
+- The system shall preserve metadata continuity across converter -> splitter -> embedder -> writer so citation metadata is available at retrieval time.
+- The system shall support sidecar metadata files (`<document>.meta.json`): sidecar files themselves must not be ingested as standalone documents; their fields must be merged into the corresponding document metadata.
 - The system shall support re-ingestion without creating uncontrolled duplicate vectors.
 
 ### FR-04 Tool Calling
-- The system shall expose exactly one typed tool in MVP: vacation days lookup.
-- The tool input/output schema shall be defined with Pydantic models.
+- The system shall expose typed tools in MVP: vacation days lookup, document retrieval (`search_documents`), and citation declaration (`cite_sources`).
+- All tool input/output schemas shall be defined with Pydantic models.
 - The LLM shall decide when to invoke a tool based on its declared schema and description; the orchestrator must not apply keyword heuristics or classify intent itself.
-- The orchestrator shall run an agentic loop: send message history + tool schemas to the LLM, execute any returned `tool_calls`, append results to history, and repeat until the LLM produces a plain-text response.
+- The orchestrator shall run an agentic loop: send message history + tool schemas to the LLM, execute any returned `tool_calls`, append `role="tool"` results to history, and repeat until the LLM produces a plain-text response.
+- `Tool.execute` shall accept a `ToolContext` (containing a read-only snapshot of the current conversation history) and return a `tuple[JsonObject, list[ToolEvent]]`. The `JsonObject` is serialised into history as the `role="tool"` result; the `ToolEvent` list is yielded into the outer `process_message` stream after the tool result is recorded. Most tools return an empty event list.
+- `cite_sources` is a regular tool: its `JsonObject` result (containing validated and unvalidated sources) is appended to history like any other tool, and it emits a `SourceCitationEvent` in its `ToolEvent` list for the UI to render.
+- `ToolContext` provides a read-only history snapshot; tools must not mutate it.
 - Tool implementations must not import UI or infrastructure modules; all session-specific dependencies (such as the `ask_user` callable) are injected at construction time.
 
 ### FR-05 Authentication for External Service Simulation
@@ -48,6 +59,7 @@
 ### NFR-02 Performance
 - p95 response time target: <= 10s for normal local queries.
 - Ingestion should process at least 100 medium-sized docs without manual intervention.
+- Ingestion shall use bounded-memory processing (micro-batches) so peak RAM grows with batch size, not total corpus size.
 
 ### NFR-03 Maintainability
 - Core concerns shall be separated into modules:
@@ -57,6 +69,8 @@
   - ingestion,
   - tool integrations.
 - Typed boundaries shall be used between modules.
+- Ingestion boundaries shall separate conversion routing, splitting strategy selection, embedding, and persistence to keep each stage independently replaceable and testable.
+- All prompts shall be centralised in `src/chatbot/app/prompts.py` as a `@dataclass(frozen=True) class Prompts`. Plain prompts are `str` fields; parameterised prompts are `Callable[..., str]` fields. A module-level `DEFAULT_PROMPTS` constant provides the production defaults. The orchestrator receives a `Prompts` instance via constructor injection; callers may supply a customised instance via `dataclasses.replace(DEFAULT_PROMPTS, field=value)` — no subclassing required.
 
 ### NFR-04 Testability
 - Unit tests are required for retrieval orchestration and tool-calling decision logic.
@@ -92,4 +106,6 @@
 - Given a known answer in corpus, the bot returns an answer with relevant citations.
 - Given no relevant corpus evidence, the bot states uncertainty and does not fabricate references.
 - Given a vacation-days query, the bot performs the typed tool call and returns structured result.
+- Given a mixed txt/md corpus, ingestion uses type-specific converters and completes successfully.
+- Given a document with `<document>.meta.json`, retrieved chunks include sidecar metadata fields required for citation rendering.
 - CI test suite passes on a fresh environment setup.

@@ -7,7 +7,7 @@ def generate_readme(directory: str = ".") -> None:
     Scans the given directory for .meta.json sidecar files and generates a README.md.
     """
     readme_path = os.path.join(directory, "README.md")
-    
+
     # Static header for the README
     content = [
         "# Corpus: AI and the Labor Market",
@@ -30,7 +30,7 @@ def generate_readme(directory: str = ".") -> None:
         "",
         "## Document Overview",
         "All documents are included in their original, unmodified form under their respective Open Access or Creative Commons licenses.",
-        ""
+        "",
     ]
 
     # Find all .meta.json sidecar files, sort them alphabetically
@@ -38,23 +38,23 @@ def generate_readme(directory: str = ".") -> None:
 
     if not files:
         content.append("*No metadata files found in this directory.*")
-    
+
     # Parse each JSON file and append its data to the README content
     for filename in files:
         filepath = os.path.join(directory, filename)
         source_filename = filename.removesuffix(".meta.json")
-        
-        with open(filepath, "r", encoding="utf-8") as f:
+
+        with open(filepath, encoding="utf-8") as f:
             try:
                 data = json.load(f)
-                
+
                 # Extract values with fallbacks
                 title = data.get("title", "Unknown Title")
                 author = data.get("author", "Unknown Author")
                 publication_date = data.get("publication_date", "")
                 license_type = data.get("license", "Unknown License")
                 source_url = data.get("source_url", "")
-                
+
                 content.append(f"### {title}")
                 content.append(f"- **File:** `{source_filename}`")
                 content.append(f"- **Author:** {author}")
@@ -63,16 +63,17 @@ def generate_readme(directory: str = ".") -> None:
                 content.append(f"- **License:** {license_type}")
                 if source_url:
                     content.append(f"- **Source:** [Link]({source_url})")
-                content.append("") # Add a blank line for spacing
-                
+                content.append("")  # Add a blank line for spacing
+
             except json.JSONDecodeError:
                 print(f"Warning: Could not read valid JSON from {filename}")
 
     # Write the assembled content to README.md
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(content))
-        
+
     print(f"Successfully generated {readme_path} containing {len(files)} documents.")
+
 
 if __name__ == "__main__":
     generate_readme()

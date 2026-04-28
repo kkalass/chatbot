@@ -19,6 +19,7 @@ Deliver an assistant that runs on local infrastructure and can:
 - Local model runtime via Ollama.
 - RAG over txt, md, and pdf documents.
 - Multi-modal ingestion via document content extraction.
+- Type-specific ingestion conversion (txt/text, md/markdown) with sidecar metadata support (`<document>.meta.json`).
 - Vector storage in Qdrant.
 - One typed external tool call ("vacation days left" simulation) with simple username/password context.
 - Source attribution in answers.
@@ -44,5 +45,5 @@ Deliver an assistant that runs on local infrastructure and can:
 
 ## Constraints and Assumptions
 - Models and services run locally for developer experimentation, but the architecture must not prevent substitution with hosted models or cloud services later.
-- Hardcoding provider/model in MVP is acceptable.
+- Ingestion embedding must be consumed through an injected boundary so provider/runtime can be swapped without changing orchestration logic.
 - No strict regulatory privacy requirements for MVP.

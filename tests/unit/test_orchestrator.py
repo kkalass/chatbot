@@ -1,11 +1,25 @@
 """Unit tests for ChatOrchestrator — streaming chat path and agentic tool-call loop."""
 
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from dataclasses import replace
+from datetime import datetime
 
 import pytest
 
-from src.app.orchestrator import ChatOrchestrator
-from src.app.protocols import ChatMessage, ToolCallInfo, ToolSchema
+from src.chatbot.app.orchestrator import ChatOrchestrator
+from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
+from src.chatbot.app.protocols import (
+    ChatMessage,
+    JsonObject,
+    ProcessEvent,
+    PromptProfile,
+    SourceChunk,
+    SourceCitationEvent,
+    ToolCallInfo,
+    ToolContext,
+    ToolEvent,
+    ToolSchema,
+)
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -32,6 +46,7 @@ class _FakeChatModel:
         ]
         self._turn_idx = 0
         self.stream_calls: list[list[ChatMessage]] = []
+        self.stream_tools: list[list[ToolSchema] | None] = []
 
     def stream(
         self,
@@ -39,6 +54,7 @@ class _FakeChatModel:
         tools: Sequence[ToolSchema] | None = None,
     ) -> AsyncIterator[str | list[ToolCallInfo]]:
         self.stream_calls.append(list(messages))
+        self.stream_tools.append(list(tools) if tools is not None else None)
         idx = min(self._turn_idx, len(self.turns) - 1)
         self._turn_idx += 1
         chunks, tool_calls = self.turns[idx]
@@ -59,29 +75,90 @@ class _FakeChatModel:
 
 
 class _FakeTool:
-    def __init__(self, name: str, result: dict[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        result: dict[str, object] | None = None,
+        events: list[ToolEvent] | None = None,
+    ) -> None:
         self.schema = ToolSchema(
             name=name,
             description="A fake tool",
             parameters_schema={"type": "object", "properties": {}},
         )
         self.result: dict[str, object] = result if result is not None else {"output": "tool_result"}
+        self.events: list[ToolEvent] = events or []
         self.calls: list[dict[str, object]] = []
+        self.contexts: list[ToolContext] = []
 
-    async def execute(self, args: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self, args: dict[str, object], context: ToolContext
+    ) -> tuple[dict[str, object], list[ToolEvent]]:
         self.calls.append(dict(args))
-        return self.result
+        self.contexts.append(context)
+        return self.result, list(self.events)
 
 
-async def _collect(stream: AsyncIterator[str]) -> str:
-    return "".join([chunk async for chunk in stream])
+class _IdentityPromptProfile(PromptProfile):
+    def adjust_prompts(self, prompts: Prompts) -> Prompts:
+        return prompts
+
+    def adjust_tool_description(self, tool_name: str, description: str) -> str:
+        return description
+
+    def adjust_parameter_schema(self, tool_name: str, schema: JsonObject) -> JsonObject:
+        return schema
+
+
+class _FixedPromptsProfile(_IdentityPromptProfile):
+    def __init__(self, prompts: Prompts) -> None:
+        self._prompts = prompts
+
+    def adjust_prompts(self, prompts: Prompts) -> Prompts:
+        return self._prompts
+
+
+class _CountingToolProfile(_IdentityPromptProfile):
+    def __init__(self) -> None:
+        self.description_calls = 0
+        self.schema_calls = 0
+
+    def adjust_tool_description(self, tool_name: str, description: str) -> str:
+        self.description_calls += 1
+        return f"adapted: {description}"
+
+    def adjust_parameter_schema(self, tool_name: str, schema: JsonObject) -> JsonObject:
+        self.schema_calls += 1
+        return {
+            **schema,
+            "x-profile": "counting",
+        }
+
+
+async def _collect(stream: AsyncIterator[ProcessEvent]) -> str:
+    parts: list[str] = []
+    async for event in stream:
+        if isinstance(event, str):
+            parts.append(event)
+    return "".join(parts)
+
+
+async def _collect_all(stream: AsyncIterator[ProcessEvent]) -> tuple[str, list[ToolEvent]]:
+    text_parts: list[str] = []
+    tool_events: list[ToolEvent] = []
+    async for event in stream:
+        if isinstance(event, str):
+            text_parts.append(event)
+        else:
+            tool_events.append(event)
+    return "".join(text_parts), tool_events
 
 
 class TestChatOrchestratorStreaming:
     @pytest.mark.asyncio
     async def test_yields_model_chunks(self) -> None:
         model = _FakeChatModel(turns=[(["Hello", ", ", "world!"], [])])
-        orchestrator = ChatOrchestrator(model)
+        orchestrator = ChatOrchestrator(model, prompt_profile=_IdentityPromptProfile())
 
         stream = orchestrator.process_message("Hi")
         assert await _collect(stream) == "Hello, world!"
@@ -89,7 +166,7 @@ class TestChatOrchestratorStreaming:
     @pytest.mark.asyncio
     async def test_stream_called_once_per_message(self) -> None:
         model = _FakeChatModel(turns=[(["ok"], [])])
-        orchestrator = ChatOrchestrator(model)
+        orchestrator = ChatOrchestrator(model, prompt_profile=_IdentityPromptProfile())
 
         stream = orchestrator.process_message("Hi")
         await _collect(stream)
@@ -99,7 +176,7 @@ class TestChatOrchestratorStreaming:
     @pytest.mark.asyncio
     async def test_user_message_appended_to_history(self) -> None:
         model = _FakeChatModel(turns=[(["ok"], [])])
-        orchestrator = ChatOrchestrator(model)
+        orchestrator = ChatOrchestrator(model, prompt_profile=_IdentityPromptProfile())
 
         stream = orchestrator.process_message("Test question")
         await _collect(stream)
@@ -110,7 +187,7 @@ class TestChatOrchestratorStreaming:
     @pytest.mark.asyncio
     async def test_assistant_reply_recorded_in_history(self) -> None:
         model = _FakeChatModel(turns=[(["chunk1", "chunk2"], []), (["second reply"], [])])
-        orchestrator = ChatOrchestrator(model)
+        orchestrator = ChatOrchestrator(model, prompt_profile=_IdentityPromptProfile())
 
         stream = orchestrator.process_message("question")
         await _collect(stream)
@@ -126,7 +203,15 @@ class TestChatOrchestratorStreaming:
     async def test_system_prompt_is_first_message(self) -> None:
         model = _FakeChatModel(turns=[(["response"], [])])
         system = "You are a test bot."
-        orchestrator = ChatOrchestrator(model, system_prompt=system)
+
+        def _fixed_prompt(_dt: datetime) -> str:
+            return system
+
+        prompts = replace(DEFAULT_PROMPTS, system_prompt=_fixed_prompt)
+        orchestrator = ChatOrchestrator(
+            model,
+            prompt_profile=_FixedPromptsProfile(prompts),
+        )
 
         stream = orchestrator.process_message("hi")
         await _collect(stream)
@@ -138,7 +223,7 @@ class TestChatOrchestratorStreaming:
     @pytest.mark.asyncio
     async def test_history_grows_across_turns(self) -> None:
         model = _FakeChatModel(turns=[(["reply"], []), (["second reply"], [])])
-        orchestrator = ChatOrchestrator(model)
+        orchestrator = ChatOrchestrator(model, prompt_profile=_IdentityPromptProfile())
 
         stream1 = orchestrator.process_message("turn 1")
         await _collect(stream1)
@@ -151,7 +236,7 @@ class TestChatOrchestratorStreaming:
     @pytest.mark.asyncio
     async def test_empty_response_handled(self) -> None:
         model = _FakeChatModel(turns=[([], [])])
-        orchestrator = ChatOrchestrator(model)
+        orchestrator = ChatOrchestrator(model, prompt_profile=_IdentityPromptProfile())
 
         stream = orchestrator.process_message("silence")
         assert await _collect(stream) == ""
@@ -167,12 +252,34 @@ class TestChatOrchestratorAgenticLoop:
     async def test_stream_called_when_tools_configured(self) -> None:
         model = _FakeChatModel(turns=[(["response text"], [])])
         tool = _FakeTool("my_tool")
-        orchestrator = ChatOrchestrator(model, tools=[tool])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
 
         stream = orchestrator.process_message("hi")
         await _collect(stream)
 
         assert len(model.stream_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_schema_adaptation_happens_once_at_construction(self) -> None:
+        tool = _FakeTool("get_data")
+        tc = ToolCallInfo(name="get_data", arguments={})
+        model = _FakeChatModel(turns=[([], [tc]), (["Done."], [])])
+        profile = _CountingToolProfile()
+        orchestrator = ChatOrchestrator(model, tools=[tool], prompt_profile=profile)
+
+        await _collect(orchestrator.process_message("ask"))
+
+        assert profile.description_calls == 1
+        assert profile.schema_calls == 1
+        assert model.stream_tools[0] is not None
+        first_tools = model.stream_tools[0]
+        assert first_tools is not None
+        assert first_tools[0].description == "adapted: A fake tool"
+        assert first_tools[0].parameters_schema["x-profile"] == "counting"
 
     @pytest.mark.asyncio
     async def test_executes_tool_call_and_yields_final_text(self) -> None:
@@ -184,7 +291,11 @@ class TestChatOrchestratorAgenticLoop:
                 (["Here is 42!"], []),  # round 2: final text response
             ]
         )
-        orchestrator = ChatOrchestrator(model, tools=[tool])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
 
         stream = orchestrator.process_message("give me data")
         result = await _collect(stream)
@@ -202,7 +313,11 @@ class TestChatOrchestratorAgenticLoop:
                 (["Done!"], []),
             ]
         )
-        orchestrator = ChatOrchestrator(model, tools=[tool])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
 
         stream = orchestrator.process_message("query")
         await _collect(stream)
@@ -225,7 +340,11 @@ class TestChatOrchestratorAgenticLoop:
             ]
         )
         known_tool = _FakeTool("known_tool")
-        orchestrator = ChatOrchestrator(model, tools=[known_tool])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[known_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
 
         stream = orchestrator.process_message("trigger unknown")
         result = await _collect(stream)
@@ -238,7 +357,11 @@ class TestChatOrchestratorAgenticLoop:
         model = _FakeChatModel(
             turns=[([], [tc]), (["Final answer."], [])],
         )
-        orchestrator = ChatOrchestrator(model, tools=[tool])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
 
         stream = orchestrator.process_message("ask")
         await _collect(stream)
@@ -254,7 +377,11 @@ class TestChatOrchestratorAgenticLoop:
         model = _FakeChatModel(
             turns=[([], [tc]), (["Done."], [])],
         )
-        orchestrator = ChatOrchestrator(model, tools=[tool])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
 
         stream = orchestrator.process_message("ask")
         await _collect(stream)
@@ -264,3 +391,181 @@ class TestChatOrchestratorAgenticLoop:
         assistant_msgs = [m for m in history if m.role == "assistant" and m.tool_calls]
         assert len(assistant_msgs) == 1
         assert assistant_msgs[0].tool_calls == (tc,)
+
+    @pytest.mark.asyncio
+    async def test_tool_events_yielded_in_stream(self) -> None:
+        chunk = SourceChunk(content="text", source="a.txt", score=0.9, chunk_id="1")
+        citation_event = SourceCitationEvent(validated=(chunk,))
+        tool = _FakeTool("get_data", result={"ok": True}, events=[citation_event])
+        tc = ToolCallInfo(name="get_data", arguments={})
+        model = _FakeChatModel(turns=[([], [tc]), (["Done."], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        _, events = await _collect_all(orchestrator.process_message("ask"))
+
+        assert len(events) == 1
+        assert events[0] is citation_event
+
+    @pytest.mark.asyncio
+    async def test_context_history_snapshot_passed_to_tool(self) -> None:
+        tool = _FakeTool("my_tool")
+        tc = ToolCallInfo(name="my_tool", arguments={})
+        model = _FakeChatModel(turns=[([], [tc]), (["reply"], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        await _collect(orchestrator.process_message("hello"))
+
+        assert len(tool.contexts) == 1
+        # Context is a snapshot (tuple), not the live list.
+        assert isinstance(tool.contexts[0].history, tuple)
+        # History at dispatch time must contain at least the user message.
+        roles = [m.role for m in tool.contexts[0].history]
+        assert "user" in roles
+
+
+# ---------------------------------------------------------------------------
+# Citation pass
+# ---------------------------------------------------------------------------
+
+
+class TestCitationPass:
+    """Verify the citation pass is triggered and emits SourceCitationEvent."""
+
+    def _make_search_result_msg(self, call_id: str) -> dict[str, object]:
+        return {"chunks": [{"source": "doc.txt", "content": "some content", "score": 0.9}]}
+
+    @pytest.mark.asyncio
+    async def test_citation_pass_triggered_when_search_results_in_history(self) -> None:
+        """When search_documents was called, cite_sources pass runs and yields event."""
+        chunk = SourceChunk(content="some content", source="doc.txt", score=0.9, chunk_id="1")
+        cite_event = SourceCitationEvent(validated=(chunk,))
+
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        cite_tc = ToolCallInfo(
+            name="cite_sources",
+            arguments={"citations": [{"source": "doc.txt", "chunk_id": "1"}]},
+            call_id="c1",
+        )
+
+        search_tool = _FakeTool(
+            "search_documents",
+            result={
+                "chunks": [
+                    {
+                        "source": "doc.txt",
+                        "chunk_id": "1",
+                        "content": "some content",
+                        "score": 0.9,
+                    }
+                ]
+            },
+        )
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={
+                "validated": [{"source": "doc.txt", "chunk_id": "1"}],
+                "unvalidated": [],
+            },
+            events=[cite_event],
+        )
+
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc]),  # main loop: call search
+                (["Based on sources."], []),  # main loop: final text
+                ([], [cite_tc]),  # citation pass: call cite_sources
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("find me info"))
+
+        assert text == "Based on sources."
+        assert len(events) == 1
+        assert isinstance(events[0], SourceCitationEvent)
+        # Main loop (2 rounds) + single citation round.
+        assert len(model.stream_calls) == 3
+
+    @pytest.mark.asyncio
+    async def test_citation_pass_not_triggered_when_no_search_results(self) -> None:
+        """When no search_documents tool call occurred, citation pass is skipped."""
+        cite_tool = _FakeTool("cite_sources")
+        model = _FakeChatModel(turns=[(["plain answer"], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("hi"))
+
+        assert text == "plain answer"
+        assert events == []
+        # cite_sources must not have been called.
+        assert cite_tool.calls == []
+
+    @pytest.mark.asyncio
+    async def test_citation_pass_skipped_when_already_cited_in_main_loop(self) -> None:
+        """If cite_sources fires in main loop, citation pass does not fire again."""
+        chunk = SourceChunk(content="c", source="f.txt", score=0.9, chunk_id="1")
+        cite_event = SourceCitationEvent(validated=(chunk,))
+
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        cite_tc = ToolCallInfo(
+            name="cite_sources",
+            arguments={"citations": [{"source": "f.txt", "chunk_id": "1"}]},
+            call_id="c1",
+        )
+
+        search_tool = _FakeTool(
+            "search_documents",
+            result={
+                "chunks": [
+                    {
+                        "source": "f.txt",
+                        "chunk_id": "1",
+                        "content": "c",
+                        "score": 0.9,
+                    }
+                ]
+            },
+        )
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={
+                "validated": [{"source": "f.txt", "chunk_id": "1"}],
+                "unvalidated": [],
+            },
+            events=[cite_event],
+        )
+
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc, cite_tc]),  # main loop: both tools in one round
+                (["answer"], []),  # main loop: final text
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        _, events = await _collect_all(orchestrator.process_message("find info"))
+
+        # Only one citation event from the main-loop call — no second citation pass.
+        assert len(events) == 1
+        # cite_sources called exactly once (during main loop, not again in pass).
+        assert len(cite_tool.calls) == 1

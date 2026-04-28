@@ -43,7 +43,7 @@ class VacationDaysAuth(Protocol):
 
 
 class InteractiveVacationDaysAuthSession:
-    """Satisfies :class:`~src.tools.vacation_days.auth.VacationDaysAuth`.
+    """Satisfies :class:`~src.chatbot.tools.vacation_days.auth.VacationDaysAuth`.
 
     Collects and caches one username/password pair for the vacation-days flow.
     Concrete binding is in ``_build_vacation_days_tool`` in ``src/ui/app.py``.
@@ -78,7 +78,9 @@ class InteractiveVacationDaysAuthSession:
             logger.info("vacation_days.auth.canceled")
             return None
 
-        password = await self._ask_user("Please enter your **password** (sorry, it will not be hidden yet):")
+        password = await self._ask_user(
+            "Please enter your **password** (sorry, it will not be hidden yet):"
+        )
         if not password:
             logger.info("vacation_days.auth.canceled")
             return None

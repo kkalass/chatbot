@@ -36,11 +36,16 @@ Assumptions
 
 ---
 Decisions
+ * I am intentionally not following YAGNI strictly in places that I expect to be volatile, I already use clean structures (e.g. model dependent tool descriptions, configurable provider/model etc.) where I expect it to be necessary in the longer run, regardless of current need.
  * Multimodal is achieved with document content extraction approach instead of shared embeddings. Reason: it is said to be more reliable
- * For a real project I would discuss hexagonal (ports & adapters) architecture with colleagues, but I think this is too small for all the ceremony, lets just go with interfaces/protocols to avoid tight coupling
+ * To show how I work realistically, I did work a lot with protocols and decoupling as well as manual constructor based IOC/DI
+ * I am relying on ollama and local models
+ * RAG as a Tool - the extra LLM call should be fine with local model and the (hopefully improved) quality should be worth it
+ * For real projects, we would probably use uv workspaces and have separate chatbot and ingest packages. For simplicity, I use toplevel modules instead here.
 
 --- 
 Future Improvements
+ * Tool-call attribution in UI: emit a `ToolCallAttributionEvent` (deterministically from history, no LLM call needed) so the UI can show e.g. "via Urlaubskalender 2025" badges for answers derived from tool calls rather than documents.
  * Implement document upload
  * Make model switchable
  * Think about client/server, maybe server as docker image

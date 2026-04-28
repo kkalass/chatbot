@@ -7,7 +7,7 @@ must remain free of LLM, orchestrator, and UI imports.
 
 import structlog
 
-from src.tools.vacation_days.service import (
+from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
     VacationDaysInput,
     VacationDaysOutput,
@@ -29,7 +29,7 @@ _SIMULATED_USERS: dict[str, tuple[str, int, int]] = {
 
 
 class SimulatedVacationDaysAdapter:
-    """Satisfies :class:`~src.tools.vacation_days.service.VacationDaysService`.
+    """Satisfies :class:`~src.chatbot.tools.vacation_days.service.VacationDaysService`.
 
     Implements the vacation days lookup with hardcoded data.
     Intended for local development and demo use only.

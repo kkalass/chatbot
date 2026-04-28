@@ -63,6 +63,20 @@ class Settings(BaseSettings):
         description="Path (relative or absolute) to the directory containing source documents.",
     )
 
+    # --- Ingestion ---
+    embedding_dim: int = Field(
+        default=768,
+        description="Embedding vector dimension. Must match the output dimension of EMBEDDING_MODEL.",
+    )
+    split_length: int = Field(
+        default=200,
+        description="Number of words per ingestion chunk.",
+    )
+    split_overlap: int = Field(
+        default=20,
+        description="Word overlap between adjacent ingestion chunks.",
+    )
+
     # --- Retrieval ---
     retrieval_top_k: int = Field(
         default=5,

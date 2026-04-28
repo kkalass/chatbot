@@ -1,6 +1,6 @@
 """Unit tests for src/config/settings.py."""
 
-from src.config.settings import Settings, get_settings
+from src.settings import Settings, get_settings
 
 
 class TestSettingsDefaults:

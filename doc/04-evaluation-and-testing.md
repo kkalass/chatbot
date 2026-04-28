@@ -19,11 +19,17 @@ Create a small but representative benchmark set:
 - Unsupported claim rate (hallucination proxy).
 - Retrieval hit rate@k (does top-k include expected source).
 - Latency (p50/p95 end-to-end).
+- Ingestion throughput and peak memory usage under bounded micro-batch settings.
 
 ## Test Strategy
 
 ### Unit Tests
 - Chunking logic.
+- Converter routing by file type (txt vs md as baseline).
+- Splitter strategy selection by document character/type.
+- Metadata continuity across conversion -> splitting -> embedding -> write payload mapping.
+- Sidecar metadata semantics (`<document>.meta.json` merged into owner document, sidecar file not ingested as standalone source).
+- Embedder injection boundary behavior (ingestion orchestration independent from concrete provider implementation).
 - Retrieval filtering and ranking behavior.
 - Prompt assembly with source context.
 - Tool input/output validation with Pydantic.
@@ -33,7 +39,9 @@ Create a small but representative benchmark set:
 
 ### Integration Tests
 - Ingest fixture corpus and query known facts.
+- Ingest mixed txt/md fixture corpus and assert converter routing succeeds.
 - Verify citations are present and linked to expected docs.
+- Verify citation metadata fields originating from sidecar files are present in retrieved chunk metadata.
 - Verify uncertainty behavior when evidence is missing.
 - Verify tool-call path for vacation-days scenarios.
 
@@ -45,6 +53,7 @@ Create a small but representative benchmark set:
 - Keep a fixed evaluation set in repository.
 - Run evaluation in CI on pull requests.
 - Fail CI if correctness/citation metrics drop below threshold.
+- Add ingestion regression checks for metadata continuity and bounded-memory batch processing behavior.
 
 ## Observability Recommendations
 - Structured logs for:

@@ -26,6 +26,7 @@
 ## Phase 2: Tool Calling
 - Implement `Tool` Protocol and `ToolSchema` dataclass as the typed boundary between the orchestrator and tools.
 - Implement agentic tool loop in the orchestrator: send tool schemas to the LLM, execute returned `tool_calls` by dispatching to the registered tool by name, loop until plain-text response.
+- Introduce `src/chatbot/app/prompts.py`: `@dataclass(frozen=True) class Prompts` with `str` fields for plain prompts and `Callable[..., str]` fields for parameterised prompts; module-level `DEFAULT_PROMPTS` constant. The orchestrator derives its effective `Prompts` from `DEFAULT_PROMPTS` via an injected `PromptProfile` at construction time. All future prompts (system prompt, citation fallback message, etc.) live here only.
 - Implement `VacationDaysAuth` and `InteractiveVacationDaysAuthSession`: receive `ask_user: AskUser` at construction, collect one username/password pair on first use, cache it as instance state, and clear it on auth failure.
 - Implement typed vacation-days tool with Pydantic schemas; delegates auth to `VacationDaysAuth`.
 - Wire all session-scoped dependencies (model, tools, vacation-days auth session) in `app.py` `on_chat_start`; inject `ask_user` wrapper there as the single Chainlit seam.
@@ -35,12 +36,25 @@
 - Implement ingestion for txt/md.
 - Implement explicit CLI workflows for `reindex` and `reset` as required by FR-06.
 - Add chunking, embedding, and Qdrant indexing.
-- Integrate retrieval into chat answer generation with citations.
-- Add integration tests for grounded QA.
+- Integrate retrieval as a tool (`search_documents`) so the LLM decides when and with what query to retrieve.
+- Introduce `ToolContext` (read-only history snapshot) and change `Tool.execute` signature to `(args, context) -> tuple[JsonObject, list[ToolEvent]]`. Update all existing tools (`VacationDaysTool`, `RetrievalTool`) accordingly.
+- Introduce `ToolEvent` type alias union and `ProcessEvent = str | ToolEvent` in `src/chatbot/app/protocols.py`; add `SourceCitationEvent` as the first `ToolEvent` variant.
+- Implement `CitationTool` (`cite_sources`) as a regular tool: validates cited filenames against `search_documents` results in `ToolContext.history`, emits `SourceCitationEvent` in its `ToolEvent` list, and appends its `JsonObject` result to history.
+- Update the orchestrator to propagate `ToolEvent` items from tool execution into the `process_message` stream. After the agentic loop, trigger the fallback citation pass only if the full conversation history contains at least one `search_documents` tool-result; if so, re-run the same agentic loop code with only `cite_sources` registered as a tool, discarding text output. No citations returned after the fallback is not an error.
+- Update `process_message` to yield `ProcessEvent` (`str | ToolEvent`); update the UI to use `match`/`case` + `assert_never` and render `SourceCitationEvent` as Chainlit citation elements.
+- Add integration tests for grounded QA and citation validation.
+
+## Phase 3.5: Ingestion Architecture Hardening (Pre-PDF)
+- Introduce type-specific converter routing (minimum: txt -> text converter, md -> markdown converter).
+- Introduce splitter strategy selection by document type/character instead of a single global splitter policy.
+- Replace hard provider coupling in ingestion by an injected embedder boundary at composition time.
+- Introduce bounded micro-batch processing for ingestion by file count (RAM-bound control): `ingest` accepts iterable paths and processes them in bounded file batches; `ingest_corpus` remains the discovery wrapper that delegates to `ingest`.
+- Formalize metadata continuity contract, including sidecar merge semantics (`<document>.meta.json` is merged into the owning document and never ingested standalone).
+- Add unit and integration coverage for converter routing, splitter selection, metadata propagation, and batch behavior.
 
 ## Phase 4: PDF + Multi-Modal Extraction
-- Add pdf ingestion with extraction-first strategy.
-- Extend metadata handling (page, section if available).
+- Add pdf ingestion with extraction-first strategy on top of Phase 3.5 ingestion architecture.
+- Extend metadata handling (page, section, modality-specific provenance if available).
 - Re-run evaluation set and tune retrieval parameters.
 
 ## Phase 5: Evaluation and Hardening

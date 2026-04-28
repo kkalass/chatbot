@@ -2,7 +2,7 @@
 
 Retrieval-augmented generation chatbot running on local infrastructure using **Chainlit**, **Haystack**, **Ollama**, and **Qdrant**.
 
-Answers domain questions grounded in static company documents (txt / md / pdf) with citation-style source references. Includes a typed tool call for vacation-days lookup backed by a simple username/password simulation.
+Answers domain questions grounded in static company documents (txt / md) with citation-style source references. Includes a typed tool call for vacation-days lookup backed by a simple username/password simulation.
 
 ---
 
@@ -13,7 +13,7 @@ Answers domain questions grounded in static company documents (txt / md / pdf) w
 | Python | 3.12 | Pinned in `.python-version` |
 | [uv](https://docs.astral.sh/uv/) | latest | Sole dependency/env manager — no pip/poetry |
 | [Ollama](https://ollama.com) | latest | Runs models locally |
-| [Docker](https://www.docker.com) | latest | Used to run Qdrant |
+| Docker-compatible runtime | latest | Used to run Qdrant (Docker Desktop, Colima+Docker CLI, Podman, Rancher Desktop) |
 
 ---
 
@@ -49,6 +49,9 @@ Key variables (all have sensible defaults):
 | `CORPUS_PATH` | `corpus` | Source document directory |
 | `RETRIEVAL_TOP_K` | `5` | Chunks returned per query |
 | `RETRIEVAL_SCORE_THRESHOLD` | `0.5` | Minimum similarity score |
+| `EMBEDDING_DIM` | `768` | Embedding vector dimension — must match `EMBEDDING_MODEL` output |
+| `SPLIT_LENGTH` | `200` | Words per ingestion chunk |
+| `SPLIT_OVERLAP` | `20` | Word overlap between adjacent chunks |
 | `LOG_FORMAT` | `console` | `console` (dev) or `json` (CI/prod) |
 
 ### 3. Pull required Ollama models
@@ -64,12 +67,29 @@ ollama pull nomic-embed-text
 docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 ```
 
+macOS quick option (recommended): Colima + Docker CLI
+
+```bash
+brew install colima docker
+colima start
+docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
+```
+
+Docker Desktop is not always required. For many local-dev setups, Colima is the simplest free alternative.
+
+### Qdrant Best Practices (Short)
+
+- Keep one embedding model (and vector dimension) per collection.
+- Use deterministic point IDs (`doc_id + chunk_index`) for idempotent re-indexing.
+- Persist data with a volume in real usage (not only ephemeral container state).
+- Treat retrieval params (`top_k`, score threshold, chunk size) as evaluation-controlled settings.
+
 ---
 
 ## Running the App
 
 ```bash
-uv run chainlit run src/ui/app.py
+uv run chainlit run src/chatbot/ui/app.py
 ```
 
 Opens a chat interface at `http://localhost:8000` by default.
@@ -78,28 +98,38 @@ Opens a chat interface at `http://localhost:8000` by default.
 
 ## Ingestion
 
-Place source documents (`.txt`, `.md`, `.pdf`) in the directory configured by `CORPUS_PATH` (default: `corpus/`).
+Place source documents (`.txt`, `.md`) in the directory configured by `CORPUS_PATH` (default: `corpus/`), or use the example documents already provided in `corpus/`.
 
 ```bash
-# Index all documents in CORPUS_PATH
-uv run python -m src.ingestion.cli ingest
+# Index (or re-index) all documents in CORPUS_PATH
+uv run python -m src.ingest.cli reindex
 
-# Wipe the collection and re-index from scratch
-uv run python -m src.ingestion.cli reindex
+# Wipe the Qdrant collection and re-index from scratch
+uv run python -m src.ingest.cli reset
 
-# Drop the collection without re-indexing
-uv run python -m src.ingestion.cli reset
+# Wipe the collection only, without re-indexing
+uv run python -m src.ingest.cli reset --wipe-only
 ```
+
+`reindex` uses an OVERWRITE duplicate policy, so running it again on unchanged files is safe — it replaces stale vectors rather than creating duplicates.
 
 ---
 
 ## Running the Test Suite
 
 ```bash
+# Unit tests (no external services needed)
+uv run pytest tests/unit/
+
+# Integration tests (requires Qdrant + Ollama running)
+INTEGRATION_TESTS=1 uv run pytest tests/integration/
+
+# All tests
 uv run pytest
 ```
 
-Integration tests require Qdrant and Ollama to be running. Unit tests are self-contained.
+Integration tests are skipped automatically unless `INTEGRATION_TESTS=1` is set.  
+To run them: start Qdrant and Ollama first, then run the command above.
 
 ---
 
@@ -134,12 +164,23 @@ Runs the benchmark dataset against the live system and prints correctness, citat
 
 ```
 src/
-  config/       Typed pydantic-settings configuration (env vars)
-  ui/           Chainlit UI layer and session lifecycle
-  app/          Chat orchestrator — coordinates retrieval, tool calls, generation
-  retrieval/    Query embedding, Qdrant search, reranking, source packaging
-  ingestion/    File discovery, extraction, chunking, embedding, indexing
-  tools/        Typed tool schemas and external-service adapters
+  settings/     Shared pydantic-settings configuration (Settings + get_settings)
+  chatbot/      Chatbot application
+    app/          Orchestrator, protocols, prompts
+    ui/           Chainlit UI layer and session lifecycle
+    tools/        Typed tool schemas and external-service adapters
+    infrastructure/
+      chat/       Ollama chat model adapter
+      embeddings_text/  Query-time text embedder
+      retrieval/  Qdrant vector search adapter
+    config.py     Settings → chatbot infrastructure config converters
+  ingest/       Ingestion pipeline
+    pipeline.py   File discovery, chunking, embedding, indexing
+    cli.py        Developer CLI (reindex / reset)
+    infrastructure/
+      embeddings_document/  Document embedder (Ollama)
+      document_store/       Qdrant document store
+    config.py     Settings → ingest infrastructure config converters
 tests/
   unit/         Fast, self-contained tests for business logic
   integration/  End-to-end tests requiring live services

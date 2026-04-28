@@ -3,13 +3,18 @@
 import pytest
 from pydantic import ValidationError
 
-from src.tools.vacation_days import (
+from src.chatbot.app.protocols import ToolContext
+from src.chatbot.tools.vacation_days import (
     InteractiveVacationDaysAuthSession,
     SimulatedVacationDaysAdapter,
     VacationDaysTool,
 )
-from src.tools.vacation_days.auth import AskUser, UsernamePasswordCredentials, VacationDaysAuth
-from src.tools.vacation_days.service import (
+from src.chatbot.tools.vacation_days.auth import (
+    AskUser,
+    UsernamePasswordCredentials,
+    VacationDaysAuth,
+)
+from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
     VacationDaysInput,
     VacationDaysOutput,
@@ -278,12 +283,13 @@ class TestVacationDaysTool:
             )
         )
         tool = _make_tool(auth=auth, service=service)
-        result = await tool.execute({"year": 2025})
+        result, events = await tool.execute({"year": 2025}, ToolContext(history=()))
 
         assert result["employee_username"] == "alice"
         assert result["year"] == 2025
         assert result["total_days"] == 25
         assert result["remaining_days"] == 17
+        assert events == []
         assert auth.clear_called is False
         assert service.calls == [(VacationDaysInput(year=2025), "alice", "alice123")]
 
@@ -294,10 +300,11 @@ class TestVacationDaysTool:
         )
         service = _FakeVacationDaysService(error=ToolAuthenticationError("bad credentials"))
         tool = _make_tool(auth=auth, service=service)
-        result = await tool.execute({"year": 2025})
+        result, events = await tool.execute({"year": 2025}, ToolContext(history=()))
 
         assert "error" in result
         assert "Authentication failed" in str(result["error"])
+        assert events == []
         assert auth.clear_called is True
 
     @pytest.mark.asyncio
@@ -315,20 +322,22 @@ class TestVacationDaysTool:
             )
         )
         tool = _make_tool(auth=auth, service=service)
-        result = await tool.execute({"year": "not_an_int"})
+        result, events = await tool.execute({"year": "not_an_int"}, ToolContext(history=()))
 
         assert "error" in result
         assert "Invalid arguments" in str(result["error"])
+        assert events == []
         assert auth.get_credentials_calls == 0
         assert service.calls == []
 
     @pytest.mark.asyncio
     async def test_credential_cancellation_returns_message(self) -> None:
         tool = _make_tool(ask_responses=[None])
-        result = await tool.execute({"year": 2025})
+        result, events = await tool.execute({"year": 2025}, ToolContext(history=()))
 
         assert "error" in result
         assert "canceled" in str(result["error"]).lower()
+        assert events == []
 
     @pytest.mark.asyncio
     async def test_collects_credentials_when_not_cached(self) -> None:
@@ -342,10 +351,11 @@ class TestVacationDaysTool:
             )
         )
         tool = _make_tool(ask_responses=["alice", "alice123"], service=service)
-        result = await tool.execute({"year": 2025})
+        result, events = await tool.execute({"year": 2025}, ToolContext(history=()))
 
         assert result["employee_username"] == "alice"
         assert result["remaining_days"] == 17
+        assert events == []
 
 
 # ---------------------------------------------------------------------------

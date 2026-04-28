@@ -5,19 +5,19 @@ the tool itself, its adapter/service boundary, and the vacation-days-specific
 auth contract.
 """
 
-from src.tools.vacation_days.adapter import SimulatedVacationDaysAdapter
-from src.tools.vacation_days.auth import (
+from src.chatbot.tools.vacation_days.adapter import SimulatedVacationDaysAdapter
+from src.chatbot.tools.vacation_days.auth import (
     InteractiveVacationDaysAuthSession,
     UsernamePasswordCredentials,
     VacationDaysAuth,
 )
-from src.tools.vacation_days.service import (
+from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
     VacationDaysInput,
     VacationDaysOutput,
     VacationDaysService,
 )
-from src.tools.vacation_days.tool import VacationDaysTool
+from src.chatbot.tools.vacation_days.tool import VacationDaysTool
 
 __all__ = [
     "InteractiveVacationDaysAuthSession",
