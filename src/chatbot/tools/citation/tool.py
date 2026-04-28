@@ -11,6 +11,7 @@ from typing import cast
 
 import structlog
 from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 from pydantic import BaseModel, ValidationError
 
 from src.chatbot.app.protocols import (
@@ -135,9 +136,13 @@ class CitationTool:
             try:
                 citation_input = _CitationInput.model_validate(args)
             except ValidationError as exc:
+                error_msg = f"Invalid arguments: {exc}"
                 span.set_attribute("chat.tool.error", True)
+                span.set_attribute("chat.tool.error_message", error_msg)
                 span.set_attribute("chat.tool.arguments", to_attribute_text(args))
-                return {"error": f"Invalid arguments: {exc}"}, []
+                span.record_exception(exc)
+                span.set_status(StatusCode.ERROR, error_msg)
+                return {"error": error_msg}, []
 
             available = _collect_search_chunks(context.history)
             claimed = citation_input.citations

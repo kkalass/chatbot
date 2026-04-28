@@ -22,6 +22,7 @@ from typing import cast
 
 import structlog
 from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.prompts import DEFAULT_PROMPTS
 from src.chatbot.app.protocols import (
@@ -256,7 +257,9 @@ class ChatOrchestrator:
                                     )
                                 )
 
-                                async for event in _dispatch_tool_calls(cite_calls, history, tool_map):
+                                async for event in _dispatch_tool_calls(
+                                    cite_calls, history, tool_map
+                                ):
                                     yield event
 
                 turn_span.set_attribute("chat.citation_events", len(emitted_citation_events))
@@ -308,8 +311,11 @@ async def _dispatch(
         tool = tool_map.get(tc.name)
         if tool is None:
             logger.error("orchestrator.unknown_tool", name=tc.name)
+            error_msg = f"unknown tool '{tc.name}'"
             span.set_attribute("chat.tool.error", True)
-            return {"error": f"unknown tool '{tc.name}'"}, []
+            span.set_attribute("chat.tool.error_message", error_msg)
+            span.set_status(StatusCode.ERROR, error_msg)
+            return {"error": error_msg}, []
         try:
             result, events = await tool.execute(tc.arguments, context)
             span.set_attribute("chat.tool.result_keys", to_attribute_text(sorted(result.keys())))
@@ -321,7 +327,9 @@ async def _dispatch(
             if tc.name == _CITATION_TOOL_NAME:
                 validated = cast(object, result.get("validated"))
                 unvalidated = cast(object, result.get("unvalidated"))
-                validated_list = cast(list[object], validated) if isinstance(validated, list) else []
+                validated_list = (
+                    cast(list[object], validated) if isinstance(validated, list) else []
+                )
                 unvalidated_list = (
                     cast(list[object], unvalidated) if isinstance(unvalidated, list) else []
                 )
@@ -339,6 +347,6 @@ async def _dispatch(
             logger.exception("orchestrator.tool_error", name=tc.name, exc=str(exc))
             span.record_exception(exc)
             span.set_attribute("chat.tool.error", True)
+            span.set_attribute("chat.tool.error_message", str(exc))
+            span.set_status(StatusCode.ERROR, str(exc))
             return {"error": f"Tool '{tc.name}' raised an error: {exc}"}, []
-
-

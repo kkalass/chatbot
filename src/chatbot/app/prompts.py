@@ -40,8 +40,8 @@ def _default_system_prompt(now: datetime) -> str:
 
 
 _DEFAULT_CITATION_FALLBACK = (
-    "Please identify which exact search chunks you used in your answer "
-    "by calling the cite_sources tool with source+chunk_id citation pairs."
+    "Please identify which exact search chunks you used in your last answer. "
+    "Then call the cite_sources tool with source+chunk_id citation pairs."
 )
 
 DEFAULT_PROMPTS = Prompts(
