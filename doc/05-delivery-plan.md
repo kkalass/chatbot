@@ -86,6 +86,20 @@
 - Extend metadata handling (page, section, modality-specific provenance if available).
 - Re-run evaluation set and tune retrieval parameters.
 
+## Phase 4.1: Additional Local Model Support
+- Add model profile and configuration support for DeepSeek R1 (`deepseek-r1:32b`) via Ollama.
+- Add model profile and configuration support for Qwen3 (`qwen3:32b`) via Ollama.
+- Ensure prompt-profile/tool-calling compatibility checks for both models.
+- Extend smoke/integration evaluation runs to compare answer quality, citation behavior, and latency across supported models.
+- Update setup docs with explicit pull/run commands and recommended defaults per hardware tier.
+
+## Phase 4.2: Arize Phoenix Observability Alignment
+- Add optional Arize Phoenix integration for local and CI evaluation workflows.
+- Route existing OpenTelemetry traces to Phoenix via OTLP and validate trace compatibility.
+- Compare Phoenix-native trace analysis/evaluation features with current custom observability logic.
+- Reduce custom tracking code only where Phoenix provides equivalent or better coverage; keep domain-critical spans/attributes that are not replaceable.
+- Document the final observability split (Phoenix-managed vs. project-managed) and update `README.md` runbook.
+
 ## Phase 5: Evaluation and Hardening
 - Establish benchmark dataset and automated evaluation script.
 - Add CI pipeline for tests and evaluation checks.
