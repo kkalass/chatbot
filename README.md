@@ -72,6 +72,8 @@ ollama pull nomic-embed-text
 docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 ```
 
+Qdrant dashboard: <http://localhost:6333/dashboard>
+
 macOS quick option (recommended): Colima + Docker CLI
 
 ```bash
@@ -114,7 +116,7 @@ docker run -d --name jaeger \
   jaegertracing/all-in-one:1.57
 ```
 
-Jaeger UI: `http://localhost:16686`
+Jaeger UI: <http://localhost:16686>
 
 ### 2. Enable tracing in `.env`
 
@@ -132,7 +134,7 @@ OTEL_CONSOLE_EXPORT=false
 ./chatbot.sh
 ```
 
-Ask one or two questions in Chainlit, then open Jaeger and search for service `chatbot`.
+Ask one or two questions in Chainlit, then open <http://localhost:16686> and search for service `chatbot`.
 
 ### 4. What you should see in traces
 
