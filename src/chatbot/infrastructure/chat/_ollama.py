@@ -11,10 +11,13 @@ import structlog
 from ollama import AsyncClient, Message
 from ollama._types import ChatResponse
 from ollama._types import Tool as OllamaTool
+from opentelemetry import trace
 
 from src.chatbot.app.protocols import ChatMessage, ChatModel, ToolCallInfo, ToolSchema
+from src.chatbot.observability import to_attribute_text
 
 logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 def _to_ollama_tool(tool_schema: ToolSchema) -> OllamaTool:
@@ -72,36 +75,77 @@ class OllamaChatModel:
         client = self._client
 
         async def _gen() -> AsyncGenerator[str | list[ToolCallInfo], None]:
-            logger.debug(
-                "ollama.stream.request",
-                model=model,
-                message_count=len(ollama_messages),
-                tool_count=len(ollama_tools) if ollama_tools else 0,
-            )
+            with tracer.start_as_current_span("chat.model.ollama.stream") as span:
+                logger.debug(
+                    "ollama.stream.request",
+                    model=model,
+                    message_count=len(ollama_messages),
+                    tool_count=len(ollama_tools) if ollama_tools else 0,
+                )
+                span.set_attribute("llm.provider", "ollama")
+                span.set_attribute("llm.model", model)
+                span.set_attribute("llm.request.message_count", len(ollama_messages))
+                span.set_attribute(
+                    "llm.request.tool_count", len(ollama_tools) if ollama_tools else 0
+                )
+                span.set_attribute(
+                    "llm.request.messages",
+                    to_attribute_text(
+                        [
+                            {
+                                "role": msg.role,
+                                "content": msg.content,
+                                "tool_calls": [tc.name for tc in msg.tool_calls]
+                                if msg.tool_calls
+                                else [],
+                                "tool_call_id": msg.tool_call_id,
+                            }
+                            for msg in messages
+                        ]
+                    ),
+                )
 
-            response_stream: AsyncIterator[ChatResponse] = await client.chat(  # pyright: ignore[reportUnknownMemberType]
-                model=model,
-                messages=ollama_messages,
-                tools=ollama_tools,
-                stream=True,
-            )
+                response_stream: AsyncIterator[ChatResponse] = await client.chat(  # pyright: ignore[reportUnknownMemberType]
+                    model=model,
+                    messages=ollama_messages,
+                    tools=ollama_tools,
+                    stream=True,
+                )
 
-            tool_calls: list[ToolCallInfo] = []
-            async for chunk in response_stream:
-                content = chunk.message.content
-                if content:
-                    yield content
-                if chunk.message.tool_calls:
-                    for tc in chunk.message.tool_calls:
-                        tool_calls.append(
-                            ToolCallInfo(
-                                name=tc.function.name,
-                                arguments=dict(tc.function.arguments),
-                                call_id=tc.function.name,
+                tool_calls: list[ToolCallInfo] = []
+                streamed_text_chars = 0
+                async for chunk in response_stream:
+                    content = chunk.message.content
+                    if content:
+                        streamed_text_chars += len(content)
+                        yield content
+                    if chunk.message.tool_calls:
+                        for tc in chunk.message.tool_calls:
+                            tool_calls.append(
+                                ToolCallInfo(
+                                    name=tc.function.name,
+                                    arguments=dict(tc.function.arguments),
+                                    call_id=tc.function.name,
+                                )
                             )
-                        )
-            if tool_calls:
-                yield tool_calls
+
+                span.set_attribute("llm.response.streamed_text_chars", streamed_text_chars)
+                span.set_attribute("llm.response.tool_call_count", len(tool_calls))
+                span.set_attribute(
+                    "llm.response.tool_calls",
+                    to_attribute_text(
+                        [
+                            {
+                                "name": tc.name,
+                                "call_id": tc.call_id,
+                                "arguments": tc.arguments,
+                            }
+                            for tc in tool_calls
+                        ]
+                    ),
+                )
+                if tool_calls:
+                    yield tool_calls
 
         return _gen()
 

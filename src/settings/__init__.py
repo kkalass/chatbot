@@ -94,6 +94,30 @@ class Settings(BaseSettings):
         pattern="^(console|json)$",
     )
 
+    # --- Tracing (OpenTelemetry) ---
+    otel_enabled: bool = Field(
+        default=False,
+        description="Enable OpenTelemetry tracing export.",
+    )
+    otel_service_name: str = Field(
+        default="chatbot",
+        description="OpenTelemetry service.name resource attribute.",
+    )
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://localhost:4318/v1/traces",
+        description="OTLP/HTTP trace endpoint.",
+    )
+    otel_sample_rate: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Root span sampling ratio in [0.0, 1.0].",
+    )
+    otel_console_export: bool = Field(
+        default=False,
+        description="Additionally export spans to stdout for local debugging.",
+    )
+
 
 def get_settings() -> Settings:
     """Construct and return a validated :class:`Settings` instance.

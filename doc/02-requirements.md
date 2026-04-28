@@ -49,6 +49,8 @@
   - corpus ingestion,
   - reindex/reset as needed,
   - running evaluation set.
+- The project shall provide optional OpenTelemetry tracing export configurable via environment variables.
+- The project shall document how developers run a local trace backend (Jaeger) and inspect traces.
 
 ## Non-Functional Requirements
 
@@ -71,6 +73,7 @@
 - Typed boundaries shall be used between modules.
 - Ingestion boundaries shall separate conversion routing, splitting strategy selection, embedding, and persistence to keep each stage independently replaceable and testable.
 - All prompts shall be centralised in `src/chatbot/app/prompts.py` as a `@dataclass(frozen=True) class Prompts`. Plain prompts are `str` fields; parameterised prompts are `Callable[..., str]` fields. A module-level `DEFAULT_PROMPTS` constant provides the production defaults. The orchestrator receives a `Prompts` instance via constructor injection; callers may supply a customised instance via `dataclasses.replace(DEFAULT_PROMPTS, field=value)` — no subclassing required.
+- Observability instrumentation shall be implemented via OpenTelemetry standards rather than ad-hoc custom tracing formats.
 
 ### NFR-04 Testability
 - Unit tests are required for retrieval orchestration and tool-calling decision logic.

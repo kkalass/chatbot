@@ -10,6 +10,7 @@ returns a structured result so the model has acknowledgement of what was accepte
 from typing import cast
 
 import structlog
+from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
 from src.chatbot.app.protocols import (
@@ -21,8 +22,10 @@ from src.chatbot.app.protocols import (
     ToolEvent,
     ToolSchema,
 )
+from src.chatbot.observability import to_attribute_text
 
 logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 _TOOL_NAME = "cite_sources"
 _SEARCH_TOOL_NAME = "search_documents"
@@ -127,52 +130,61 @@ class CitationTool:
         self, args: JsonObject, context: ToolContext
     ) -> tuple[JsonObject, list[ToolEvent]]:
         """Validate *args["citations"]* against ``search_documents`` results in context history."""
-        try:
-            citation_input = _CitationInput.model_validate(args)
-        except ValidationError as exc:
-            return {"error": f"Invalid arguments: {exc}"}, []
+        with tracer.start_as_current_span("chat.tool.cite_sources") as span:
+            try:
+                citation_input = _CitationInput.model_validate(args)
+            except ValidationError as exc:
+                span.set_attribute("chat.tool.error", True)
+                span.set_attribute("chat.tool.arguments", to_attribute_text(args))
+                return {"error": f"Invalid arguments: {exc}"}, []
 
-        available = _collect_search_chunks(context.history)
-        claimed = citation_input.citations
+            available = _collect_search_chunks(context.history)
+            claimed = citation_input.citations
 
-        validated_chunks: list[SourceChunk] = []
-        validated: list[dict[str, str]] = []
-        unvalidated: list[dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
+            validated_chunks: list[SourceChunk] = []
+            validated: list[dict[str, str]] = []
+            unvalidated: list[dict[str, str]] = []
+            seen: set[tuple[str, str]] = set()
 
-        for citation in claimed:
-            key = (citation.source, citation.chunk_id)
-            if key in seen:
-                continue
-            seen.add(key)
+            for citation in claimed:
+                key = (citation.source, citation.chunk_id)
+                if key in seen:
+                    continue
+                seen.add(key)
 
-            if key in available:
-                validated_chunks.append(available[key])
-                validated.append(
-                    {
-                        "source": citation.source,
-                        "chunk_id": citation.chunk_id,
-                    }
-                )
-            else:
-                unvalidated.append(
-                    {
-                        "source": citation.source,
-                        "chunk_id": citation.chunk_id,
-                    }
-                )
+                if key in available:
+                    validated_chunks.append(available[key])
+                    validated.append(
+                        {
+                            "source": citation.source,
+                            "chunk_id": citation.chunk_id,
+                        }
+                    )
+                else:
+                    unvalidated.append(
+                        {
+                            "source": citation.source,
+                            "chunk_id": citation.chunk_id,
+                        }
+                    )
 
-        logger.info(
-            "citation_tool.executed",
-            claimed=len(claimed),
-            validated=len(validated_chunks),
-            unvalidated=len(unvalidated),
-        )
+            logger.info(
+                "citation_tool.executed",
+                claimed=len(claimed),
+                validated=len(validated_chunks),
+                unvalidated=len(unvalidated),
+            )
 
-        events: list[ToolEvent] = (
-            [SourceCitationEvent(validated=tuple(validated_chunks))] if validated_chunks else []
-        )
-        return {
-            "validated": validated,
-            "unvalidated": unvalidated,
-        }, events
+            span.set_attribute("chat.tool.claimed", len(claimed))
+            span.set_attribute("chat.tool.validated", len(validated_chunks))
+            span.set_attribute("chat.tool.unvalidated", len(unvalidated))
+            span.set_attribute("chat.tool.validated_pairs", to_attribute_text(validated))
+            span.set_attribute("chat.tool.unvalidated_pairs", to_attribute_text(unvalidated))
+
+            events: list[ToolEvent] = (
+                [SourceCitationEvent(validated=tuple(validated_chunks))] if validated_chunks else []
+            )
+            return {
+                "validated": validated,
+                "unvalidated": unvalidated,
+            }, events

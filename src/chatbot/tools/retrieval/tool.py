@@ -7,6 +7,7 @@ pre-retrieval.
 """
 
 import structlog
+from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
 from src.chatbot.app.protocols import (
@@ -17,8 +18,10 @@ from src.chatbot.app.protocols import (
     ToolEvent,
     ToolSchema,
 )
+from src.chatbot.observability import to_attribute_text
 
 logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 _TOOL_NAME = "search_documents"
 
@@ -55,27 +58,45 @@ class RetrievalTool:
         self, args: JsonObject, context: ToolContext
     ) -> tuple[JsonObject, list[ToolEvent]]:
         """Retrieve chunks for *args[\"query\"]* and return them as structured JSON."""
-        try:
-            search_input = _SearchInput.model_validate(args)
-        except ValidationError as exc:
-            return {"error": f"Invalid arguments: {exc}"}, []
+        with tracer.start_as_current_span("chat.tool.search_documents") as span:
+            try:
+                search_input = _SearchInput.model_validate(args)
+            except ValidationError as exc:
+                span.set_attribute("chat.tool.error", True)
+                span.set_attribute("chat.tool.arguments", to_attribute_text(args))
+                return {"error": f"Invalid arguments: {exc}"}, []
 
-        sources: list[SourceChunk] = await self._retriever.retrieve(search_input.query)
-        logger.info(
-            "retrieval_tool.executed",
-            query=search_input.query,
-            chunks=len(sources),
-        )
-        if not sources:
-            return {"chunks": [], "message": "No relevant documents found."}, []
-        return {
-            "chunks": [
-                {
-                    "source": chunk.source,
-                    "chunk_id": chunk.chunk_id,
-                    "content": chunk.content,
-                    "score": chunk.score,
-                }
-                for chunk in sources
-            ]
-        }, []
+            span.set_attribute("chat.tool.query", to_attribute_text(search_input.query))
+            sources: list[SourceChunk] = await self._retriever.retrieve(search_input.query)
+            logger.info(
+                "retrieval_tool.executed",
+                query=search_input.query,
+                chunks=len(sources),
+            )
+            span.set_attribute("chat.tool.chunks", len(sources))
+            span.set_attribute(
+                "chat.tool.chunk_preview",
+                to_attribute_text(
+                    [
+                        {
+                            "source": chunk.source,
+                            "chunk_id": chunk.chunk_id,
+                            "score": chunk.score,
+                        }
+                        for chunk in sources[:5]
+                    ]
+                ),
+            )
+            if not sources:
+                return {"chunks": [], "message": "No relevant documents found."}, []
+            return {
+                "chunks": [
+                    {
+                        "source": chunk.source,
+                        "chunk_id": chunk.chunk_id,
+                        "content": chunk.content,
+                        "score": chunk.score,
+                    }
+                    for chunk in sources
+                ]
+            }, []

@@ -21,6 +21,9 @@ dependencies = [
     "markdown-it-py>=4.0.0",
     "mdit-plain>=1.0.1",
     "nltk>=3.9.4",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
 ]
 
 [dependency-groups]

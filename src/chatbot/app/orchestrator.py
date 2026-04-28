@@ -20,6 +20,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
 
 import structlog
+from opentelemetry import trace
 
 from src.chatbot.app.prompts import DEFAULT_PROMPTS
 from src.chatbot.app.protocols import (
@@ -35,8 +36,10 @@ from src.chatbot.app.protocols import (
     ToolEvent,
     ToolSchema,
 )
+from src.chatbot.observability import to_attribute_text
 
 logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 _MAX_TOOL_ROUNDS = 10  # safety limit to prevent infinite agentic loops
 _SEARCH_TOOL_NAME = "search_documents"
@@ -106,92 +109,129 @@ class ChatOrchestrator:
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             emitted_citation_events: list[SourceCitationEvent] = []
+            with tracer.start_as_current_span("chat.orchestrator.process_message") as turn_span:
+                turn_span.set_attribute("chat.user_message.length", len(user_text))
+                turn_span.set_attribute("chat.user_message.preview", to_attribute_text(user_text))
+                turn_span.set_attribute("chat.tool_count", len(tool_map))
 
-            for round_num in range(_MAX_TOOL_ROUNDS):
-                system_text = prompts.system_prompt(datetime.now(tz=UTC))
-                messages = [ChatMessage(role="system", content=system_text), *history]
-                collected: list[str] = []
-                tool_calls: list[ToolCallInfo] = []
+                for round_num in range(_MAX_TOOL_ROUNDS):
+                    with tracer.start_as_current_span("chat.orchestrator.round") as round_span:
+                        round_span.set_attribute("chat.round", round_num)
+                        system_text = prompts.system_prompt(datetime.now(tz=UTC))
+                        messages = [ChatMessage(role="system", content=system_text), *history]
+                        collected: list[str] = []
+                        tool_calls: list[ToolCallInfo] = []
 
-                async for item in model.stream(messages, tools=tool_schemas):
-                    if isinstance(item, str):
-                        collected.append(item)
-                        yield item
-                    else:
-                        tool_calls.extend(item)
+                        async for item in model.stream(messages, tools=tool_schemas):
+                            if isinstance(item, str):
+                                collected.append(item)
+                                yield item
+                            else:
+                                tool_calls.extend(item)
 
-                if not tool_calls:
-                    history.append(ChatMessage(role="assistant", content="".join(collected)))
-                    break
+                        round_span.set_attribute("chat.round.text_chars", len("".join(collected)))
+                        round_span.set_attribute("chat.round.tool_call_count", len(tool_calls))
+                        round_span.set_attribute(
+                            "chat.round.tool_calls",
+                            to_attribute_text([tc.name for tc in tool_calls]),
+                        )
 
-                logger.info(
-                    "orchestrator.tool_round",
-                    round=round_num,
-                    calls=[tc.name for tc in tool_calls],
-                )
-                history.append(
-                    ChatMessage(
-                        role="assistant",
-                        content="".join(collected),
-                        tool_calls=tuple(tool_calls),
-                    )
-                )
-                if any(tc.name == _SEARCH_TOOL_NAME for tc in tool_calls):
-                    self._has_search_results_in_session = True
-                async for event in _dispatch_tool_calls(tool_calls, history, tool_map):
-                    yield event
-                    match event:
-                        case SourceCitationEvent():
-                            emitted_citation_events.append(event)
-            else:
-                # Safety: exceeded max rounds — one final response without tools.
-                logger.warning("orchestrator.max_tool_rounds_exceeded", limit=_MAX_TOOL_ROUNDS)
-                system_text = prompts.system_prompt(datetime.now(tz=UTC))
-                messages = [ChatMessage(role="system", content=system_text), *history]
-                final: list[str] = []
-                async for item in model.stream(messages, tools=None):
-                    if isinstance(item, str):
-                        final.append(item)
-                        yield item
-                history.append(ChatMessage(role="assistant", content="".join(final)))
+                        if not tool_calls:
+                            history.append(
+                                ChatMessage(role="assistant", content="".join(collected))
+                            )
+                            break
 
-            # Citation pass: triggered only when the main loop consumed search results
-            # AND no citation event was already emitted (e.g. model called cite_sources
-            # voluntarily during the main loop).
-            if not emitted_citation_events and self._has_search_results_in_session:
-                citation_tool = tool_map.get(_CITATION_TOOL_NAME)
-                citation_schema = tool_schema_map.get(_CITATION_TOOL_NAME)
-                if citation_tool is not None and citation_schema is not None:
-                    citation_schemas: list[ToolSchema] = [citation_schema]
-                    history.append(
-                        ChatMessage(role="user", content=prompts.citation_fallback_message)
-                    )
+                        logger.info(
+                            "orchestrator.tool_round",
+                            round=round_num,
+                            calls=[tc.name for tc in tool_calls],
+                        )
+                        history.append(
+                            ChatMessage(
+                                role="assistant",
+                                content="".join(collected),
+                                tool_calls=tuple(tool_calls),
+                            )
+                        )
+                        if any(tc.name == _SEARCH_TOOL_NAME for tc in tool_calls):
+                            self._has_search_results_in_session = True
+                        async for event in _dispatch_tool_calls(tool_calls, history, tool_map):
+                            yield event
+                            match event:
+                                case SourceCitationEvent():
+                                    emitted_citation_events.append(event)
+                else:
+                    # Safety: exceeded max rounds — one final response without tools.
+                    logger.warning("orchestrator.max_tool_rounds_exceeded", limit=_MAX_TOOL_ROUNDS)
                     system_text = prompts.system_prompt(datetime.now(tz=UTC))
                     messages = [ChatMessage(role="system", content=system_text), *history]
-                    cite_calls: list[ToolCallInfo] = []
-                    cite_text: list[str] = []
-
-                    async for item in model.stream(messages, tools=citation_schemas):
+                    final: list[str] = []
+                    async for item in model.stream(messages, tools=None):
                         if isinstance(item, str):
-                            cite_text.append(item)
-                        else:
-                            cite_calls.extend(item)
+                            final.append(item)
+                            yield item
+                    history.append(ChatMessage(role="assistant", content="".join(final)))
 
-                    if not cite_calls:
-                        logger.warning("orchestrator.citation_pass_no_tool_call")
-                        history.append(ChatMessage(role="assistant", content="".join(cite_text)))
-                        return
-
-                    history.append(
-                        ChatMessage(
-                            role="assistant",
-                            content="".join(cite_text),
-                            tool_calls=tuple(cite_calls),
+                # Citation pass: triggered only when the main loop consumed search results
+                # AND no citation event was already emitted (e.g. model called cite_sources
+                # voluntarily during the main loop).
+                if not emitted_citation_events and self._has_search_results_in_session:
+                    with tracer.start_as_current_span("chat.orchestrator.citation_pass") as span:
+                        citation_tool = tool_map.get(_CITATION_TOOL_NAME)
+                        citation_schema = tool_schema_map.get(_CITATION_TOOL_NAME)
+                        span.set_attribute(
+                            "chat.citation_tool_available",
+                            citation_tool is not None and citation_schema is not None,
                         )
-                    )
+                        if citation_tool is not None and citation_schema is not None:
+                            citation_schemas: list[ToolSchema] = [citation_schema]
+                            history.append(
+                                ChatMessage(role="user", content=prompts.citation_fallback_message)
+                            )
+                            system_text = prompts.system_prompt(datetime.now(tz=UTC))
+                            messages = [ChatMessage(role="system", content=system_text), *history]
+                            cite_calls: list[ToolCallInfo] = []
+                            cite_text: list[str] = []
 
-                    async for event in _dispatch_tool_calls(cite_calls, history, tool_map):
-                        yield event
+                            async for item in model.stream(messages, tools=citation_schemas):
+                                if isinstance(item, str):
+                                    cite_text.append(item)
+                                else:
+                                    cite_calls.extend(item)
+
+                            span.set_attribute(
+                                "chat.citation_pass.tool_call_count", len(cite_calls)
+                            )
+                            span.set_attribute(
+                                "chat.citation_pass.tool_calls",
+                                to_attribute_text([tc.name for tc in cite_calls]),
+                            )
+                            span.set_attribute(
+                                "chat.citation_pass.text_preview",
+                                to_attribute_text("".join(cite_text)),
+                            )
+
+                            if not cite_calls:
+                                logger.warning("orchestrator.citation_pass_no_tool_call")
+                                history.append(
+                                    ChatMessage(role="assistant", content="".join(cite_text))
+                                )
+                                return
+
+                            history.append(
+                                ChatMessage(
+                                    role="assistant",
+                                    content="".join(cite_text),
+                                    tool_calls=tuple(cite_calls),
+                                )
+                            )
+
+                            async for event in _dispatch_tool_calls(cite_calls, history, tool_map):
+                                yield event
+
+                turn_span.set_attribute("chat.citation_events", len(emitted_citation_events))
+                turn_span.set_attribute("chat.history_entries", len(history))
 
         return _gen()
 
@@ -231,12 +271,23 @@ async def _dispatch(
     context: ToolContext,
 ) -> tuple[JsonObject, list[ToolEvent]]:
     """Look up the named tool, execute it, and return its structured result and events."""
-    tool = tool_map.get(tc.name)
-    if tool is None:
-        logger.error("orchestrator.unknown_tool", name=tc.name)
-        return {"error": f"unknown tool '{tc.name}'"}, []
-    try:
-        return await tool.execute(tc.arguments, context)
-    except Exception as exc:
-        logger.exception("orchestrator.tool_error", name=tc.name, exc=str(exc))
-        return {"error": f"Tool '{tc.name}' raised an error: {exc}"}, []
+    with tracer.start_as_current_span("chat.orchestrator.tool_dispatch") as span:
+        span.set_attribute("chat.tool.name", tc.name)
+        span.set_attribute("chat.tool.call_id", tc.call_id)
+        span.set_attribute("chat.tool.arguments", to_attribute_text(tc.arguments))
+
+        tool = tool_map.get(tc.name)
+        if tool is None:
+            logger.error("orchestrator.unknown_tool", name=tc.name)
+            span.set_attribute("chat.tool.error", True)
+            return {"error": f"unknown tool '{tc.name}'"}, []
+        try:
+            result, events = await tool.execute(tc.arguments, context)
+            span.set_attribute("chat.tool.result", to_attribute_text(result))
+            span.set_attribute("chat.tool.events", len(events))
+            return result, events
+        except Exception as exc:
+            logger.exception("orchestrator.tool_error", name=tc.name, exc=str(exc))
+            span.record_exception(exc)
+            span.set_attribute("chat.tool.error", True)
+            return {"error": f"Tool '{tc.name}' raised an error: {exc}"}, []

@@ -30,6 +30,10 @@ The application is a locally-run RAG chatbot with explicit separation of concern
 - Model Runtime
   - Ollama-hosted local models for generation in MVP.
   - Ingestion embedder is consumed through an injected boundary so provider/runtime can be swapped without changing ingestion orchestration.
+- Observability Layer
+  - OpenTelemetry tracing is configured at app startup and exported via OTLP.
+  - Spans cover UI turn handling, orchestrator rounds, tool dispatch, model streaming, and retriever execution.
+  - Trace payload attributes are previewed with truncation to keep spans inspectable while avoiding unbounded attribute size growth.
 
 ## Binding Points
 - Binding points are documented at consumer boundaries (tool constructor and composition root), not via mandatory nominal inheritance on implementation classes.
@@ -58,6 +62,7 @@ The application is a locally-run RAG chatbot with explicit separation of concern
      2. If no `SourceCitationEvent` was observed: re-run the same agentic loop code with only `cite_sources` registered as a tool and the complete history; discard any text output. Tool dispatch is identical to the main loop.
      3. If still no citations returned: emit nothing — the UI displays no sources. This is **not an error**: it is the expected outcome when the answer was derived from a non-RAG tool call (e.g. `get_vacation_days`) even though RAG results exist elsewhere in history.
    - `process_message` yields `ProcessEvent` (`str | ToolEvent`); the UI uses `match`/`case` + `assert_never` to handle each variant (render text chunks live, render `SourceCitationEvent` as Chainlit citation elements).
+  - In parallel, OpenTelemetry spans record request/response previews and counters for each stage to enable deterministic debugging in Jaeger.
 
 ## Authentication Flows (MVP)
 - The Chainlit UI is accessible without mandatory global app-level login in MVP.

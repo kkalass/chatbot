@@ -52,6 +52,30 @@
 - Formalize metadata continuity contract, including sidecar merge semantics (`<document>.meta.json` is merged into the owning document and never ingested standalone).
 - Add unit and integration coverage for converter routing, splitter selection, metadata propagation, and batch behavior.
 
+## Phase 3.6: OpenTelemetry Tracing (Implemented)
+
+### Rollout Plan
+1. Foundation
+- Add OpenTelemetry SDK + OTLP exporter dependencies.
+- Extend typed settings and `.env.example` with tracing toggles and OTLP endpoint.
+- Configure tracing once at startup with sampling and service metadata.
+
+2. Instrumentation
+- Add root span for each UI message turn.
+- Add orchestrator spans for round execution, tool dispatch, and citation fallback pass.
+- Add model adapter spans capturing request/response previews.
+- Add retrieval and citation tool spans with validated counters and chunk/citation previews.
+- Add retriever infrastructure spans for query parameters and top-k result preview.
+
+3. Developer Experience
+- Document local Jaeger setup and trace verification workflow in `README.md`.
+- Keep payload previews bounded/truncated to avoid oversized span attributes.
+
+### Acceptance Criteria
+- With tracing enabled, a single chat interaction yields a navigable trace in Jaeger.
+- Trace hierarchy includes UI -> orchestrator -> model/tool/retriever spans.
+- Disabling tracing via env vars returns to no-op behavior without code changes.
+
 ## Phase 4: PDF + Multi-Modal Extraction
 - Add pdf ingestion with extraction-first strategy on top of Phase 3.5 ingestion architecture.
 - Extend metadata handling (page, section, modality-specific provenance if available).
@@ -91,7 +115,6 @@ The following concerns are explicitly out of MVP scope but represent the known g
 
 ### Observability and Instrumentation
 - Replace stdout structured logs with a proper log aggregation pipeline.
-- Add OpenTelemetry tracing (OTLP) across orchestrator boundaries (retrieval, tool-call, generation).
 - Add model latency and token usage metrics.
 - Add alerting on error rates and latency regressions.
 

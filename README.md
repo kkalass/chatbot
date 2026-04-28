@@ -53,6 +53,11 @@ Key variables (all have sensible defaults):
 | `SPLIT_LENGTH` | `200` | Words per ingestion chunk |
 | `SPLIT_OVERLAP` | `20` | Word overlap between adjacent chunks |
 | `LOG_FORMAT` | `console` | `console` (dev) or `json` (CI/prod) |
+| `OTEL_ENABLED` | `false` | Enables OpenTelemetry tracing export |
+| `OTEL_SERVICE_NAME` | `chatbot` | Trace resource service name |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318/v1/traces` | OTLP/HTTP trace endpoint |
+| `OTEL_SAMPLE_RATE` | `1.0` | Root trace sampling ratio (`0.0` to `1.0`) |
+| `OTEL_CONSOLE_EXPORT` | `false` | Also print spans to stdout |
 
 ### 3. Pull required Ollama models
 
@@ -93,6 +98,58 @@ uv run chainlit run src/chatbot/ui/app.py
 ```
 
 Opens a chat interface at `http://localhost:8000` by default.
+
+---
+
+## Local Tracing (OpenTelemetry + Jaeger)
+
+This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, orchestrator rounds, model call, retrieval tool, citation tool, and Qdrant retrieval).
+
+### 1. Start Jaeger with OTLP enabled
+
+```bash
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:1.57
+```
+
+Jaeger UI: `http://localhost:16686`
+
+### 2. Enable tracing in `.env`
+
+```bash
+OTEL_ENABLED=true
+OTEL_SERVICE_NAME=chatbot
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+OTEL_SAMPLE_RATE=1.0
+OTEL_CONSOLE_EXPORT=false
+```
+
+### 3. Start chatbot and generate traffic
+
+```bash
+./chatbot.sh
+```
+
+Ask one or two questions in Chainlit, then open Jaeger and search for service `chatbot`.
+
+### 4. What you should see in traces
+
+- Root UI span for each message (`chat.ui.on_message`)
+- Orchestrator spans (`chat.orchestrator.process_message`, `chat.orchestrator.round`)
+- Model call span (`chat.model.ollama.stream`) with request/response previews
+- Tool spans (`chat.tool.search_documents`, `chat.tool.cite_sources`)
+- Retriever span (`chat.retriever.qdrant.retrieve`) with top-k result preview
+
+### 5. Troubleshooting
+
+- No traces in Jaeger:
+  - Verify Jaeger container is running and `4318` is published.
+  - Verify `OTEL_ENABLED=true` and endpoint matches `http://localhost:4318/v1/traces`.
+  - Set `OTEL_CONSOLE_EXPORT=true` temporarily to confirm spans are produced.
+- Too many traces:
+  - Lower `OTEL_SAMPLE_RATE`, e.g. `0.2`.
 
 ---
 

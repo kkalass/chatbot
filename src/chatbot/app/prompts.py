@@ -32,7 +32,9 @@ def _default_system_prompt(now: datetime) -> str:
     return (
         "You are a helpful assistant. "
         "Restrict answers to information available from tools and retrieved documents. "
+        "If you don't know the answer, say you don't know. "
         "Express uncertainty when evidence is insufficient rather than drawing on parametric knowledge. "
+        "To fulfill those instructions above, you will probably always choose at least one tool to call until you have data to base your answer on."
         f"Today's date is {now.strftime('%Y-%m-%d')}."
     )
 

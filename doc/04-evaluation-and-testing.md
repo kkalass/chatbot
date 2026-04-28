@@ -62,8 +62,9 @@ Create a small but representative benchmark set:
   - tool-call decisions,
   - model/token timing.
 - Persist evaluation runs with timestamp and model/retrieval config.
-- Consider OpenTelemetry (OTLP) tracing for request-level spans covering retrieval, tool-call, and generation stages. This is out of scope for MVP but the call boundaries in the orchestrator should be instrumented-friendly (no spaghetti logic that makes tracing impractical to add later).
-- Recommended MVP minimum: `structlog` with `ConsoleRenderer` in development and `JSONRenderer` to stdout in production/CI; OTEL spans as a Phase 5+ addition.
+- Use OpenTelemetry (OTLP) tracing for request-level spans covering UI turn handling, orchestrator rounds, model generation, retrieval, and tool execution.
+- Configure local trace inspection with Jaeger and validate at least one complete trace per integration test session when diagnosing behavior.
+- Keep logs and traces complementary: logs for broad event streams, traces for per-turn causal analysis.
 
 ## MVP Thresholds
 - Correctness >= 80% on benchmark set.
