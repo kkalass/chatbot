@@ -10,6 +10,7 @@ from opentelemetry import trace
 from src.chatbot.app.protocols import Retriever, SourceChunk
 from src.chatbot.infrastructure.embeddings_text import TextEmbedder
 from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.schema import SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE
 
 from ._config import RetrieverConfig
 
@@ -36,8 +37,7 @@ class QdrantRetriever:
 
     async def retrieve(self, query: str) -> list[SourceChunk]:
         """Embed a query and return ranked, filtered chunks from Qdrant."""
-        with tracer.start_as_current_span("chat.retriever.qdrant.retrieve") as span:
-            span.set_attribute("chat.query.preview", to_attribute_text(query))
+        with tracer.start_as_current_span(SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE) as span:
             span.set_attribute("chat.retriever.top_k", self._config.top_k)
             span.set_attribute("chat.retriever.score_threshold", self._config.score_threshold)
 
@@ -70,17 +70,8 @@ class QdrantRetriever:
             logger.info("retriever.done", chunks_returned=len(chunks))
             span.set_attribute("chat.retriever.result_count", len(chunks))
             span.set_attribute(
-                "chat.retriever.result_preview",
-                to_attribute_text(
-                    [
-                        {
-                            "source": chunk.source,
-                            "chunk_id": chunk.chunk_id,
-                            "score": chunk.score,
-                        }
-                        for chunk in chunks[:5]
-                    ]
-                ),
+                "chat.retriever.top_scores",
+                to_attribute_text([round(chunk.score, 4) for chunk in chunks[:5]]),
             )
             return chunks
 

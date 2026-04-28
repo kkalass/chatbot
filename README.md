@@ -144,6 +144,18 @@ Ask one or two questions in Chainlit, then open <http://localhost:16686> and sea
 - Tool spans (`chat.tool.search_documents`, `chat.tool.cite_sources`)
 - Retriever span (`chat.retriever.qdrant.retrieve`) with top-k result preview
 
+### 4.1 Tracing Schema (Ownership Rules)
+
+Tracing follows a strict ownership model so each span level contributes one readable view only:
+
+- UI span (`chat.ui.on_message`): user input preview + final emitted assistant response preview.
+- Orchestrator spans (`chat.orchestrator.*`): control-flow only (round state, tool dispatch summaries, citation-pass diagnostics).
+- Model span (`chat.model.ollama.stream`): compact request message summary + model output preview.
+- Tool spans (`chat.tool.*`): tool input plus tool-specific result summary.
+- Retriever span (`chat.retriever.qdrant.retrieve`): retrieval parameters + compact chunk/content previews.
+
+Canonical span names are centralized in `src/chatbot/observability/schema.py` and should be reused instead of hard-coded string literals.
+
 ### 5. Troubleshooting
 
 - No traces in Jaeger:

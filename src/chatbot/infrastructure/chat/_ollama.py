@@ -14,7 +14,9 @@ from ollama._types import Tool as OllamaTool
 from opentelemetry import trace
 
 from src.chatbot.app.protocols import ChatMessage, ChatModel, ToolCallInfo, ToolSchema
+from src.chatbot.app.tracing import summarize_messages
 from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.schema import SPAN_CHAT_MODEL_OLLAMA_STREAM
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -75,7 +77,7 @@ class OllamaChatModel:
         client = self._client
 
         async def _gen() -> AsyncGenerator[str | list[ToolCallInfo], None]:
-            with tracer.start_as_current_span("chat.model.ollama.stream") as span:
+            with tracer.start_as_current_span(SPAN_CHAT_MODEL_OLLAMA_STREAM) as span:
                 logger.debug(
                     "ollama.stream.request",
                     model=model,
@@ -89,20 +91,8 @@ class OllamaChatModel:
                     "llm.request.tool_count", len(ollama_tools) if ollama_tools else 0
                 )
                 span.set_attribute(
-                    "llm.request.messages",
-                    to_attribute_text(
-                        [
-                            {
-                                "role": msg.role,
-                                "content": msg.content,
-                                "tool_calls": [tc.name for tc in msg.tool_calls]
-                                if msg.tool_calls
-                                else [],
-                                "tool_call_id": msg.tool_call_id,
-                            }
-                            for msg in messages
-                        ]
-                    ),
+                    "llm.request.message_summary",
+                    to_attribute_text(summarize_messages(messages)),
                 )
 
                 response_stream: AsyncIterator[ChatResponse] = await client.chat(  # pyright: ignore[reportUnknownMemberType]
@@ -114,10 +104,13 @@ class OllamaChatModel:
 
                 tool_calls: list[ToolCallInfo] = []
                 streamed_text_chars = 0
+                response_text_parts: list[str] = []
                 async for chunk in response_stream:
                     content = chunk.message.content
                     if content:
                         streamed_text_chars += len(content)
+                        if len("".join(response_text_parts)) < 1200:
+                            response_text_parts.append(content)
                         yield content
                     if chunk.message.tool_calls:
                         for tc in chunk.message.tool_calls:
@@ -130,6 +123,10 @@ class OllamaChatModel:
                             )
 
                 span.set_attribute("llm.response.streamed_text_chars", streamed_text_chars)
+                span.set_attribute(
+                    "llm.response.text_preview",
+                    to_attribute_text("".join(response_text_parts), max_chars=600),
+                )
                 span.set_attribute("llm.response.tool_call_count", len(tool_calls))
                 span.set_attribute(
                     "llm.response.tool_calls",

@@ -27,6 +27,7 @@ from src.chatbot.infrastructure.chat import build_chat_model, build_chat_prompt_
 from src.chatbot.infrastructure.embeddings_text import build_text_embedder
 from src.chatbot.infrastructure.retrieval import build_retriever
 from src.chatbot.observability import configure_tracing, to_attribute_text
+from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
 from src.chatbot.tools.citation.tool import CitationTool
 from src.chatbot.tools.retrieval.tool import RetrievalTool
 from src.chatbot.tools.vacation_days import (
@@ -135,8 +136,9 @@ async def on_message(message: cl.Message) -> None:
     response: cl.Message | None = None
     citation_events: list[SourceCitationEvent] = []
     emitted_chars = 0
+    emitted_chunks: list[str] = []
 
-    with _tracer.start_as_current_span("chat.ui.on_message") as span:
+    with _tracer.start_as_current_span(SPAN_CHAT_UI_ON_MESSAGE) as span:
         span.set_attribute("chat.session_id", trace_session)
         span.set_attribute("chat.user_message.length", len(user_text))
         span.set_attribute("chat.user_message.preview", to_attribute_text(user_text))
@@ -146,6 +148,7 @@ async def on_message(message: cl.Message) -> None:
             match event:
                 case str():
                     emitted_chars += len(event)
+                    emitted_chunks.append(event)
                     if response is None:
                         response = cl.Message(content="")
                         await response.send()
@@ -182,6 +185,10 @@ async def on_message(message: cl.Message) -> None:
                 logger.info("session.sources_displayed", count=len(elements))
 
         span.set_attribute("chat.response.emitted_chars", emitted_chars)
+        span.set_attribute(
+            "chat.response.preview",
+            to_attribute_text("".join(emitted_chunks), max_chars=600),
+        )
         span.set_attribute("chat.response.citation_events", len(citation_events))
 
     logger.info("session.message_handled", length=len(user_text))

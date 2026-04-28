@@ -19,6 +19,7 @@ from src.chatbot.app.protocols import (
     ToolSchema,
 )
 from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.schema import SPAN_CHAT_TOOL_SEARCH_DOCUMENTS
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -58,7 +59,7 @@ class RetrievalTool:
         self, args: JsonObject, context: ToolContext
     ) -> tuple[JsonObject, list[ToolEvent]]:
         """Retrieve chunks for *args[\"query\"]* and return them as structured JSON."""
-        with tracer.start_as_current_span("chat.tool.search_documents") as span:
+        with tracer.start_as_current_span(SPAN_CHAT_TOOL_SEARCH_DOCUMENTS) as span:
             try:
                 search_input = _SearchInput.model_validate(args)
             except ValidationError as exc:
@@ -84,6 +85,19 @@ class RetrievalTool:
                             "score": chunk.score,
                         }
                         for chunk in sources[:5]
+                    ]
+                ),
+            )
+            span.set_attribute(
+                "chat.tool.chunk_content_preview",
+                to_attribute_text(
+                    [
+                        {
+                            "source": chunk.source,
+                            "chunk_id": chunk.chunk_id,
+                            "content_preview": to_attribute_text(chunk.content, max_chars=200),
+                        }
+                        for chunk in sources[:3]
                     ]
                 ),
             )

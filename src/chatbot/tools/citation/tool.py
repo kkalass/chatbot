@@ -23,6 +23,7 @@ from src.chatbot.app.protocols import (
     ToolSchema,
 )
 from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.schema import SPAN_CHAT_TOOL_CITE_SOURCES
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -130,7 +131,7 @@ class CitationTool:
         self, args: JsonObject, context: ToolContext
     ) -> tuple[JsonObject, list[ToolEvent]]:
         """Validate *args["citations"]* against ``search_documents`` results in context history."""
-        with tracer.start_as_current_span("chat.tool.cite_sources") as span:
+        with tracer.start_as_current_span(SPAN_CHAT_TOOL_CITE_SOURCES) as span:
             try:
                 citation_input = _CitationInput.model_validate(args)
             except ValidationError as exc:

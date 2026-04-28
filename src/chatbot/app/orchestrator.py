@@ -18,6 +18,7 @@ search results were consumed during the turn — the model is asked to call
 
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
+from typing import cast
 
 import structlog
 from opentelemetry import trace
@@ -36,7 +37,14 @@ from src.chatbot.app.protocols import (
     ToolEvent,
     ToolSchema,
 )
+from src.chatbot.app.tracing import summarize_messages, summarize_search_result
 from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.schema import (
+    SPAN_CHAT_ORCHESTRATOR_CITATION_PASS,
+    SPAN_CHAT_ORCHESTRATOR_PROCESS_MESSAGE,
+    SPAN_CHAT_ORCHESTRATOR_ROUND,
+    SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH,
+)
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -109,23 +117,26 @@ class ChatOrchestrator:
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             emitted_citation_events: list[SourceCitationEvent] = []
-            with tracer.start_as_current_span("chat.orchestrator.process_message") as turn_span:
+            with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_PROCESS_MESSAGE) as turn_span:
                 turn_span.set_attribute("chat.user_message.length", len(user_text))
                 turn_span.set_attribute("chat.user_message.preview", to_attribute_text(user_text))
                 turn_span.set_attribute("chat.tool_count", len(tool_map))
 
                 for round_num in range(_MAX_TOOL_ROUNDS):
-                    with tracer.start_as_current_span("chat.orchestrator.round") as round_span:
+                    with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_ROUND) as round_span:
                         round_span.set_attribute("chat.round", round_num)
                         system_text = prompts.system_prompt(datetime.now(tz=UTC))
                         messages = [ChatMessage(role="system", content=system_text), *history]
+                        round_span.set_attribute(
+                            "chat.round.input_summary",
+                            to_attribute_text(summarize_messages(messages)),
+                        )
                         collected: list[str] = []
                         tool_calls: list[ToolCallInfo] = []
 
                         async for item in model.stream(messages, tools=tool_schemas):
                             if isinstance(item, str):
                                 collected.append(item)
-                                yield item
                             else:
                                 tool_calls.extend(item)
 
@@ -137,9 +148,14 @@ class ChatOrchestrator:
                         )
 
                         if not tool_calls:
-                            history.append(
-                                ChatMessage(role="assistant", content="".join(collected))
+                            assistant_text = "".join(collected)
+                            round_span.set_attribute(
+                                "chat.round.output_preview",
+                                to_attribute_text(assistant_text),
                             )
+                            history.append(ChatMessage(role="assistant", content=assistant_text))
+                            for text_chunk in collected:
+                                yield text_chunk
                             break
 
                         logger.info(
@@ -177,7 +193,7 @@ class ChatOrchestrator:
                 # AND no citation event was already emitted (e.g. model called cite_sources
                 # voluntarily during the main loop).
                 if not emitted_citation_events and self._has_search_results_in_session:
-                    with tracer.start_as_current_span("chat.orchestrator.citation_pass") as span:
+                    with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_CITATION_PASS) as span:
                         citation_tool = tool_map.get(_CITATION_TOOL_NAME)
                         citation_schema = tool_schema_map.get(_CITATION_TOOL_NAME)
                         span.set_attribute(
@@ -186,11 +202,19 @@ class ChatOrchestrator:
                         )
                         if citation_tool is not None and citation_schema is not None:
                             citation_schemas: list[ToolSchema] = [citation_schema]
+                            span.set_attribute(
+                                "chat.citation_pass.fallback_prompt",
+                                to_attribute_text(prompts.citation_fallback_message),
+                            )
                             history.append(
                                 ChatMessage(role="user", content=prompts.citation_fallback_message)
                             )
                             system_text = prompts.system_prompt(datetime.now(tz=UTC))
                             messages = [ChatMessage(role="system", content=system_text), *history]
+                            span.set_attribute(
+                                "chat.citation_pass.input_summary",
+                                to_attribute_text(summarize_messages(messages)),
+                            )
                             cite_calls: list[ToolCallInfo] = []
                             cite_text: list[str] = []
 
@@ -208,27 +232,32 @@ class ChatOrchestrator:
                                 to_attribute_text([tc.name for tc in cite_calls]),
                             )
                             span.set_attribute(
-                                "chat.citation_pass.text_preview",
+                                "chat.citation_pass.model_output_chars",
+                                len("".join(cite_text)),
+                            )
+                            span.set_attribute(
+                                "chat.citation_pass.model_output_preview",
                                 to_attribute_text("".join(cite_text)),
                             )
 
                             if not cite_calls:
                                 logger.warning("orchestrator.citation_pass_no_tool_call")
+                                span.set_attribute("chat.citation_pass.no_tool_call", True)
+                                span.set_attribute(
+                                    "chat.citation_pass.failure_reason",
+                                    "model returned text instead of cite_sources tool call",
+                                )
+                            else:
                                 history.append(
-                                    ChatMessage(role="assistant", content="".join(cite_text))
+                                    ChatMessage(
+                                        role="assistant",
+                                        content="".join(cite_text),
+                                        tool_calls=tuple(cite_calls),
+                                    )
                                 )
-                                return
 
-                            history.append(
-                                ChatMessage(
-                                    role="assistant",
-                                    content="".join(cite_text),
-                                    tool_calls=tuple(cite_calls),
-                                )
-                            )
-
-                            async for event in _dispatch_tool_calls(cite_calls, history, tool_map):
-                                yield event
+                                async for event in _dispatch_tool_calls(cite_calls, history, tool_map):
+                                    yield event
 
                 turn_span.set_attribute("chat.citation_events", len(emitted_citation_events))
                 turn_span.set_attribute("chat.history_entries", len(history))
@@ -271,7 +300,7 @@ async def _dispatch(
     context: ToolContext,
 ) -> tuple[JsonObject, list[ToolEvent]]:
     """Look up the named tool, execute it, and return its structured result and events."""
-    with tracer.start_as_current_span("chat.orchestrator.tool_dispatch") as span:
+    with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH) as span:
         span.set_attribute("chat.tool.name", tc.name)
         span.set_attribute("chat.tool.call_id", tc.call_id)
         span.set_attribute("chat.tool.arguments", to_attribute_text(tc.arguments))
@@ -283,7 +312,27 @@ async def _dispatch(
             return {"error": f"unknown tool '{tc.name}'"}, []
         try:
             result, events = await tool.execute(tc.arguments, context)
-            span.set_attribute("chat.tool.result", to_attribute_text(result))
+            span.set_attribute("chat.tool.result_keys", to_attribute_text(sorted(result.keys())))
+            if tc.name == _SEARCH_TOOL_NAME:
+                span.set_attribute(
+                    "chat.tool.result_chunk_preview",
+                    to_attribute_text(summarize_search_result(result)),
+                )
+            if tc.name == _CITATION_TOOL_NAME:
+                validated = cast(object, result.get("validated"))
+                unvalidated = cast(object, result.get("unvalidated"))
+                validated_list = cast(list[object], validated) if isinstance(validated, list) else []
+                unvalidated_list = (
+                    cast(list[object], unvalidated) if isinstance(unvalidated, list) else []
+                )
+                span.set_attribute(
+                    "chat.tool.result_validated",
+                    len(validated_list),
+                )
+                span.set_attribute(
+                    "chat.tool.result_unvalidated",
+                    len(unvalidated_list),
+                )
             span.set_attribute("chat.tool.events", len(events))
             return result, events
         except Exception as exc:
@@ -291,3 +340,5 @@ async def _dispatch(
             span.record_exception(exc)
             span.set_attribute("chat.tool.error", True)
             return {"error": f"Tool '{tc.name}' raised an error: {exc}"}, []
+
+
