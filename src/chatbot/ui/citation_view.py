@@ -13,7 +13,10 @@ from src.chatbot.app.protocols import SourceChunk
 
 def build_citation_name(chunk: SourceChunk) -> str:
     """Return a compact element label without exposing opaque chunk ids."""
-    return _display_title(chunk)
+    name = _display_title(chunk)
+    if chunk.page:
+        return f"{name} (p. {chunk.page})"
+    return name
 
 
 def build_citation_content(chunk: SourceChunk) -> str:
@@ -25,6 +28,8 @@ def build_citation_content(chunk: SourceChunk) -> str:
         lines.append(f"**Author:** {chunk.author}  ")
     if chunk.publication_date:
         lines.append(f"**Date:** {chunk.publication_date}  ")
+    if chunk.page:
+        lines.append(f"**Page:** {chunk.page}  ")
     if not chunk.author and not chunk.title:
         lines.append(f"**Source:** {chunk.source}  ")
 
@@ -76,6 +81,8 @@ def _build_source_list_item(chunk: SourceChunk) -> str:
         parts.append(chunk.author)
     if chunk.publication_date:
         parts.append(chunk.publication_date)
+    if chunk.page:
+        parts.append(f"p. {chunk.page}")
     if not chunk.author and not chunk.title and chunk.source not in parts:
         parts.append(chunk.source)
 
@@ -89,7 +96,7 @@ def _link_or_text(label: str, source_url: str | None) -> str:
 
 
 def _deduplicate_sources(chunks: Sequence[SourceChunk]) -> list[SourceChunk]:
-    seen: set[tuple[str | None, str | None, str | None, str | None, str]] = set()
+    seen: set[tuple[str | None, str | None, str | None, str | None, str | None, str]] = set()
     deduplicated: list[SourceChunk] = []
     for chunk in chunks:
         key = (
@@ -97,6 +104,7 @@ def _deduplicate_sources(chunks: Sequence[SourceChunk]) -> list[SourceChunk]:
             chunk.author,
             chunk.publication_date,
             chunk.source_url,
+            chunk.page,
             chunk.source,
         )
         if key in seen:

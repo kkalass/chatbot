@@ -41,6 +41,7 @@ class SourceChunk:
     author: str | None = None
     publication_date: str | None = None
     source_url: str | None = None
+    page: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Ingestion pipeline: load, chunk, embed, and index txt/md documents.
+"""Ingestion pipeline: load, chunk, embed, and index txt/md/pdf documents.
 
 This module owns the Haystack pipeline logic for ingestion.  Infrastructure
 concerns (which embedder backend to use, how to build it) live in
@@ -10,6 +10,7 @@ The public surface exposed to CLI and tests is :class:`IngestionPipeline`
 and :class:`IngestionConfig`.
 """
 
+import io
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -18,9 +19,11 @@ from typing import Any, Protocol, cast
 
 import structlog
 from haystack.components.converters import MarkdownToDocument, TextFileToDocument
+from haystack.components.converters.utils import get_bytestream_from_source, normalize_metadata
 from haystack.components.preprocessors import DocumentSplitter
 from haystack.dataclasses import ByteStream, Document
 from haystack.document_stores.types import DuplicatePolicy
+from pypdf import PdfReader
 
 from src.ingest.infrastructure.document_store import DocumentStore
 from src.ingest.infrastructure.embeddings_document import DocumentEmbedder
@@ -63,19 +66,78 @@ def _build_word_splitter(config: IngestionConfig) -> DocumentSplitter:
     )
 
 
-def _build_sentence_splitter(config: IngestionConfig) -> DocumentSplitter:
-    return DocumentSplitter(
-        split_by="sentence",
-        split_length=config.split_length,
-        split_overlap=config.split_overlap,
-    )
-
-
 @dataclass(frozen=True)
 class _FormatHandler:
     suffix: str
     converter_factory: Callable[[], _FileConverter]
     splitter_factory: Callable[[IngestionConfig], DocumentSplitter]
+
+
+class _PdfPageConverter:
+    """Extraction-first PDF converter: extracts text per page as individual documents.
+
+    Each non-empty page becomes one document with page-level provenance metadata
+    (``page``, ``total_pages``).  Extraction-first means the PDF is treated as a
+    structured text document routed through the standard text-chunking pipeline,
+    rather than embedded as a multi-modal artefact.
+
+    Uses Haystack's ``get_bytestream_from_source`` / ``normalize_metadata``
+    utilities for source loading and meta normalisation so that ``ByteStream``
+    inputs (including their embedded meta) work correctly — the same contract
+    the built-in Haystack converters (``PyPDFToDocument``, etc.) honour.
+
+    Note that we do not use the built-in Haystack ``PyPDFToDocument`` converter because it does not
+    preserve page-level provenance metadata, which is essential for accurate source citation in the UI.
+
+    Conforms to :class:`_FileConverter`.
+    """
+
+    def run(
+        self,
+        sources: list[str | Path | ByteStream],
+        meta: dict[str, Any] | list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Convert PDF sources to per-page :class:`~haystack.dataclasses.Document` instances."""
+        meta_list: list[dict[str, Any]] = normalize_metadata(meta, sources_count=len(sources))
+
+        documents: list[Document] = []
+        for source, caller_meta in zip(sources, meta_list, strict=True):
+            try:
+                bytestream = get_bytestream_from_source(source)
+            except Exception as exc:
+                logger.warning(
+                    "pdf_converter.source_load_failed",
+                    source=str(source),
+                    error=str(exc),
+                )
+                continue
+            # Merge ByteStream-embedded meta first (lower priority than caller meta).
+            base_meta: dict[str, Any] = {**bytestream.meta, **caller_meta}
+            try:
+                reader = PdfReader(io.BytesIO(bytestream.data))
+                total_pages = len(reader.pages)
+                for page_idx, page in enumerate(reader.pages):
+                    text = page.extract_text() or ""
+                    if not text.strip():
+                        logger.debug(
+                            "pdf_converter.skipping_empty_page",
+                            source=str(source),
+                            page=page_idx + 1,
+                        )
+                        continue
+                    page_meta: dict[str, Any] = {
+                        **base_meta,
+                        "page": str(page_idx + 1),
+                        "total_pages": str(total_pages),
+                    }
+                    documents.append(Document(content=text, meta=page_meta))
+            except Exception as exc:
+                logger.warning(
+                    "pdf_converter.extraction_failed",
+                    source=str(source),
+                    error=str(exc),
+                )
+        return {"documents": documents}
 
 
 # Maps each supported file suffix to both converter and splitting strategy.
@@ -89,7 +151,12 @@ _FORMAT_HANDLERS: tuple[_FormatHandler, ...] = (
     _FormatHandler(
         suffix=".md",
         converter_factory=MarkdownToDocument,
-        splitter_factory=_build_sentence_splitter,
+        splitter_factory=_build_word_splitter,
+    ),
+    _FormatHandler(
+        suffix=".pdf",
+        converter_factory=_PdfPageConverter,
+        splitter_factory=_build_word_splitter,
     ),
 )
 _FORMAT_HANDLER_BY_SUFFIX = {handler.suffix: handler for handler in _FORMAT_HANDLERS}

@@ -118,6 +118,7 @@ Returns relevant text chunks with source paths, chunk IDs, content, and similari
                         "author": chunk.author,
                         "publication_date": chunk.publication_date,
                         "source_url": chunk.source_url,
+                        "page": chunk.page,
                     }
                     for chunk in sources
                 ]

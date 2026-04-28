@@ -30,6 +30,18 @@ class TestCitationView:
 
         assert build_citation_name(chunk) == "doc.txt"
 
+    def test_build_citation_name_includes_page_when_present(self) -> None:
+        chunk = SourceChunk(
+            content="c",
+            source="doc.txt",
+            score=0.9,
+            chunk_id="42",
+            title="Nice Title",
+            page="7",
+        )
+
+        assert build_citation_name(chunk) == "Nice Title (p. 7)"
+
     def test_build_citation_content_includes_optional_metadata_when_present(self) -> None:
         chunk = SourceChunk(
             content="Chunk body",
@@ -39,6 +51,7 @@ class TestCitationView:
             author="Alice",
             publication_date="2024-10-01",
             source_url="https://example.com/doc",
+            page="4",
         )
 
         content = build_citation_content(chunk)
@@ -48,6 +61,7 @@ class TestCitationView:
         assert "### [Alice - 2024-10-01](https://example.com/doc)" in content
         assert "**Author:** Alice" in content
         assert "**Date:** 2024-10-01" in content
+        assert "**Page:** 4" in content
         assert "[Open source](https://example.com/doc)" not in content
         assert "**Source:** doc.txt" not in content
         assert content.endswith("Chunk body")
@@ -64,6 +78,7 @@ class TestCitationView:
 
         assert "**Author:**" not in content
         assert "**Date:**" not in content
+        assert "**Page:**" not in content
         assert "[Open source](" not in content
         assert "**Source:** doc.txt" in content
 
@@ -108,6 +123,7 @@ class TestCitationView:
             author="Alice",
             publication_date="2024-10-01",
             source_url="https://example.com/doc",
+            page="2",
         )
         duplicate_same_doc = SourceChunk(
             content="Chunk B",
@@ -118,6 +134,7 @@ class TestCitationView:
             author="Alice",
             publication_date="2024-10-01",
             source_url="https://example.com/doc",
+            page="2",
         )
         fallback = SourceChunk(
             content="Chunk C",
@@ -130,6 +147,31 @@ class TestCitationView:
 
         assert markdown.count("1. ") == 1
         assert markdown.count("2. ") == 1
-        assert "[Nice Title](https://example.com/doc) - Alice - 2024-10-01" in markdown
+        assert "[Nice Title](https://example.com/doc) - Alice - 2024-10-01 - p. 2" in markdown
         assert "fallback.txt" in markdown
         assert markdown.count("Nice Title") == 1
+
+    def test_build_citation_markdown_keeps_same_source_for_different_pages(self) -> None:
+        page_1 = SourceChunk(
+            content="Chunk A",
+            source="doc.pdf",
+            score=0.9,
+            chunk_id="42",
+            title="Policy",
+            page="1",
+        )
+        page_2 = SourceChunk(
+            content="Chunk B",
+            source="doc.pdf",
+            score=0.8,
+            chunk_id="43",
+            title="Policy",
+            page="2",
+        )
+
+        markdown = build_citation_markdown([page_1, page_2])
+
+        assert markdown.count("1. ") == 1
+        assert markdown.count("2. ") == 1
+        assert "Policy - p. 1" in markdown
+        assert "Policy - p. 2" in markdown

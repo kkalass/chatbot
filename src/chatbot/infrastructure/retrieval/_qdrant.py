@@ -63,6 +63,7 @@ class QdrantRetriever:
                     author=doc.meta.get("author"),
                     publication_date=doc.meta.get("publication_date"),
                     source_url=doc.meta.get("source_url"),
+                    page=doc.meta.get("page"),
                 )
                 for doc in docs
                 if doc.content

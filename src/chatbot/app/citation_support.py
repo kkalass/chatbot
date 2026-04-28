@@ -151,6 +151,7 @@ def _json_to_source_chunk(data: dict[str, object]) -> SourceChunk:
         author=_opt_str("author"),
         publication_date=_opt_str("publication_date"),
         source_url=_opt_str("source_url"),
+        page=_opt_str("page"),
     )
 
 

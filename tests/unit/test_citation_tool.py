@@ -216,6 +216,7 @@ class TestCitationToolExecute:
             "author": "Alice",
             "publication_date": "2024-01-01",
             "source_url": "https://example.com/report",
+            "page": "3",
         }
         ctx = _make_context([chunk])
         tool = CitationTool()
@@ -232,6 +233,7 @@ class TestCitationToolExecute:
         assert c.author == "Alice"
         assert c.publication_date == "2024-01-01"
         assert c.source_url == "https://example.com/report"
+        assert c.page == "3"
 
     @pytest.mark.asyncio
     async def test_duplicate_chunk_key_keeps_highest_score(self) -> None:

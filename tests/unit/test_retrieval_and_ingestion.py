@@ -8,6 +8,8 @@ Covers:
   infrastructure dependencies — uses in-memory documents only).
 - :func:`~src.ingest.pipeline.load_sidecar_meta` — sidecar loading.
 - Converter routing and splitter strategy selection.
+- PDF extraction: per-page document creation, page metadata propagation, and
+  extraction-failure isolation.
 """
 
 import json
@@ -299,12 +301,25 @@ class TestIngestionPipelineEmbedderInjection:
 
         assert embedder.call_count >= 1
 
+    def test_md_without_sentence_punctuation_still_splits_into_multiple_chunks(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: markdown chunking must not rely on sentence boundaries."""
+        doc = tmp_path / "notes.md"
+        doc.write_text("# Header\n" + " ".join(["token"] * 45))
+        pipeline, embedder, _store = _make_pipeline(tmp_path)
+
+        written = pipeline.ingest([doc])
+
+        assert written > 1
+        assert embedder.total_documents_seen > 1
+
     def test_unsupported_files_skipped(self, tmp_path: Path) -> None:
-        pdf = tmp_path / "report.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
+        docx = tmp_path / "report.docx"
+        docx.write_bytes(b"PK fake docx content")
         pipeline, embedder, _ = _make_pipeline(tmp_path)
 
-        count = pipeline.ingest([pdf])
+        count = pipeline.ingest([docx])
 
         assert count == 0
         assert embedder.call_count == 0
@@ -368,3 +383,221 @@ class TestIngestionPipelineEmbedderInjection:
         written = store.filter_documents()
         assert any(d.meta.get("title") == "Finance Report" for d in written)
         assert any(d.meta.get("author") == "Alice" for d in written)
+
+
+# ---------------------------------------------------------------------------
+# PDF ingestion — _PdfPageConverter and pipeline integration
+# ---------------------------------------------------------------------------
+
+# Minimal syntactically-valid PDF bytes (one page, ASCII text).  The xref
+# offsets are slightly off, but pypdf recovers via its repair path which is
+# sufficient for unit-level testing.
+_MINIMAL_PDF_PAGE1 = (
+    b"%PDF-1.4\n"
+    b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+    b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+    b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]\n"
+    b"  /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n"
+    b"4 0 obj << /Length 44 >>\n"
+    b"stream\n"
+    b"BT /F1 12 Tf 100 700 Td (Hello World Page One) Tj ET\n"
+    b"endstream\n"
+    b"endobj\n"
+    b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n"
+    b"xref\n0 6\n"
+    b"0000000000 65535 f \n"
+    b"0000000009 00000 n \n"
+    b"0000000058 00000 n \n"
+    b"0000000115 00000 n \n"
+    b"0000000266 00000 n \n"
+    b"0000000360 00000 n \n"
+    b"trailer << /Size 6 /Root 1 0 R >>\n"
+    b"startxref\n441\n%%EOF"
+)
+
+_MINIMAL_PDF_PAGE2 = (
+    b"%PDF-1.4\n"
+    b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+    b"2 0 obj << /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >> endobj\n"
+    b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]\n"
+    b"  /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n"
+    b"4 0 obj << /Length 44 >>\n"
+    b"stream\n"
+    b"BT /F1 12 Tf 100 700 Td (Content on page one here) Tj ET\n"
+    b"endstream\n"
+    b"endobj\n"
+    b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n"
+    b"6 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]\n"
+    b"  /Contents 7 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n"
+    b"7 0 obj << /Length 44 >>\n"
+    b"stream\n"
+    b"BT /F1 12 Tf 100 700 Td (Content on page two here) Tj ET\n"
+    b"endstream\n"
+    b"endobj\n"
+    b"xref\n0 8\n"
+    b"0000000000 65535 f \n"
+    b"0000000009 00000 n \n"
+    b"0000000058 00000 n \n"
+    b"0000000120 00000 n \n"
+    b"0000000280 00000 n \n"
+    b"0000000374 00000 n \n"
+    b"0000000450 00000 n \n"
+    b"0000000620 00000 n \n"
+    b"trailer << /Size 8 /Root 1 0 R >>\n"
+    b"startxref\n714\n%%EOF"
+)
+
+
+def _write_pdf(tmp_path: Path, name: str, content: bytes) -> Path:
+    p = tmp_path / name
+    p.write_bytes(content)
+    return p
+
+
+class TestPdfPageConverter:
+    """Unit tests for _PdfPageConverter in isolation (no pipeline infrastructure)."""
+
+    def test_single_page_pdf_yields_one_document(self, tmp_path: Path) -> None:
+        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+
+        pdf = _write_pdf(tmp_path, "single.pdf", _MINIMAL_PDF_PAGE1)
+        converter = _PdfPageConverter()
+        result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
+
+        docs = result["documents"]
+        assert len(docs) == 1
+
+    def test_extracted_text_present_in_document(self, tmp_path: Path) -> None:
+        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+
+        pdf = _write_pdf(tmp_path, "text.pdf", _MINIMAL_PDF_PAGE1)
+        converter = _PdfPageConverter()
+        result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
+
+        assert result["documents"][0].content is not None
+        assert "Hello World Page One" in (result["documents"][0].content or "")
+
+    def test_page_metadata_set_to_1_for_single_page(self, tmp_path: Path) -> None:
+        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+
+        pdf = _write_pdf(tmp_path, "meta.pdf", _MINIMAL_PDF_PAGE1)
+        converter = _PdfPageConverter()
+        result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
+
+        assert result["documents"][0].meta["page"] == "1"
+        assert result["documents"][0].meta["total_pages"] == "1"
+
+    def test_two_page_pdf_yields_two_documents(self, tmp_path: Path) -> None:
+        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+
+        pdf = _write_pdf(tmp_path, "two_pages.pdf", _MINIMAL_PDF_PAGE2)
+        converter = _PdfPageConverter()
+        result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
+
+        docs = result["documents"]
+        assert len(docs) == 2
+        assert docs[0].meta["page"] == "1"
+        assert docs[1].meta["page"] == "2"
+        assert docs[0].meta["total_pages"] == "2"
+
+    def test_sidecar_metadata_preserved_in_page_docs(self, tmp_path: Path) -> None:
+        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+
+        pdf = _write_pdf(tmp_path, "meta.pdf", _MINIMAL_PDF_PAGE1)
+        converter = _PdfPageConverter()
+        result = converter.run(
+            sources=[pdf],
+            meta=[{"source": str(pdf), "title": "My PDF", "author": "Bob"}],
+        )
+
+        doc = result["documents"][0]
+        assert doc.meta["title"] == "My PDF"
+        assert doc.meta["author"] == "Bob"
+        assert doc.meta["page"] == "1"
+
+    def test_extraction_failure_returns_empty_list(self, tmp_path: Path) -> None:
+        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+
+        bad = tmp_path / "corrupt.pdf"
+        bad.write_bytes(b"not a pdf at all")
+        converter = _PdfPageConverter()
+        result = converter.run(sources=[bad], meta=[{"source": str(bad)}])
+
+        assert result["documents"] == []
+
+    def test_single_dict_meta_applied_to_all_sources(self, tmp_path: Path) -> None:
+        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+
+        pdf1 = _write_pdf(tmp_path, "a.pdf", _MINIMAL_PDF_PAGE1)
+        pdf2 = _write_pdf(tmp_path, "b.pdf", _MINIMAL_PDF_PAGE1)
+        converter = _PdfPageConverter()
+        result = converter.run(sources=[pdf1, pdf2], meta={"category": "report"})
+
+        for doc in result["documents"]:
+            assert doc.meta["category"] == "report"
+
+
+class TestPdfIngestionPipeline:
+    """Integration-style unit tests: PDF path through the full pipeline (no network/Qdrant)."""
+
+    def test_pdf_file_ingested_and_chunks_written(self, tmp_path: Path) -> None:
+        pdf = _write_pdf(tmp_path, "doc.pdf", _MINIMAL_PDF_PAGE1)
+        pipeline, embedder, _store = _make_pipeline(tmp_path)
+
+        count = pipeline.ingest([pdf])
+
+        assert count > 0
+        assert embedder.call_count >= 1
+
+    def test_pdf_chunks_carry_page_metadata(self, tmp_path: Path) -> None:
+        from haystack.document_stores.in_memory import InMemoryDocumentStore
+
+        pdf = _write_pdf(tmp_path, "paged.pdf", _MINIMAL_PDF_PAGE2)
+        store = InMemoryDocumentStore()
+        embedder = _FakeEmbedder()
+        config = IngestionConfig(split_length=200, split_overlap=0)
+        pipeline = IngestionPipeline(config=config, document_store=store, embedder=embedder)
+
+        pipeline.ingest([pdf])
+
+        written = store.filter_documents()
+        pages = {d.meta.get("page") for d in written if d.meta.get("page")}
+        # Two-page PDF: both pages must be represented.
+        assert "1" in pages
+        assert "2" in pages
+
+    def test_pdf_sidecar_meta_merged_into_chunks(self, tmp_path: Path) -> None:
+        from haystack.document_stores.in_memory import InMemoryDocumentStore
+
+        pdf = _write_pdf(tmp_path, "report.pdf", _MINIMAL_PDF_PAGE1)
+        sidecar = tmp_path / "report.pdf.meta.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "title": "Annual Report",
+                    "author": "Corp Inc",
+                    "publication_date": "2024-01",
+                    "source_url": "https://example.com/report.pdf",
+                }
+            )
+        )
+
+        store = InMemoryDocumentStore()
+        embedder = _FakeEmbedder()
+        config = IngestionConfig(split_length=200, split_overlap=0)
+        pipeline = IngestionPipeline(config=config, document_store=store, embedder=embedder)
+        pipeline.ingest([pdf])
+
+        written = store.filter_documents()
+        assert any(d.meta.get("title") == "Annual Report" for d in written)
+        assert any(d.meta.get("author") == "Corp Inc" for d in written)
+        assert any(d.meta.get("source_url") == "https://example.com/report.pdf" for d in written)
+
+    def test_corrupt_pdf_skipped_gracefully(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.pdf"
+        bad.write_bytes(b"not a pdf")
+        pipeline, _embedder, _ = _make_pipeline(tmp_path)
+
+        # Must not raise; corrupt file is logged and skipped.
+        count = pipeline.ingest([bad])
+        assert count == 0
