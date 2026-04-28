@@ -13,8 +13,10 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from src.chatbot.tools._input_model import ToolInputModel
 
-class VacationDaysInput(BaseModel):
+
+class VacationDaysInput(ToolInputModel):
     """Decoded and validated arguments from the LLM's tool_call."""
 
     year: int = Field(description="Calendar year to query vacation days for.")

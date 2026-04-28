@@ -10,7 +10,7 @@ from typing import Literal, assert_never
 from src.chatbot.app.protocols import ChatModel, PromptProfile
 
 from ._ollama import build_ollama_chat_model
-from ._prompt_profile import DefaultChatPromptProfile
+from ._prompt_profile import DefaultChatPromptProfile, SmallModelPromptProfile
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,10 @@ def build_chat_prompt_profile(config: ChatModelConfig) -> PromptProfile:
         case model if model.startswith("llama3.1"):
             return Llama31PromptProfile()
     """
-    match config.model:
+    model_name = config.model.lower()
+    match model_name:
+        case name if "llama" in name:
+            return SmallModelPromptProfile()
         case _:
             return DefaultChatPromptProfile()
 
@@ -61,6 +64,7 @@ __all__ = [
     "ChatModelConfig",
     "DefaultChatPromptProfile",
     "PromptProfile",
+    "SmallModelPromptProfile",
     "build_chat_model",
     "build_chat_prompt_profile",
 ]

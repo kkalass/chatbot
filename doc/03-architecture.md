@@ -6,13 +6,16 @@ The application is a locally-run RAG chatbot with explicit separation of concern
 ## Components
 - UI Layer (Chainlit)
   - Handles user interaction, streaming output, and source display.
+  - Renders validated citations in two surfaces: side-panel citation elements and a compact deduplicated "Sources" section appended to the answer.
 - Application Layer (Chat Orchestrator)
   - Coordinates message history, the agentic tool-call loop, model generation, and citation extraction.
   - Retrieval is modelled as a regular `Tool` (`search_documents`): the LLM decides if and when to call it and formulates the query itself — the orchestrator applies no pre-retrieval heuristics.
   - The system prompt instructs the model to restrict answers to information available from tools and retrieved documents, and to express uncertainty when evidence is insufficient rather than drawing on parametric knowledge.
-  - After the agentic loop produces a plain-text response, the orchestrator runs a citation pass: it checks whether a `SourceCitationEvent` was already emitted during the loop (via `cite_sources`). If not and at least one `search_documents` result exists in the full conversation history, it re-runs the same agentic loop code with only `cite_sources` registered as a tool, discarding any text output. If the model still produces no citation call, no `SourceCitationEvent` is emitted and the UI shows no sources.
+  - After the agentic loop produces a plain-text response, the orchestrator runs a citation pass only for turns that executed `search_documents`. If no `SourceCitationEvent` was emitted during the main loop, it builds a dedicated citation request from (a) rendered search results correlated to that turn's `search_documents` call IDs and (b) the final answer text, then invokes the model with only `cite_sources` registered as a tool.
+  - The citation pass uses a dedicated citation system prompt (separate from the main answer-generation system prompt) to reduce instruction interference.
+  - If the model returns text instead of a native tool call in citation pass, the orchestrator attempts to recover a serialized `cite_sources` JSON payload from text and dispatch it as a normal tool call.
   - `process_message` yields a typed `ProcessEvent` stream (`type ProcessEvent = str | ToolEvent`); text chunks are streamed live, `ToolEvent` instances (e.g. `SourceCitationEvent`) are emitted as they occur during tool execution.
-  - All prompts are centralised in `src/chatbot/app/prompts.py` as `@dataclass(frozen=True) class Prompts`. The orchestrator receives a `Prompts` instance via constructor injection.
+  - All prompts are centralised in `src/chatbot/app/prompts.py` as `@dataclass(frozen=True) class Prompts`. The orchestrator receives a model-specific `PromptProfile` via constructor injection and derives effective prompts by applying it to `DEFAULT_PROMPTS`.
 - Retrieval Layer
   - Query embedding, vector search (Qdrant), reranking/filtering, source packaging.
 - Ingestion Layer
@@ -23,8 +26,9 @@ The application is a locally-run RAG chatbot with explicit separation of concern
   - `Tool` Protocol: each tool exposes a `schema: ToolSchema` field and an `execute(args: JsonObject, context: ToolContext) -> tuple[JsonObject, list[ToolEvent]]` coroutine. The orchestrator appends the `JsonObject` to history as the `role="tool"` result and yields any `ToolEvent` items into the outer `process_message` stream.
   - `ToolContext`: a read-only value object carrying a snapshot of the current conversation history (`history: tuple[ChatMessage, ...]`). Passed to every tool on execution; tools must not mutate it.
   - `ToolEvent`: a `type` alias union in `src/chatbot/app/protocols.py` (e.g. `type ToolEvent = SourceCitationEvent`). No base class or Protocol — the union itself enumerates what tools may emit. `type ProcessEvent = str | ToolEvent` is the public stream type of `process_message`; pyright flattens both unions, so `match`/`case` + `typing.assert_never` on `ProcessEvent` gives exhaustive dispatch over all variants including future additions. Additional event types may be added in future phases by extending `ToolEvent`.
-  - `CitationTool` (`cite_sources`): a regular tool that receives the cited filenames from the LLM, validates them against the `search_documents` tool-results in the `ToolContext` history snapshot, and emits a `SourceCitationEvent` carrying only the validated `SourceChunk` objects. Its `JsonObject` result (containing validated and unvalidated filenames) is appended to history like any other tool result, giving subsequent turns full citation context.
+  - `CitationTool` (`cite_sources`): a regular tool that receives cited `source` + `chunk_id` pairs from the LLM, validates them against the `search_documents` tool-results in the `ToolContext` history snapshot, and emits a `SourceCitationEvent` carrying only the validated `SourceChunk` objects. Its `JsonObject` result (containing validated and unvalidated pairs) is appended to history like any other tool result, giving subsequent turns full citation context.
   - `RetrievalTool` (`search_documents`): wraps the `Retriever` Protocol. Returns retrieved chunks as structured JSON; emits no `ToolEvent`.
+  - `ToolInputModel`: shared Pydantic base model for LLM-facing tool arguments. Structured fields (`list`/`dict`) are pre-coerced from JSON-serialized strings before validation.
   - `VacationDaysAuth`: a service-local Protocol used by `VacationDaysTool`. The default implementation is `InteractiveVacationDaysAuthSession`, which receives an `ask_user: AskUser` callable at construction time. On first call it collects one username/password pair from the user, caches it as instance state, and returns it. On adapter rejection it clears the cache so the next call re-collects.
   - Service adapters (e.g. `SimulatedVacationDaysAdapter`) are wrapped by tool classes; the orchestrator and the LLM never import adapters directly.
 - Model Runtime
@@ -33,6 +37,7 @@ The application is a locally-run RAG chatbot with explicit separation of concern
 - Observability Layer
   - OpenTelemetry tracing is configured at app startup and exported via OTLP.
   - Spans cover UI turn handling, orchestrator rounds, tool dispatch, model streaming, and retriever execution.
+  - Citation-pass spans capture recovery telemetry (`recovery_attempted`, `recovery_succeeded`) and turn spans capture aggregate counters (`chat.citation_recovery_attempts`, `chat.citation_recovery_successes`).
   - Trace payload attributes are previewed with truncation to keep spans inspectable while avoiding unbounded attribute size growth.
 
 ## Binding Points
@@ -57,11 +62,14 @@ The application is a locally-run RAG chatbot with explicit separation of concern
    - For each `tool_call`: the orchestrator calls `tool.execute(args, context)` where `context` carries a read-only history snapshot. The returned `JsonObject` is appended to history as `role="tool"`; any `ToolEvent` items are yielded into the `process_message` stream immediately.
    - Loop continues until the LLM produces a plain-text response with no pending tool calls.
    - Citation pass after the loop:
-     - **Trigger condition**: only if the full conversation history contains at least one `search_documents` tool-result (i.e. RAG was ever used, including in prior turns). If no `search_documents`-result is present, skip the citation pass entirely.
-     1. If a `SourceCitationEvent` was emitted during the loop (i.e. the LLM called `cite_sources`): no further action needed.
-     2. If no `SourceCitationEvent` was observed: re-run the same agentic loop code with only `cite_sources` registered as a tool and the complete history; discard any text output. Tool dispatch is identical to the main loop.
-     3. If still no citations returned: emit nothing — the UI displays no sources. This is **not an error**: it is the expected outcome when the answer was derived from a non-RAG tool call (e.g. `get_vacation_days`) even though RAG results exist elsewhere in history.
-   - `process_message` yields `ProcessEvent` (`str | ToolEvent`); the UI uses `match`/`case` + `assert_never` to handle each variant (render text chunks live, render `SourceCitationEvent` as Chainlit citation elements).
+     - **Trigger condition**: only if at least one `search_documents` call happened in the current turn and no `SourceCitationEvent` was already emitted.
+     1. Collect `search_documents` tool-result chunks correlated by call ID from the current turn.
+     2. Build a dedicated citation request prompt containing `<search_results>` and `<answer>` blocks.
+    3. Call the model with the citation-specific system prompt and only `cite_sources` in the tool schema list.
+     4. If the model emits no native tool call, attempt serialized-tool-call recovery by parsing text for a `cite_sources` JSON payload.
+     5. Dispatch at most one `cite_sources` call and emit resulting `SourceCitationEvent` values.
+     6. If no citations are recovered/returned, emit nothing — the UI displays no sources.
+  - `process_message` yields `ProcessEvent` (`str | ToolEvent`); the UI uses `match`/`case` + `assert_never` to handle each variant (render text chunks live, render `SourceCitationEvent` as Chainlit citation elements plus appended deduplicated source markdown).
   - In parallel, OpenTelemetry spans record request/response previews and counters for each stage to enable deterministic debugging in Jaeger.
 
 ## Authentication Flows (MVP)
@@ -89,7 +97,10 @@ Implementation rules:
 
 ## Key Design Decisions
 - Retrieval is modelled as a tool (`search_documents`), not as eager pre-retrieval: the LLM decides when to search and formulates its own queries, enabling multi-hop retrieval and query reformulation from conversation context.
-- Citations are LLM-driven via `cite_sources`, a regular tool that validates cited filenames against actual `search_documents` results in the `ToolContext` history snapshot and emits a `SourceCitationEvent`. The fallback citation pass (same agentic loop code, only `cite_sources` registered, text discarded) is triggered only when the full history contains at least one `search_documents` result. No citations returned after the fallback is not an error — it is the expected outcome when the answer was derived from a non-RAG tool.
+- Citations are LLM-driven via `cite_sources`, a regular tool that validates cited `source` + `chunk_id` pairs against actual `search_documents` results in the `ToolContext` history snapshot and emits a `SourceCitationEvent`.
+- The fallback citation pass is isolated from full history and instead uses a dedicated prompt with current-turn search results plus final answer text; this reduces tool-selection drift in weaker models.
+- Serialized citation tool-call recovery (`{"name":"cite_sources","parameters":...}` emitted as text) is supported as a robustness fallback.
+- Citation presentation is metadata-first: title/author/date are preferred for display; where `source_url` exists, labels are linkified and standalone raw URL lines are omitted.
 - `Tool.execute` accepts a `ToolContext` and returns `tuple[JsonObject, list[ToolEvent]]`: the `JsonObject` enters history as the tool result; `ToolEvent` items flow directly into the `process_message` stream. This keeps the orchestrator free of per-tool special cases while giving tools a clean channel to emit typed events to the UI.
 - Two `type` aliases separate concerns: `ToolEvent` enumerates what tools may emit; `ProcessEvent = str | ToolEvent` is the public stream type of `process_message`. Pyright flattens both unions, so `match`/`case` + `assert_never` on `ProcessEvent` gives exhaustive, statically-checked dispatch over all variants — the Python equivalent of Dart's sealed class pattern.
 - UI is Chainlit-first for chat-focused UX and rapid conversational iteration.
@@ -103,7 +114,7 @@ Implementation rules:
 - src/settings/
 - src/chatbot/
   - `app/`: orchestrator, protocols, prompts
-    - `prompts.py`: `@dataclass(frozen=True) class Prompts` with `str` fields for plain prompts and `Callable[..., str]` fields for parameterised prompts. Module-level `DEFAULT_PROMPTS` constant provides production defaults. Callers customise via `dataclasses.replace(DEFAULT_PROMPTS, field=value)` — no subclassing.
+    - `prompts.py`: `@dataclass(frozen=True) class Prompts` with callable prompt fields (request-time system prompts and parameterised citation prompt builders). Module-level `DEFAULT_PROMPTS` constant provides production defaults. Callers customise via `dataclasses.replace(DEFAULT_PROMPTS, field=value)` — no subclassing.
   - `ui/`: Chainlit UI layer and session lifecycle
   - `tools/`: typed tool schemas and external-service adapters
     - Each tool that requires a service adapter is a sub-package: `src/chatbot/tools/<name>/` with
@@ -141,6 +152,6 @@ Runtime note:
 - Local model quality variance may reduce answer quality.
 - PDF extraction quality can dominate downstream retrieval quality.
 - Prompt injection in documents can affect generation behavior.
-- Citation hallucination: the fallback citation pass may cause the model to invent source filenames not present in actual `search_documents` results. `CitationTool` mitigates this by validating all claimed sources against the tool-result history and discarding unvalidated ones.
+- Citation hallucination: the citation pass may cause the model to invent source pairs not present in actual `search_documents` results. `CitationTool` mitigates this by validating all claimed `source` + `chunk_id` pairs against tool-result history and discarding unvalidated ones.
 - Latency can increase with large corpora if chunking/retrieval strategy is not tuned.
 - Memory pressure can spike during ingestion if micro-batch limits are not enforced.

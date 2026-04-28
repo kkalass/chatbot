@@ -26,7 +26,7 @@
 ## Phase 2: Tool Calling
 - Implement `Tool` Protocol and `ToolSchema` dataclass as the typed boundary between the orchestrator and tools.
 - Implement agentic tool loop in the orchestrator: send tool schemas to the LLM, execute returned `tool_calls` by dispatching to the registered tool by name, loop until plain-text response.
-- Introduce `src/chatbot/app/prompts.py`: `@dataclass(frozen=True) class Prompts` with `str` fields for plain prompts and `Callable[..., str]` fields for parameterised prompts; module-level `DEFAULT_PROMPTS` constant. The orchestrator derives its effective `Prompts` from `DEFAULT_PROMPTS` via an injected `PromptProfile` at construction time. All future prompts (system prompt, citation fallback message, etc.) live here only.
+- Introduce `src/chatbot/app/prompts.py`: `@dataclass(frozen=True) class Prompts` with callable prompt fields (request-time system prompts and parameterised citation prompt builders); module-level `DEFAULT_PROMPTS` constant. The orchestrator derives its effective `Prompts` from `DEFAULT_PROMPTS` via an injected `PromptProfile` at construction time. All future prompts (system prompt, citation-system prompt, citation request message, etc.) live here only.
 - Implement `VacationDaysAuth` and `InteractiveVacationDaysAuthSession`: receive `ask_user: AskUser` at construction, collect one username/password pair on first use, cache it as instance state, and clear it on auth failure.
 - Implement typed vacation-days tool with Pydantic schemas; delegates auth to `VacationDaysAuth`.
 - Wire all session-scoped dependencies (model, tools, vacation-days auth session) in `app.py` `on_chat_start`; inject `ask_user` wrapper there as the single Chainlit seam.
@@ -38,10 +38,15 @@
 - Add chunking, embedding, and Qdrant indexing.
 - Integrate retrieval as a tool (`search_documents`) so the LLM decides when and with what query to retrieve.
 - Introduce `ToolContext` (read-only history snapshot) and change `Tool.execute` signature to `(args, context) -> tuple[JsonObject, list[ToolEvent]]`. Update all existing tools (`VacationDaysTool`, `RetrievalTool`) accordingly.
+- Introduce `ToolInputModel` as the shared Pydantic base model for LLM-facing tool arguments, including coercion of JSON-serialized structured values.
 - Introduce `ToolEvent` type alias union and `ProcessEvent = str | ToolEvent` in `src/chatbot/app/protocols.py`; add `SourceCitationEvent` as the first `ToolEvent` variant.
-- Implement `CitationTool` (`cite_sources`) as a regular tool: validates cited filenames against `search_documents` results in `ToolContext.history`, emits `SourceCitationEvent` in its `ToolEvent` list, and appends its `JsonObject` result to history.
-- Update the orchestrator to propagate `ToolEvent` items from tool execution into the `process_message` stream. After the agentic loop, trigger the fallback citation pass only if the full conversation history contains at least one `search_documents` tool-result; if so, re-run the same agentic loop code with only `cite_sources` registered as a tool, discarding text output. No citations returned after the fallback is not an error.
-- Update `process_message` to yield `ProcessEvent` (`str | ToolEvent`); update the UI to use `match`/`case` + `assert_never` and render `SourceCitationEvent` as Chainlit citation elements.
+- Implement `CitationTool` (`cite_sources`) as a regular tool: validates cited `source` + `chunk_id` pairs against `search_documents` results in `ToolContext.history`, emits `SourceCitationEvent` in its `ToolEvent` list, and appends its `JsonObject` result to history.
+- Update the orchestrator to propagate `ToolEvent` items from tool execution into the `process_message` stream.
+- Implement dedicated citation pass prompting: after the main loop, if the current turn used `search_documents` and no citation event was emitted, issue a citation-only prompt containing rendered turn-local search results and the final answer, with only `cite_sources` exposed.
+- Use a dedicated citation system prompt (separate from answer generation) for citation rounds to reduce prompt interference.
+- Add citation-pass robustness fallback: if the model emits serialized `cite_sources` JSON as text instead of a native tool call, parse and recover it into a dispatched tool call.
+- Add model-specific `SmallModelPromptProfile` for llama-family models to tighten tool-calling instructions and simplify `cite_sources` schema.
+- Update `process_message` to yield `ProcessEvent` (`str | ToolEvent`); update the UI to use `match`/`case` + `assert_never` and render `SourceCitationEvent` as Chainlit citation elements plus a compact deduplicated sources section with linkified labels.
 - Add integration tests for grounded QA and citation validation.
 
 ## Phase 3.5: Ingestion Architecture Hardening (Pre-PDF)

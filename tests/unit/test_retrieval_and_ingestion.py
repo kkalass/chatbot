@@ -77,6 +77,31 @@ class TestRetrievalTool:
         assert events == []
 
     @pytest.mark.asyncio
+    async def test_result_preserves_optional_chunk_metadata(self) -> None:
+        chunks = [
+            SourceChunk(
+                content="Policy text",
+                source="corpus/executive_order_14110.txt",
+                score=0.95,
+                chunk_id="1",
+                title="Executive Order 14110",
+                author="Executive Office of the President",
+                publication_date="2023-11-01",
+                source_url="https://example.com/eo-14110",
+            )
+        ]
+        tool = RetrievalTool(retriever=_FakeRetriever(chunks))
+
+        result, events = await tool.execute({"query": "EO 14110"}, _EMPTY_CONTEXT)
+
+        first = result["chunks"][0]  # type: ignore[index]
+        assert first["title"] == "Executive Order 14110"  # type: ignore[index]
+        assert first["author"] == "Executive Office of the President"  # type: ignore[index]
+        assert first["publication_date"] == "2023-11-01"  # type: ignore[index]
+        assert first["source_url"] == "https://example.com/eo-14110"  # type: ignore[index]
+        assert events == []
+
+    @pytest.mark.asyncio
     async def test_returns_no_results_message_on_empty_retrieval(self) -> None:
         tool = RetrievalTool(retriever=_FakeRetriever([]))
 

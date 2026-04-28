@@ -49,10 +49,10 @@ class VacationDaysTool:
         # source of truth.
         self.schema = ToolSchema(
             name=_TOOL_NAME,
-            description=(
-                "Look up the vacation day balance for the currently authenticated employee. "
-                "Returns total allocation, used days, and remaining days for the given year."
-            ),
+            description="""Look up the vacation day balance for the currently authenticated employee.
+
+Provide the calendar year to query.
+Returns total allocation, used days, and remaining days for that year.""",
             parameters_schema=VacationDaysInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
 

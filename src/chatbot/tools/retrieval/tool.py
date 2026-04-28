@@ -9,7 +9,7 @@ pre-retrieval.
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from src.chatbot.app.protocols import (
     JsonObject,
@@ -21,6 +21,7 @@ from src.chatbot.app.protocols import (
 )
 from src.chatbot.observability import to_attribute_text
 from src.chatbot.observability.schema import SPAN_CHAT_TOOL_SEARCH_DOCUMENTS
+from src.chatbot.tools._input_model import ToolInputModel
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -28,7 +29,7 @@ tracer = trace.get_tracer(__name__)
 _TOOL_NAME = "search_documents"
 
 
-class _SearchInput(BaseModel):
+class _SearchInput(ToolInputModel):
     query: str
 
 
@@ -47,12 +48,10 @@ class RetrievalTool:
         self._retriever = retriever
         self.schema = ToolSchema(
             name=_TOOL_NAME,
-            description=(
-                "Search the document corpus for information relevant to a query. "
-                "Returns relevant text excerpts with source paths, chunk IDs, and similarity scores. "
-                "Call this tool when the user asks about topics that may be covered in the "
-                "uploaded documents."
-            ),
+            description="""Search the document corpus for information relevant to a query.
+
+Call this tool when the user's request may be answered from the uploaded documents.
+Returns relevant text chunks with source paths, chunk IDs, content, and similarity scores.""",
             parameters_schema=_SearchInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
 
@@ -115,6 +114,10 @@ class RetrievalTool:
                         "chunk_id": chunk.chunk_id,
                         "content": chunk.content,
                         "score": chunk.score,
+                        "title": chunk.title,
+                        "author": chunk.author,
+                        "publication_date": chunk.publication_date,
+                        "source_url": chunk.source_url,
                     }
                     for chunk in sources
                 ]

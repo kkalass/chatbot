@@ -33,15 +33,20 @@ Create a small but representative benchmark set:
 - Retrieval filtering and ranking behavior.
 - Prompt assembly with source context.
 - Tool input/output validation with Pydantic.
+- Tool-input coercion for weak-model payloads (JSON-serialized list/object fields parsed before validation).
 - `InteractiveVacationDaysAuthSession`: cache-hit path, first-use collection path (via fake `ask_user` callable), cancellation path, clear-on-auth-failure path.
 - `VacationDaysTool`: happy path (credentials present), auth-failure path, cancellation path.
 - Orchestrator agentic loop: single tool call round-trip, multi-tool sequence, loop termination on plain-text response.
+- Citation pass behavior: dedicated citation prompt assembly (`<search_results>` + `<answer>`), wrong-tool-call rejection, serialized `cite_sources` text recovery, and malformed serialized payload recovery.
+- Citation pass prompting isolation: citation rounds use the citation-specific system prompt, while main answer rounds use the general system prompt.
+- Citation UI rendering helpers: metadata-first headers, linked title/label when `source_url` exists, deduplicated sources list generation, and omission of standalone raw URL lines.
 
 ### Integration Tests
 - Ingest fixture corpus and query known facts.
 - Ingest mixed txt/md fixture corpus and assert converter routing succeeds.
 - Verify citations are present and linked to expected docs.
 - Verify citation metadata fields originating from sidecar files are present in retrieved chunk metadata.
+- Verify citation rendering uses metadata labels and linked titles (when `source_url` exists) without displaying standalone raw URL lines.
 - Verify uncertainty behavior when evidence is missing.
 - Verify tool-call path for vacation-days scenarios.
 

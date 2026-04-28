@@ -6,14 +6,19 @@
 - The system shall provide a conversational chat interface in Chainlit.
 - The system shall stream partial model output to the user.
 - The system shall persist conversation context for the active session.
+- The UI shall render validated citations both (a) as side-panel citation elements and (b) as a compact deduplicated source list appended to the assistant response.
+- Where `source_url` exists, the displayed citation title/label shall be rendered as a link; raw URLs shall not be shown as standalone text lines.
 
 ### FR-02 Retrieval-Augmented Generation
 - The system shall retrieve relevant chunks from indexed content by exposing retrieval as a tool (`search_documents`) that the LLM invokes with its own query formulation.
-- The LLM shall explicitly declare which sources it used by calling the `cite_sources` tool with the referenced filenames.
-- `cite_sources` validates declared filenames against the `search_documents` results present in the conversation history and emits a `SourceCitationEvent` carrying only the validated `SourceChunk` objects.
-- If the LLM does not call `cite_sources` in its primary response **and** the full conversation history contains at least one `search_documents` tool-result, the orchestrator shall re-run the same agentic loop code with only `cite_sources` registered as a tool (text output discarded) to collect citations. If no `search_documents`-result exists in history, the citation pass is skipped entirely.
+- The LLM shall explicitly declare which sources it used by calling the `cite_sources` tool with `source` + `chunk_id` pairs.
+- `cite_sources` validates declared `source` + `chunk_id` pairs against the `search_documents` results present in tool-result history and emits a `SourceCitationEvent` carrying only the validated `SourceChunk` objects.
+- If the LLM does not call `cite_sources` in its primary response **and** at least one `search_documents` call occurred in the same turn, the orchestrator shall run a dedicated citation pass with only `cite_sources` registered as a tool. The citation pass prompt shall contain only (a) rendered search results from that turn and (b) the final answer text. If no correlated `search_documents` result exists, the citation pass is skipped.
+- The citation pass shall use a dedicated citation system prompt distinct from the main answer-generation system prompt.
+- During the citation pass, if the model returns no native tool call but emits a serialized `cite_sources` JSON payload in text, the system shall attempt to recover and dispatch it as a `cite_sources` call.
 - If the model returns no citations after the fallback call, no sources shall be displayed — this is not an error (the answer may have been derived from a non-RAG tool call). The system shall not fabricate or guess cited sources.
 - The system prompt shall instruct the model to restrict answers to information available from tools and retrieved documents, and to express uncertainty when evidence is insufficient rather than drawing on parametric knowledge.
+- Serialized `search_documents` tool results written to history shall preserve citation metadata fields (`title`, `author`, `publication_date`, `source_url`) so downstream citation rendering has full provenance context.
 - The system shall use a retrieval strategy configurable via constants/env for top-k and similarity threshold.
 
 ### FR-03 Multi-Modal Ingestion
@@ -35,6 +40,7 @@
 - `cite_sources` is a regular tool: its `JsonObject` result (containing validated and unvalidated sources) is appended to history like any other tool, and it emits a `SourceCitationEvent` in its `ToolEvent` list for the UI to render.
 - `ToolContext` provides a read-only history snapshot; tools must not mutate it.
 - Tool implementations must not import UI or infrastructure modules; all session-specific dependencies (such as the `ask_user` callable) are injected at construction time.
+- Tool input models shall tolerate common weak-model argument mistakes by coercing JSON-serialized list/object fields into native JSON values before schema validation.
 
 ### FR-05 Authentication for External Service Simulation
 - The external service simulation shall require simple username/password identity context at tool-call time.
@@ -72,7 +78,7 @@
   - tool integrations.
 - Typed boundaries shall be used between modules.
 - Ingestion boundaries shall separate conversion routing, splitting strategy selection, embedding, and persistence to keep each stage independently replaceable and testable.
-- All prompts shall be centralised in `src/chatbot/app/prompts.py` as a `@dataclass(frozen=True) class Prompts`. Plain prompts are `str` fields; parameterised prompts are `Callable[..., str]` fields. A module-level `DEFAULT_PROMPTS` constant provides the production defaults. The orchestrator receives a `Prompts` instance via constructor injection; callers may supply a customised instance via `dataclasses.replace(DEFAULT_PROMPTS, field=value)` — no subclassing required.
+- All prompts shall be centralised in `src/chatbot/app/prompts.py` as a `@dataclass(frozen=True) class Prompts` with callable fields (for request-time context such as current date and citation payloads). A module-level `DEFAULT_PROMPTS` constant provides the production defaults. The orchestrator derives the effective prompts from `DEFAULT_PROMPTS` via an injected model-specific `PromptProfile`; callers customise prompts through the profile implementation (typically via `adjust_prompts(...)`) rather than by directly injecting a `Prompts` instance into the orchestrator.
 - Observability instrumentation shall be implemented via OpenTelemetry standards rather than ad-hoc custom tracing formats.
 
 ### NFR-04 Testability
@@ -111,4 +117,5 @@
 - Given a vacation-days query, the bot performs the typed tool call and returns structured result.
 - Given a mixed txt/md corpus, ingestion uses type-specific converters and completes successfully.
 - Given a document with `<document>.meta.json`, retrieved chunks include sidecar metadata fields required for citation rendering.
+- Given retrieved chunks with `source_url`, citation titles/labels are rendered as links and raw URLs are not shown as standalone lines.
 - CI test suite passes on a fresh environment setup.

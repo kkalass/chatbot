@@ -444,7 +444,7 @@ class TestCitationPass:
 
     @pytest.mark.asyncio
     async def test_citation_pass_triggered_when_search_results_in_history(self) -> None:
-        """When search_documents was called, cite_sources pass runs and yields event."""
+        """When search_documents was called, citation pass uses dedicated prompt + cite_sources."""
         chunk = SourceChunk(content="some content", source="doc.txt", score=0.9, chunk_id="1")
         cite_event = SourceCitationEvent(validated=(chunk,))
 
@@ -497,6 +497,72 @@ class TestCitationPass:
         assert isinstance(events[0], SourceCitationEvent)
         # Main loop (2 rounds) + single citation round.
         assert len(model.stream_calls) == 3
+        # Citation pass receives a dedicated two-message prompt (system + citation request).
+        citation_messages = model.stream_calls[2]
+        assert [m.role for m in citation_messages] == ["system", "user"]
+        assert isinstance(citation_messages[1].content, str)
+        assert "<search_results>" in citation_messages[1].content
+        assert "<answer>" in citation_messages[1].content
+        assert "Based on sources." in citation_messages[1].content
+
+    @pytest.mark.asyncio
+    async def test_citation_pass_uses_dedicated_citation_system_prompt(self) -> None:
+        chunk = SourceChunk(content="some content", source="doc.txt", score=0.9, chunk_id="1")
+        cite_event = SourceCitationEvent(validated=(chunk,))
+
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        cite_tc = ToolCallInfo(
+            name="cite_sources",
+            arguments={"citations": [{"source": "doc.txt", "chunk_id": "1"}]},
+            call_id="c1",
+        )
+
+        prompts = Prompts(
+            system_prompt=lambda _now: "GENERAL SYSTEM",
+            citation_system_prompt=lambda _now: "CITATION SYSTEM",
+            citation_request_message=lambda _search_results, _answer: "citation request",
+        )
+
+        search_tool = _FakeTool(
+            "search_documents",
+            result={
+                "chunks": [
+                    {
+                        "source": "doc.txt",
+                        "chunk_id": "1",
+                        "content": "some content",
+                        "score": 0.9,
+                    }
+                ]
+            },
+        )
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={
+                "validated": [{"source": "doc.txt", "chunk_id": "1"}],
+                "unvalidated": [],
+            },
+            events=[cite_event],
+        )
+
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc]),
+                (["Based on sources."], []),
+                ([], [cite_tc]),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool, cite_tool],
+            prompt_profile=_FixedPromptsProfile(prompts),
+        )
+
+        await _collect_all(orchestrator.process_message("find me info"))
+
+        assert model.stream_calls[0][0].content == "GENERAL SYSTEM"
+        assert model.stream_calls[1][0].content == "GENERAL SYSTEM"
+        assert model.stream_calls[2][0].content == "CITATION SYSTEM"
 
     @pytest.mark.asyncio
     async def test_citation_pass_not_triggered_when_no_search_results(self) -> None:
@@ -569,3 +635,150 @@ class TestCitationPass:
         assert len(events) == 1
         # cite_sources called exactly once (during main loop, not again in pass).
         assert len(cite_tool.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_citation_pass_ignores_non_citation_tool_calls(self) -> None:
+        """Citation pass should not dispatch tools other than cite_sources."""
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        wrong_tc = ToolCallInfo(name="search_documents", arguments={"query": "again"}, call_id="s2")
+
+        search_tool = _FakeTool(
+            "search_documents",
+            result={
+                "chunks": [
+                    {
+                        "source": "doc.txt",
+                        "chunk_id": "1",
+                        "content": "c",
+                        "score": 0.9,
+                    }
+                ]
+            },
+        )
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={"validated": [], "unvalidated": []},
+            events=[],
+        )
+
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc]),
+                (["answer"], []),
+                ([], [wrong_tc]),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        _, events = await _collect_all(orchestrator.process_message("find info"))
+
+        assert events == []
+        assert len(search_tool.calls) == 1
+        assert cite_tool.calls == []
+
+    @pytest.mark.asyncio
+    async def test_citation_pass_recovers_serialized_citation_tool_call(self) -> None:
+        """If model emits serialized cite_sources JSON as text, pass should recover it."""
+        chunk = SourceChunk(content="c", source="doc.txt", score=0.9, chunk_id="1")
+        cite_event = SourceCitationEvent(validated=(chunk,))
+
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        search_tool = _FakeTool(
+            "search_documents",
+            result={
+                "chunks": [
+                    {
+                        "source": "doc.txt",
+                        "chunk_id": "1",
+                        "content": "c",
+                        "score": 0.9,
+                    }
+                ]
+            },
+        )
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={
+                "validated": [{"source": "doc.txt", "chunk_id": "1"}],
+                "unvalidated": [],
+            },
+            events=[cite_event],
+        )
+
+        serialized = (
+            '{"name":"cite_sources","parameters":{"citations":['
+            '{"source":"doc.txt","chunk_id":"1"}]}}'
+        )
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc]),
+                (["answer"], []),
+                ([serialized], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        _, events = await _collect_all(orchestrator.process_message("find info"))
+
+        assert len(events) == 1
+        assert len(cite_tool.calls) == 1
+        assert cite_tool.calls[0] == {"citations": [{"source": "doc.txt", "chunk_id": "1"}]}
+
+    @pytest.mark.asyncio
+    async def test_citation_pass_recovers_malformed_serialized_citation_tool_call(self) -> None:
+        """Recovery should also work for lightly malformed serialized JSON payloads."""
+        chunk = SourceChunk(content="c", source="doc.txt", score=0.9, chunk_id="1")
+        cite_event = SourceCitationEvent(validated=(chunk,))
+
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        search_tool = _FakeTool(
+            "search_documents",
+            result={
+                "chunks": [
+                    {
+                        "source": "doc.txt",
+                        "chunk_id": "1",
+                        "content": "c",
+                        "score": 0.9,
+                    }
+                ]
+            },
+        )
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={
+                "validated": [{"source": "doc.txt", "chunk_id": "1"}],
+                "unvalidated": [],
+            },
+            events=[cite_event],
+        )
+
+        malformed_serialized = (
+            '{"name":"cite_sources","parameters":{"citations":[{"source":"doc.txt","chunk_id":"1"}]'
+        )
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc]),
+                (["answer"], []),
+                ([malformed_serialized], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        _, events = await _collect_all(orchestrator.process_message("find info"))
+
+        assert len(events) == 1
+        assert len(cite_tool.calls) == 1
+        assert cite_tool.calls[0] == {"citations": [{"source": "doc.txt", "chunk_id": "1"}]}

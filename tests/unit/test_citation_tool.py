@@ -149,6 +149,44 @@ class TestCitationToolExecute:
         assert events == []
 
     @pytest.mark.asyncio
+    async def test_accepts_serialized_json_list_for_citations(self) -> None:
+        chunks = [
+            _chunk_dict(
+                "corpus/executive_order_14110.txt",
+                chunk_id="6ac85fb662c1fe7507171392be9e89350244bae72bc5f554c4fa44165288bad1",
+            ),
+            _chunk_dict(
+                "corpus/executive_order_14110.txt",
+                chunk_id="0db76f76dc7db112978587556183ed103d9c80fe59d94607d8a8f01570b33a8b",
+            ),
+            _chunk_dict(
+                "corpus/executive_order_14110.txt",
+                chunk_id="cca903fccdfab94d901e890cfc0b22a4493f5d67b00e2956034250aa4ce718ef",
+            ),
+            _chunk_dict(
+                "corpus/executive_order_14110.txt",
+                chunk_id="06a2700c410ff046f9101d91386e0dc61d0a643044fcfce91761b0ca2ff66c2b",
+            ),
+        ]
+        ctx = _make_context(chunks)
+        tool = CitationTool()
+
+        serialized_citations = (
+            "["
+            '{"source":"corpus/executive_order_14110.txt","chunk_id":"6ac85fb662c1fe7507171392be9e89350244bae72bc5f554c4fa44165288bad1"},'
+            '{"source":"corpus/executive_order_14110.txt","chunk_id":"0db76f76dc7db112978587556183ed103d9c80fe59d94607d8a8f01570b33a8b"},'
+            '{"source":"corpus/executive_order_14110.txt","chunk_id":"cca903fccdfab94d901e890cfc0b22a4493f5d67b00e2956034250aa4ce718ef"},'
+            '{"source":"corpus/executive_order_14110.txt","chunk_id":"06a2700c410ff046f9101d91386e0dc61d0a643044fcfce91761b0ca2ff66c2b"}'
+            "]"
+        )
+
+        result, events = await tool.execute({"citations": serialized_citations}, ctx)
+
+        assert len(result["validated"]) == 4  # type: ignore[arg-type]
+        assert result["unvalidated"] == []
+        assert len(events) == 1
+
+    @pytest.mark.asyncio
     async def test_tool_call_id_must_match_search_results(self) -> None:
         """Tool results with a different call_id are not treated as search_documents results."""
         tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="id-1")
@@ -172,7 +210,13 @@ class TestCitationToolExecute:
 
     @pytest.mark.asyncio
     async def test_chunk_metadata_preserved_in_source_citation_event(self) -> None:
-        chunk = _chunk_dict("report.txt", content="Finance data", score=0.85)
+        chunk = {
+            **_chunk_dict("report.txt", content="Finance data", score=0.85),
+            "title": "Finance Report",
+            "author": "Alice",
+            "publication_date": "2024-01-01",
+            "source_url": "https://example.com/report",
+        }
         ctx = _make_context([chunk])
         tool = CitationTool()
 
@@ -184,6 +228,10 @@ class TestCitationToolExecute:
         c: SourceChunk = events[0].validated[0]  # type: ignore[union-attr]
         assert c.content == "Finance data"
         assert c.score == pytest.approx(0.85)  # type: ignore[arg-type]
+        assert c.title == "Finance Report"
+        assert c.author == "Alice"
+        assert c.publication_date == "2024-01-01"
+        assert c.source_url == "https://example.com/report"
 
     @pytest.mark.asyncio
     async def test_duplicate_chunk_key_keeps_highest_score(self) -> None:

@@ -9,6 +9,7 @@ Session state keys
 - ``"orchestrator"`` — the :class:`~src.chatbot.app.orchestrator.ChatOrchestrator`.
 """
 
+from collections import Counter, defaultdict
 from typing import assert_never, cast
 from uuid import uuid4
 
@@ -17,7 +18,7 @@ import structlog
 from opentelemetry import trace
 
 from src.chatbot.app.orchestrator import ChatOrchestrator
-from src.chatbot.app.protocols import ProcessEvent, Retriever, SourceCitationEvent
+from src.chatbot.app.protocols import ProcessEvent, Retriever, SourceChunk, SourceCitationEvent
 from src.chatbot.config import (
     build_chat_model_config,
     build_retriever_config,
@@ -35,7 +36,11 @@ from src.chatbot.tools.vacation_days import (
     SimulatedVacationDaysAdapter,
     VacationDaysTool,
 )
-from src.chatbot.ui.citation_view import build_citation_content, build_citation_name
+from src.chatbot.ui.citation_view import (
+    build_citation_content,
+    build_citation_markdown,
+    build_citation_name,
+)
 from src.chatbot.ui.logging_config import configure_logging
 from src.settings import get_settings
 
@@ -67,6 +72,22 @@ async def _ask_user(prompt: str) -> str | None:
         return None
     value: object = response.get("output", "")  # pyright: ignore[reportUnknownMemberType]
     return str(value).strip() if value else None
+
+
+def _collect_unique_citation_chunks(
+    citation_events: list[SourceCitationEvent],
+) -> list[SourceChunk]:
+    """Flatten and deduplicate citation chunks while preserving first-seen order."""
+    seen_chunks: set[tuple[str, str]] = set()
+    unique_chunks: list[SourceChunk] = []
+    for citation_event in citation_events:
+        for chunk in citation_event.validated:
+            key = (chunk.source, chunk.chunk_id)
+            if key in seen_chunks:
+                continue
+            seen_chunks.add(key)
+            unique_chunks.append(chunk)
+    return unique_chunks
 
 
 def _build_vacation_days_tool() -> VacationDaysTool:
@@ -158,31 +179,39 @@ async def on_message(message: cl.Message) -> None:
                 case _:
                     assert_never(event)
 
-        if response is not None:
-            await response.update()
+        unique_chunks = _collect_unique_citation_chunks(citation_events)
+
+        # Append a compact, deduplicated source list directly to the answer so
+        # provenance remains visible even when the side panel is collapsed.
+        if response is not None and unique_chunks:
+            sources_markdown = build_citation_markdown(unique_chunks)
+            if sources_markdown:
+                response.content = f"{response.content.rstrip()}\n\n{sources_markdown}"
 
         # Render validated citation chunks as Chainlit Text elements attached to
         # the response message so the user can inspect the grounding context.
-        if citation_events and response is not None:
-            seen_chunks: set[tuple[str, str]] = set()
+        if unique_chunks and response is not None:
+            base_names = [build_citation_name(chunk) for chunk in unique_chunks]
+            total_counts = Counter(base_names)
+            seen_counts: defaultdict[str, int] = defaultdict(int)
             elements: list[cl.Text] = []
-            for ce in citation_events:
-                for chunk in ce.validated:
-                    key = (chunk.source, chunk.chunk_id)
-                    if key in seen_chunks:
-                        continue
-                    seen_chunks.add(key)
-                    elements.append(
-                        cl.Text(
-                            name=build_citation_name(chunk),
-                            content=build_citation_content(chunk),
-                            display="side",
-                        )
+            for chunk, base_name in zip(unique_chunks, base_names, strict=True):
+                seen_counts[base_name] += 1
+                name = base_name
+                if total_counts[base_name] > 1:
+                    name = f"{base_name} ({seen_counts[base_name]}/{total_counts[base_name]})"
+                elements.append(
+                    cl.Text(
+                        name=name,
+                        content=build_citation_content(chunk),
+                        display="side",
                     )
-            if elements:
-                response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
-                await response.update()
-                logger.info("session.sources_displayed", count=len(elements))
+                )
+            response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
+            logger.info("session.sources_displayed", count=len(elements))
+
+        if response is not None:
+            await response.update()
 
         span.set_attribute("chat.response.emitted_chars", emitted_chars)
         span.set_attribute(
