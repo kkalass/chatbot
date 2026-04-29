@@ -1,5 +1,7 @@
 # Evaluation and Testing
 
+Operational execution details for model/prompt comparison are defined in `doc/06-evaluation.md`.
+
 ## Quality Goals
 - Verify factual grounding and reduce hallucinations.
 - Measure retrieval quality independently from generation quality.
@@ -68,7 +70,8 @@ Create a small but representative benchmark set:
   - model/token timing.
 - Persist evaluation runs with timestamp and model/retrieval config.
 - Use OpenTelemetry (OTLP) tracing for request-level spans covering UI turn handling, orchestrator rounds, model generation, retrieval, and tool execution.
-- Configure local trace inspection with Jaeger and validate at least one complete trace per integration test session when diagnosing behavior.
+- Inspect local traces in Phoenix and validate at least one complete end-to-end trace per integration test session when diagnosing behavior.
+- Keep tracing code structurally separate from business logic: any trace-only payload shaping, preview generation, or error annotation belongs in top-level `_trace_request`, `_trace_response`, or `_trace_error` helpers rather than inline in control-flow code.
 - Keep logs and traces complementary: logs for broad event streams, traces for per-turn causal analysis.
 
 ## MVP Thresholds

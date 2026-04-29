@@ -20,11 +20,15 @@ class ChatModelConfig:
     Args:
         base_url: Base URL of the provider server.
         model: Model identifier used for chat generation.
+        temperature: Optional temperature override passed to the provider.
+        seed: Optional deterministic seed passed to the provider.
         provider: Chat provider backend identifier.
     """
 
     base_url: str
     model: str
+    temperature: float | None = None
+    seed: int | None = None
     provider: Literal["ollama"] = "ollama"
 
 
@@ -55,6 +59,8 @@ def build_chat_model(
             return build_ollama_chat_model(
                 base_url=config.base_url,
                 model=config.model,
+                temperature=config.temperature,
+                seed=config.seed,
             )
         case _:
             assert_never(config.provider)

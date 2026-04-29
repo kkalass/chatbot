@@ -5,7 +5,7 @@ Keep these constants as the single source of truth to avoid naming drift
 and to make trace queries deterministic.
 
 Attribute ownership rules (high-level):
-- UI span: user input preview + final emitted response preview.
+- UI span: user input preview + final emitted response preview + evaluation metadata.
 - Orchestrator spans: control-flow state (rounds, tool dispatch, citation pass).
 - Model span: compact request/response summaries.
 - Tool spans: tool-specific input/result summaries.
@@ -17,7 +17,6 @@ Attribute ownership rules (high-level):
 SPAN_CHAT_UI_ON_MESSAGE = "chat.ui.on_message"
 
 # Orchestration spans
-SPAN_CHAT_ORCHESTRATOR_PROCESS_MESSAGE = "chat.orchestrator.process_message"
 SPAN_CHAT_ORCHESTRATOR_ROUND = "chat.orchestrator.round"
 SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH = "chat.orchestrator.tool_dispatch"
 SPAN_CHAT_ORCHESTRATOR_CITATION_PASS = "chat.orchestrator.citation_pass"

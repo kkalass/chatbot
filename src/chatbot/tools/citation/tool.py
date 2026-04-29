@@ -8,6 +8,7 @@ returns a structured result so the model has acknowledgement of what was accepte
 """
 
 import structlog
+from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 from pydantic import BaseModel, ValidationError
@@ -21,7 +22,12 @@ from src.chatbot.app.protocols import (
     ToolEvent,
     ToolSchema,
 )
-from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.openinference import (
+    build_input_attributes,
+    build_output_attributes,
+    build_span_kind_attributes,
+    build_tool_execution_attributes,
+)
 from src.chatbot.observability.schema import SPAN_CHAT_TOOL_CITE_SOURCES
 from src.chatbot.tools._input_model import ToolInputModel
 
@@ -38,6 +44,36 @@ class _CitationClaim(BaseModel):
 
 class _CitationInput(ToolInputModel):
     citations: list[_CitationClaim]
+
+
+def _trace_request(*, span: trace.Span, args: JsonObject) -> None:
+    span.set_attributes(build_span_kind_attributes(OpenInferenceSpanKindValues.TOOL))
+    span.set_attributes(build_input_attributes(args, mime_type=OpenInferenceMimeTypeValues.JSON))
+
+
+def _trace_error(
+    *,
+    span: trace.Span,
+    args: JsonObject,
+    exc: Exception,
+    error_msg: str,
+    error_result: JsonObject,
+) -> None:
+    span.set_attributes(build_tool_execution_attributes(tool_name=_TOOL_NAME, parameters=args))
+    span.set_attributes(
+        build_output_attributes(error_result, mime_type=OpenInferenceMimeTypeValues.JSON)
+    )
+    span.set_attribute("chat.tool.error", True)
+    span.set_attribute("chat.tool.error_message", error_msg)
+    span.record_exception(exc)
+    span.set_status(StatusCode.ERROR, error_msg)
+
+
+def _trace_response(*, span: trace.Span, validated_args: JsonObject, result: JsonObject) -> None:
+    span.set_attributes(
+        build_tool_execution_attributes(tool_name=_TOOL_NAME, parameters=validated_args)
+    )
+    span.set_attributes(build_output_attributes(result, mime_type=OpenInferenceMimeTypeValues.JSON))
 
 
 class CitationTool:
@@ -75,16 +111,16 @@ Important:
     ) -> tuple[JsonObject, list[ToolEvent]]:
         """Validate *args["citations"]* against ``search_documents`` results in context history."""
         with tracer.start_as_current_span(SPAN_CHAT_TOOL_CITE_SOURCES) as span:
-            span.set_attribute("chat.tool.arguments", to_attribute_text(args))
+            _trace_request(span=span, args=args)
             try:
                 citation_input = _CitationInput.model_validate(args)
             except ValidationError as exc:
                 error_msg = f"Invalid arguments: {exc}"
-                span.set_attribute("chat.tool.error", True)
-                span.set_attribute("chat.tool.error_message", error_msg)
-                span.record_exception(exc)
-                span.set_status(StatusCode.ERROR, error_msg)
-                return {"error": error_msg}, []
+                error_result: JsonObject = {"error": error_msg}
+                _trace_error(
+                    span=span, args=args, exc=exc, error_msg=error_msg, error_result=error_result
+                )
+                return error_result, []
 
             available = collect_search_chunks(context.history)
             claimed = citation_input.citations
@@ -123,16 +159,14 @@ Important:
                 unvalidated=len(unvalidated),
             )
 
-            span.set_attribute("chat.tool.claimed", len(claimed))
-            span.set_attribute("chat.tool.validated", len(validated_chunks))
-            span.set_attribute("chat.tool.unvalidated", len(unvalidated))
-            span.set_attribute("chat.tool.validated_pairs", to_attribute_text(validated))
-            span.set_attribute("chat.tool.unvalidated_pairs", to_attribute_text(unvalidated))
-
             events: list[ToolEvent] = (
                 [SourceCitationEvent(validated=tuple(validated_chunks))] if validated_chunks else []
             )
-            return {
+            result: JsonObject = {
                 "validated": validated,
                 "unvalidated": unvalidated,
-            }, events
+            }
+            _trace_response(
+                span=span, validated_args=citation_input.model_dump(mode="json"), result=result
+            )
+            return result, events

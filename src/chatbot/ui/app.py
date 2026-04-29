@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import chainlit as cl
 import structlog
+from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
 
 from src.chatbot.app.orchestrator import ChatOrchestrator
@@ -28,6 +29,14 @@ from src.chatbot.infrastructure.chat import build_chat_model, build_chat_prompt_
 from src.chatbot.infrastructure.embeddings_text import build_text_embedder
 from src.chatbot.infrastructure.retrieval import build_retriever
 from src.chatbot.observability import configure_tracing, to_attribute_text
+from src.chatbot.observability.openinference import (
+    build_input_attributes,
+    build_metadata_attributes,
+    build_output_attributes,
+    build_session_attributes,
+    build_span_kind_attributes,
+    using_session_attributes,
+)
 from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
 from src.chatbot.tools.citation.tool import CitationTool
 from src.chatbot.tools.retrieval.tool import RetrievalTool
@@ -54,12 +63,16 @@ configure_logging(_settings.log_format)
 configure_tracing(
     enabled=_settings.otel_enabled,
     service_name=_settings.otel_service_name,
+    project_name=_settings.phoenix_project_name,
+    deployment_environment=_settings.otel_deployment_environment,
     otlp_endpoint=_settings.otel_exporter_otlp_endpoint,
     sample_rate=_settings.otel_sample_rate,
     console_export=_settings.otel_console_export,
+    auto_instrument_haystack=_settings.otel_auto_instrument_haystack,
 )
 
 logger = structlog.get_logger(__name__)
+_DEFAULT_EVAL_RUN_ID = _settings.eval_run_id if _settings.eval_run_id else str(uuid4())
 
 
 async def _ask_user(prompt: str) -> str | None:
@@ -126,6 +139,66 @@ def _build_orchestrator() -> ChatOrchestrator:
     )
 
 
+def _trace_request(
+    *,
+    span: trace.Span,
+    user_text: str,
+    trace_session: str,
+) -> None:
+    retrieval_version = (
+        _settings.eval_retrieval_version
+        if _settings.eval_retrieval_version is not None
+        else f"top_k={_settings.retrieval_top_k};score_threshold={_settings.retrieval_score_threshold}"
+    )
+    metadata: dict[str, object] = {
+        "run_id": _DEFAULT_EVAL_RUN_ID,
+        "trace_session_id": trace_session,
+        "model_name": _settings.chat_model,
+        "retrieval_version": retrieval_version,
+        "temperature": _settings.model_temperature,
+        "seed": _settings.model_seed,
+        "environment": _settings.eval_environment,
+    }
+    optional_metadata: dict[str, object | None] = {
+        "evaluation_name": _settings.eval_name,
+        "candidate_id": _settings.eval_candidate_id,
+        "prompt_version_answer": _settings.eval_prompt_version_answer,
+        "prompt_version_citation": _settings.eval_prompt_version_citation,
+        "corpus_version": _settings.eval_corpus_version,
+        "dataset_version": _settings.eval_dataset_version,
+    }
+    metadata.update({key: value for key, value in optional_metadata.items() if value is not None})
+
+    span.set_attributes(build_span_kind_attributes(OpenInferenceSpanKindValues.CHAIN))
+    span.set_attributes(build_session_attributes(trace_session))
+    span.set_attributes(
+        build_input_attributes(user_text, mime_type=OpenInferenceMimeTypeValues.TEXT)
+    )
+    span.set_attributes(build_metadata_attributes(metadata))
+    span.set_attribute("chat.session_id", trace_session)
+    span.set_attribute("chat.user_message.length", len(user_text))
+    span.set_attribute("chat.user_message.preview", to_attribute_text(user_text))
+
+
+def _trace_response(
+    *,
+    span: trace.Span,
+    final_response_text: str,
+    emitted_chars: int,
+    emitted_chunks: list[str],
+    citation_events: list[SourceCitationEvent],
+) -> None:
+    span.set_attributes(
+        build_output_attributes(final_response_text, mime_type=OpenInferenceMimeTypeValues.TEXT)
+    )
+    span.set_attributes(build_metadata_attributes({"citation_events": len(citation_events)}))
+    span.set_attribute("chat.response.emitted_chars", emitted_chars)
+    span.set_attribute(
+        "chat.response.preview", to_attribute_text("".join(emitted_chunks), max_chars=600)
+    )
+    span.set_attribute("chat.response.citation_events", len(citation_events))
+
+
 @cl.on_chat_start  # pyright: ignore[reportUnknownMemberType]  # chainlit decorators are dynamically typed
 async def on_chat_start() -> None:
     """Compose and store one :class:`ChatOrchestrator` per user session."""
@@ -146,9 +219,11 @@ async def on_message(message: cl.Message) -> None:
     if not isinstance(raw_orchestrator, ChatOrchestrator):
         raise RuntimeError("Chat orchestrator is missing from session state")
     orchestrator = raw_orchestrator
+
     raw_trace_session_id = cl.user_session.get(_SESSION_TRACE_ID)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     trace_session_id = cast(object | None, raw_trace_session_id)
     trace_session = str(trace_session_id) if trace_session_id is not None else "unknown"
+
     user_text = str(message.content)
 
     # Delay creating the response bubble until the first text token arrives so
@@ -159,10 +234,15 @@ async def on_message(message: cl.Message) -> None:
     emitted_chars = 0
     emitted_chunks: list[str] = []
 
-    with _tracer.start_as_current_span(SPAN_CHAT_UI_ON_MESSAGE) as span:
-        span.set_attribute("chat.session_id", trace_session)
-        span.set_attribute("chat.user_message.length", len(user_text))
-        span.set_attribute("chat.user_message.preview", to_attribute_text(user_text))
+    with (
+        using_session_attributes(trace_session),
+        _tracer.start_as_current_span(SPAN_CHAT_UI_ON_MESSAGE) as span,
+    ):
+        _trace_request(
+            span=span,
+            user_text=user_text,
+            trace_session=trace_session,
+        )
 
         event: ProcessEvent
         async for event in orchestrator.process_message(user_text):
@@ -210,14 +290,15 @@ async def on_message(message: cl.Message) -> None:
             response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
             logger.info("session.sources_displayed", count=len(elements))
 
-        if response is not None:
             await response.update()
 
-        span.set_attribute("chat.response.emitted_chars", emitted_chars)
-        span.set_attribute(
-            "chat.response.preview",
-            to_attribute_text("".join(emitted_chunks), max_chars=600),
+        trace_final_response_text = response.content if response is not None else "".join(emitted_chunks)
+        _trace_response(
+            span=span,
+            final_response_text=trace_final_response_text,
+            emitted_chars=emitted_chars,
+            emitted_chunks=emitted_chunks,
+            citation_events=citation_events,
         )
-        span.set_attribute("chat.response.citation_events", len(citation_events))
 
     logger.info("session.message_handled", length=len(user_text))

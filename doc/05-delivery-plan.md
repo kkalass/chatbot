@@ -86,19 +86,197 @@
 - Extend metadata handling (page, section, modality-specific provenance if available).
 - Re-run evaluation set and tune retrieval parameters.
 
-## Phase 4.1: Additional Local Model Support
-- Add model profile and configuration support for DeepSeek R1 (`deepseek-r1:32b`) via Ollama.
-- Add model profile and configuration support for Qwen3 (`qwen3:32b`) via Ollama.
+
+## Phase 4.1: Arize Phoenix Observability Alignment
+Decision baseline for this phase:
+- Replace Jaeger as the primary local trace backend with local Arize Phoenix.
+- No Arize Cloud in this phase (local-only deployment).
+- Prefer auto-instrumentation where it provides clear value.
+- Keep manual tracing only for domain-critical spans/attributes that auto-instrumentation cannot infer.
+
+Why parallel Jaeger + Phoenix is not selected now:
+- Parallel export increases setup complexity, duplicate storage, and analysis drift.
+- Parallel mode is only justified as a short migration fallback when validating parity.
+- Exit rule for fallback: remove Jaeger once parity checks pass.
+
+### Scope
+1. Backend switch
+- Route OpenTelemetry export to local Phoenix OTLP endpoint.
+- Remove Jaeger from the default developer runbook and troubleshooting path.
+
+2. Auto-instrumentation rollout (now, in this phase)
+- Add OpenInference/Phoenix instrumentation for LLM stack components where supported by the used libraries.
+- Add auto-instrumentation for framework/tooling components where stable support exists and signal quality is useful.
+- Keep auto-instrumentation selective: disable noisy instrumentors that do not improve debugging or evaluation outcomes.
+
+3. Manual tracing simplification
+- Keep as manual only when auto-instrumentation cannot provide equivalent signal:
+  - all LLM calls with request/response previews and tool-call payload visibility,
+  - all tool executions with input/output summaries and error status.
+- Keep (high value):
+  - orchestrator control-flow spans for round boundaries and tool dispatch decisions,
+  - citation-pass recovery telemetry and counters,
+  - bounded preview attributes for safe inspectability.
+- Remove or reduce:
+  - manual spans that duplicate auto-generated spans without additional domain signal.
+  - any fallback manual span once an auto span reaches parity for name stability, payload quality, and error visibility.
+
+### Keep/Drop Matrix
+- Keep: `chat.ui.on_message`
+  - Reason: session-scoped turn boundary, emitted-response summary, and citation-event aggregation are application-level semantics and not expected from auto-instrumentation.
+- Keep: `chat.orchestrator.round`
+  - Reason: round boundaries and round-local tool-call decisions are agentic control-flow signals and not inferable from lower layers.
+- Drop: `chat.orchestrator.process_message`
+  - Reason: the UI turn span already provides the top-level turn boundary, so a second root-like orchestrator span added little value and made the trace hierarchy noisier.
+- Keep: `chat.orchestrator.tool_dispatch`
+  - Reason: it still adds application-level causality between model-produced tool calls and the subsequent concrete tool span, which Phoenix does not infer from the custom tool dispatch code path.
+- Keep: `chat.orchestrator.citation_pass`
+  - Reason: citation-pass isolation, fallback recovery attempts, and success/failure reasons are domain-specific behavior.
+- Conditional keep: `chat.model.ollama.stream`
+  - Keep until auto-instrumentation provides OpenInference-compliant `LLM` spans with equivalent request/response visibility, tool-call payload visibility, provider/model fields, and error visibility.
+  - Drop only after parity is demonstrated in Phoenix for the real Ollama integration used in this project.
+- Keep: `chat.tool.search_documents`
+  - Reason: this is a custom tool span with domain-specific request/response summaries; generic auto-instrumentation cannot infer tool semantics from internal Python code.
+- Keep: `chat.tool.cite_sources`
+  - Reason: citation validation counts and validated/unvalidated pair summaries are domain-specific and not auto-derivable.
+- Conditional keep: `chat.retriever.qdrant.retrieve`
+  - Keep if needed to attach OpenInference `RETRIEVER` semantics and retrieved-document previews.
+  - Drop only if future instrumentation emits equally useful retriever spans with document IDs, scores, and content previews.
+
+### OpenInference Mapping Plan
+Use OpenInference semantic conventions wherever they improve Phoenix rendering. Existing `chat.*` attributes may remain as project-local diagnostics, but Phoenix-facing GenAI structure should be expressed with OpenInference-compliant span kinds and attributes.
+
+1. UI turn span: `chat.ui.on_message`
+- Span kind: `CHAIN`
+- Purpose: represent one end-user interaction as the top-level GenAI workflow span.
+- Required attributes:
+  - `openinference.span.kind=CHAIN`
+  - `session.id` from the Chainlit session trace identifier.
+  - `input.value` as the raw user message text.
+  - `input.mime_type=text/plain`
+  - `output.value` as the final emitted assistant text including any appended source section.
+  - `output.mime_type=text/plain`
+- Optional attributes:
+  - `metadata` for bounded JSON metadata such as citation-event count.
+
+2. Orchestrator round span: `chat.orchestrator.round`
+- Span kind: `CHAIN`
+- Purpose: represent one agentic loop iteration.
+- Required attributes:
+  - `openinference.span.kind=CHAIN`
+  - `input.value` as bounded message-summary input for the round.
+  - `output.value` as bounded round output summary.
+- Project-local attributes to keep:
+  - `chat.round`
+  - `chat.round.tool_call_count`
+  - `chat.round.tool_calls`
+  - `chat.round.text_chars`
+
+3. LLM span: `chat.model.ollama.stream`
+- Target state: OpenInference-compliant `LLM` span, preferably from auto-instrumentation; manual fallback if parity is missing.
+- Span kind: `LLM`
+- Required attributes:
+  - `openinference.span.kind=LLM`
+  - `llm.model_name`
+  - `llm.provider`
+  - `input.value` as bounded serialized request payload when full chat-message structure is not available.
+  - `input.mime_type=application/json`
+  - `output.value` as bounded serialized response payload.
+  - `output.mime_type=application/json`
+- Preferred richer attributes when feasible:
+  - `llm.input_messages.*.message.role`
+  - `llm.input_messages.*.message.content`
+  - `llm.output_messages.*.message.role`
+  - `llm.output_messages.*.message.content`
+  - `llm.invocation_parameters`
+  - `llm.token_count.prompt`
+  - `llm.token_count.completion`
+  - `llm.token_count.total`
+- Tool-calling visibility:
+  - include tool-call payloads in the LLM output structure using OpenInference message/tool-call representation when the used instrumentor supports it;
+  - otherwise keep the bounded project-local fallback `llm.response.tool_calls` until parity exists.
+
+4. Tool spans: `chat.tool.search_documents`, `chat.tool.cite_sources`
+- Span kind: `TOOL`
+- Purpose: represent explicit tool execution as first-class Phoenix tool spans.
+- Required attributes:
+  - `openinference.span.kind=TOOL`
+  - `tool.name`
+  - `tool.parameters` as JSON string for validated tool input.
+  - `input.value` as bounded serialized tool input.
+  - `input.mime_type=application/json`
+  - `output.value` as bounded serialized tool result.
+  - `output.mime_type=application/json`
+- Project-local attributes to keep:
+  - for `search_documents`: query, chunk count, chunk previews.
+  - for `cite_sources`: claimed/validated/unvalidated counts and pair previews.
+
+5. Retriever span: `chat.retriever.qdrant.retrieve`
+- Span kind: `RETRIEVER`
+- Purpose: expose retrieval quality directly in Phoenix rather than only as a generic infrastructure span.
+- Required attributes:
+  - `openinference.span.kind=RETRIEVER`
+  - `input.value` as the bounded retrieval query text.
+  - `input.mime_type=text/plain`
+- Preferred retrieval-document attributes:
+  - `retrieval.documents.*.document.id`
+  - `retrieval.documents.*.document.content`
+  - `retrieval.documents.*.document.score`
+- Project-local attributes to keep:
+  - `chat.retriever.top_k`
+  - `chat.retriever.score_threshold`
+  - `chat.retriever.result_count`
+
+6. Citation-pass span: `chat.orchestrator.citation_pass`
+- Span kind: `CHAIN`
+- Purpose: represent the isolated post-answer citation workflow.
+- Required attributes:
+  - `openinference.span.kind=CHAIN`
+  - `input.value` as bounded citation-pass prompt summary.
+  - `output.value` as bounded citation-pass result summary.
+- Project-local attributes to keep:
+  - recovery attempted/succeeded
+  - no-tool-call / wrong-tool-call diagnostics
+  - dispatch result preview
+
+### OpenInference Compliance Rules
+- Always prefer official OpenInference semantic keys for Phoenix-facing GenAI structure; avoid inventing project-local substitutes for concepts already covered by OpenInference.
+- Implementation rule: use exported OpenInference constants and helper APIs where available; do not hand-write OpenInference attribute keys as ad-hoc string literals in application code.
+- Implementation rule: any work done solely for tracing, including bounded preview generation and temporary payload shaping, must live in top-level `_trace_*` helper functions rather than inline in business logic.
+- Keep `chat.*` attributes only for project-specific diagnostics not covered by OpenInference.
+- All large payloads must remain bounded/truncated before being written to span attributes.
+- Do not duplicate the same semantic payload in both OpenInference and project-local attributes unless required temporarily for migration parity.
+- Acceptance test for each conditional-drop span: Phoenix must still show an equally usable view for request, response, errors, and tool/retrieval relationships after the manual span is removed.
+
+4. Phoenix project organization (local recommendation)
+- Use one default local project name for day-to-day development (e.g. `chatbot-local`).
+- Distinguish runs by resource attributes/tags (`service.name`, `deployment.environment`, `git.branch`, optional `run.id`) rather than many project names.
+- Keep naming stable to preserve longitudinal comparison in Phoenix.
+
+5. Documentation and developer workflow
+- Update README from Jaeger-first to Phoenix-first setup and validation.
+- Document a concise "trace quality checklist" (what must be visible per chat turn).
+- Document the keep/remove tracing policy to prevent uncontrolled span growth.
+
+### Acceptance Criteria
+- Local Phoenix receives traces via OTLP and shows a complete, navigable trace for one chat turn.
+- For each turn, Phoenix clearly shows:
+  - LLM call spans with request/response previews and tool-call information.
+  - Tool execution spans with request/response summaries and failures.
+- Manual orchestrator/citation spans remain only where they add domain-specific value beyond auto-instrumentation.
+- Default developer docs no longer require Jaeger.
+- Tracing remains optional and can still be disabled via environment variables with no code changes.
+
+### Non-Goals (explicit)
+- No Arize Cloud integration in this phase.
+- No production-grade observability hardening (alerting, retention strategy, SLO dashboards) in this phase.
+
+## Phase 4.2: Additional Local Model Support
+- Add model profile and configuration support for DeepSeek R1 (`deepseek-r1:32b` or `deepseek-r1:14b`) via Ollama.
+- Add model profile and configuration support for Qwen3 (`qwen3:32b` or `qwen3:14b`) via Ollama.
 - Ensure prompt-profile/tool-calling compatibility checks for both models.
 - Extend smoke/integration evaluation runs to compare answer quality, citation behavior, and latency across supported models.
 - Update setup docs with explicit pull/run commands and recommended defaults per hardware tier.
-
-## Phase 4.2: Arize Phoenix Observability Alignment
-- Add optional Arize Phoenix integration for local and CI evaluation workflows.
-- Route existing OpenTelemetry traces to Phoenix via OTLP and validate trace compatibility.
-- Compare Phoenix-native trace analysis/evaluation features with current custom observability logic.
-- Reduce custom tracking code only where Phoenix provides equivalent or better coverage; keep domain-critical spans/attributes that are not replaceable.
-- Document the final observability split (Phoenix-managed vs. project-managed) and update `README.md` runbook.
 
 ## Phase 5: Evaluation and Hardening
 - Establish benchmark dataset and automated evaluation script.

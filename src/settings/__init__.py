@@ -103,8 +103,16 @@ class Settings(BaseSettings):
         default="chatbot",
         description="OpenTelemetry service.name resource attribute.",
     )
+    phoenix_project_name: str = Field(
+        default="chatbot-local",
+        description="Phoenix project name used to group local GenAI traces.",
+    )
+    otel_deployment_environment: str = Field(
+        default="development",
+        description="OpenTelemetry deployment environment resource attribute.",
+    )
     otel_exporter_otlp_endpoint: str = Field(
-        default="http://localhost:4318/v1/traces",
+        default="http://localhost:6006/v1/traces",
         description="OTLP/HTTP trace endpoint.",
     )
     otel_sample_rate: float = Field(
@@ -116,6 +124,59 @@ class Settings(BaseSettings):
     otel_console_export: bool = Field(
         default=False,
         description="Additionally export spans to stdout for local debugging.",
+    )
+    otel_auto_instrument_haystack: bool = Field(
+        default=True,
+        description="Enable OpenInference auto-instrumentation for Haystack components.",
+    )
+
+    # --- Model Sampling ---
+    model_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Chat-model temperature used for generation and trace metadata. 0.0 is most deterministic/focused; 1.0 is more diverse/creative and less deterministic.",
+    )
+    model_seed: int = Field(
+        default=42,
+        description="Chat-model seed used for reproducible generations and trace metadata.",
+    )
+
+    # --- Evaluation Metadata ---
+    eval_environment: str = Field(
+        default="local",
+        description="Logical evaluation environment label used for trace filtering.",
+    )
+    eval_name: str | None = Field(
+        default=None,
+        description="Evaluation cycle name (for example: rag-prompt-tuning-2026-04).",
+    )
+    eval_run_id: str | None = Field(
+        default=None,
+        description="Run identifier grouping related trace samples. If unset, a process-level UUID is generated automatically.",
+    )
+    eval_candidate_id: str | None = Field(
+        default=None,
+        description="Candidate identifier used to compare prompt/model variants.",
+    )
+    eval_prompt_version_answer: str | None = Field(
+        default=None,
+        description="Version label for the answer-generation prompt.",
+    )
+    eval_prompt_version_citation: str | None = Field(
+        default=None,
+        description="Version label for the citation-pass prompt.",
+    )
+    eval_retrieval_version: str | None = Field(
+        default=None,
+        description="Version label for retrieval configuration and strategy.",
+    )
+    eval_corpus_version: str | None = Field(
+        default=None,
+        description="Corpus snapshot/version identifier used for this run.",
+    )
+    eval_dataset_version: str | None = Field(
+        default=None,
+        description="Dataset snapshot/version identifier for experiment runs.",
     )
 
 

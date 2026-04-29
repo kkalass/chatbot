@@ -36,5 +36,7 @@ def build_chat_model_config(settings: Settings) -> ChatModelConfig:
     return ChatModelConfig(
         base_url=settings.ollama_base_url,
         model=settings.chat_model,
+        temperature=settings.model_temperature,
+        seed=settings.model_seed,
         provider="ollama",
     )

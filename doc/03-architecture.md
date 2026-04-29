@@ -35,10 +35,15 @@ The application is a locally-run RAG chatbot with explicit separation of concern
   - Ollama-hosted local models for generation in MVP.
   - Ingestion embedder is consumed through an injected boundary so provider/runtime can be swapped without changing ingestion orchestration.
 - Observability Layer
-  - OpenTelemetry tracing is configured at app startup and exported via OTLP.
-  - Spans cover UI turn handling, orchestrator rounds, tool dispatch, model streaming, and retriever execution.
-  - Citation-pass spans capture recovery telemetry (`recovery_attempted`, `recovery_succeeded`) and turn spans capture aggregate counters (`chat.citation_recovery_attempts`, `chat.citation_recovery_successes`).
+  - OpenTelemetry tracing is configured at app startup via `arize-phoenix-otel`'s `register()`, which creates a `TracerProvider` that exports spans to a Phoenix-compatible OTLP endpoint (default: `http://localhost:6006/v1/traces`).
+  - Spans are mapped to **OpenInference semantic conventions** using the helper layer in `src/chatbot/observability/openinference.py`, which wraps `openinference.instrumentation` builders and `openinference.semconv.trace` constants. Span kinds used: `CHAIN` (UI turn, orchestrator round, tool dispatch, citation pass), `LLM` (Ollama streaming), `RETRIEVER` (Qdrant query), `TOOL` (retrieval and citation tools).
+  - **Session propagation**: `using_session_attributes(session_id)` from `openinference.instrumentation` is used in the UI `on_message` handler to propagate the session context to all child spans in a turn.
+  - Optional **Haystack auto-instrumentation** is enabled by default (`OTEL_AUTO_INSTRUMENT_HAYSTACK=true`) using `openinference-instrumentation-haystack`.
+  - All spans carry both OpenInference attributes (`input.value`, `output.value`, `llm.model_name`, `llm.input_messages`, etc.) and project-specific diagnostic attributes (`chat.round.*`, `llm.request.*`, `chat.retriever.*`).
+  - Citation-pass spans capture recovery telemetry (`recovery_attempted`, `recovery_succeeded`), while the UI turn span carries evaluation metadata and emitted-response summaries.
+  - Tracing-only payload construction is kept out of business logic: request/response/error attribute assembly lives in module-level `_trace_*` helper functions, and control-flow code only invokes those helpers.
   - Trace payload attributes are previewed with truncation to keep spans inspectable while avoiding unbounded attribute size growth.
+  - **Local Phoenix setup**: run `uv run python -m phoenix.server.main serve` (or `pip install arize-phoenix && phoenix serve`) to start the Phoenix UI at `http://localhost:6006`. Traces are visible in the Traces view under the project name `chatbot-local` (configurable via `PHOENIX_PROJECT_NAME`).
 
 ## Binding Points
 - Binding points are documented at consumer boundaries (tool constructor and composition root), not via mandatory nominal inheritance on implementation classes.
@@ -70,7 +75,7 @@ The application is a locally-run RAG chatbot with explicit separation of concern
      5. Dispatch at most one `cite_sources` call and emit resulting `SourceCitationEvent` values.
      6. If no citations are recovered/returned, emit nothing — the UI displays no sources.
   - `process_message` yields `ProcessEvent` (`str | ToolEvent`); the UI uses `match`/`case` + `assert_never` to handle each variant (render text chunks live, render `SourceCitationEvent` as Chainlit citation elements plus appended deduplicated source markdown).
-  - In parallel, OpenTelemetry spans record request/response previews and counters for each stage to enable deterministic debugging in Jaeger.
+  - In parallel, OpenTelemetry spans record request/response previews and counters for each stage to enable deterministic debugging in Phoenix.
 
 ## Authentication Flows (MVP)
 - The Chainlit UI is accessible without mandatory global app-level login in MVP.

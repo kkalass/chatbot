@@ -5,17 +5,48 @@ from typing import Any
 import structlog
 from haystack_integrations.components.retrievers.qdrant import QdrantEmbeddingRetriever
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+from openinference.semconv.trace import OpenInferenceSpanKindValues
 from opentelemetry import trace
 
 from src.chatbot.app.protocols import Retriever, SourceChunk
 from src.chatbot.infrastructure.embeddings_text import TextEmbedder
 from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.openinference import (
+    build_retriever_attributes,
+    build_span_kind_attributes,
+)
 from src.chatbot.observability.schema import SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE
 
 from ._config import RetrieverConfig
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
+
+
+def _trace_request(
+    *,
+    span: trace.Span,
+    top_k: int,
+    score_threshold: float | None,
+) -> None:
+    span.set_attributes(build_span_kind_attributes(OpenInferenceSpanKindValues.RETRIEVER))
+    span.set_attribute("chat.retriever.top_k", top_k)
+    if score_threshold is not None:
+        span.set_attribute("chat.retriever.score_threshold", score_threshold)
+
+
+def _trace_response(
+    *,
+    span: trace.Span,
+    query: str,
+    chunks: list[SourceChunk],
+) -> None:
+    span.set_attributes(build_retriever_attributes(query=query, documents=chunks))
+    span.set_attribute("chat.retriever.result_count", len(chunks))
+    span.set_attribute(
+        "chat.retriever.top_scores",
+        to_attribute_text([round(chunk.score, 4) for chunk in chunks[:5]]),
+    )
 
 
 class QdrantRetriever:
@@ -38,8 +69,11 @@ class QdrantRetriever:
     async def retrieve(self, query: str) -> list[SourceChunk]:
         """Embed a query and return ranked, filtered chunks from Qdrant."""
         with tracer.start_as_current_span(SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE) as span:
-            span.set_attribute("chat.retriever.top_k", self._config.top_k)
-            span.set_attribute("chat.retriever.score_threshold", self._config.score_threshold)
+            _trace_request(
+                span=span,
+                top_k=self._config.top_k,
+                score_threshold=self._config.score_threshold,
+            )
 
             logger.debug("retriever.embedding")
             embed_result: dict[str, Any] = self._embedder.run(text=query)
@@ -69,11 +103,7 @@ class QdrantRetriever:
                 if doc.content
             ]
             logger.info("retriever.done", chunks_returned=len(chunks))
-            span.set_attribute("chat.retriever.result_count", len(chunks))
-            span.set_attribute(
-                "chat.retriever.top_scores",
-                to_attribute_text([round(chunk.score, 4) for chunk in chunks[:5]]),
-            )
+            _trace_response(span=span, query=query, chunks=chunks)
             return chunks
 
 

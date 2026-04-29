@@ -103,27 +103,24 @@ Opens a chat interface at `http://localhost:8000` by default.
 
 ---
 
-## Local Tracing (OpenTelemetry + Jaeger)
+## Local Tracing (OpenTelemetry + Arize Phoenix)
 
 This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, orchestrator rounds, model call, retrieval tool, citation tool, and Qdrant retrieval).
 
-### 1. Start Jaeger with OTLP enabled
+### 1. Start local Phoenix
 
 ```bash
-docker run -d --name jaeger \
-  -p 16686:16686 \
-  -p 4318:4318 \
-  jaegertracing/all-in-one:1.57
+uv tool run --from arize-phoenix python -m phoenix.server.main serve
 ```
 
-Jaeger UI: <http://localhost:16686>
+Phoenix UI: <http://localhost:6006>
 
 ### 2. Enable tracing in `.env`
 
 ```bash
 OTEL_ENABLED=true
 OTEL_SERVICE_NAME=chatbot
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006/v1/traces
 OTEL_SAMPLE_RATE=1.0
 OTEL_CONSOLE_EXPORT=false
 ```
@@ -134,7 +131,7 @@ OTEL_CONSOLE_EXPORT=false
 ./chatbot.sh
 ```
 
-Ask one or two questions in Chainlit, then open <http://localhost:16686> and search for service `chatbot`.
+Ask one or two questions in Chainlit, then open <http://localhost:6006> and inspect traces for service `chatbot`.
 
 ### 4. What you should see in traces
 
@@ -158,9 +155,9 @@ Canonical span names are centralized in `src/chatbot/observability/schema.py` an
 
 ### 5. Troubleshooting
 
-- No traces in Jaeger:
-  - Verify Jaeger container is running and `4318` is published.
-  - Verify `OTEL_ENABLED=true` and endpoint matches `http://localhost:4318/v1/traces`.
+- No traces in Phoenix:
+  - Verify Phoenix is running on `http://localhost:6006`.
+  - Verify `OTEL_ENABLED=true` and endpoint matches `http://localhost:6006/v1/traces`.
   - Set `OTEL_CONSOLE_EXPORT=true` temporarily to confirm spans are produced.
 - Too many traces:
   - Lower `OTEL_SAMPLE_RATE`, e.g. `0.2`.

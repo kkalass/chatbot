@@ -7,6 +7,7 @@ pre-retrieval.
 """
 
 import structlog
+from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 from pydantic import ValidationError
@@ -19,7 +20,12 @@ from src.chatbot.app.protocols import (
     ToolEvent,
     ToolSchema,
 )
-from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.openinference import (
+    build_input_attributes,
+    build_output_attributes,
+    build_span_kind_attributes,
+    build_tool_execution_attributes,
+)
 from src.chatbot.observability.schema import SPAN_CHAT_TOOL_SEARCH_DOCUMENTS
 from src.chatbot.tools._input_model import ToolInputModel
 
@@ -31,6 +37,36 @@ _TOOL_NAME = "search_documents"
 
 class _SearchInput(ToolInputModel):
     query: str
+
+
+def _trace_request(*, span: trace.Span, args: JsonObject) -> None:
+    span.set_attributes(build_span_kind_attributes(OpenInferenceSpanKindValues.TOOL))
+    span.set_attributes(build_input_attributes(args, mime_type=OpenInferenceMimeTypeValues.JSON))
+
+
+def _trace_error(
+    *,
+    span: trace.Span,
+    args: JsonObject,
+    exc: Exception,
+    error_msg: str,
+    error_result: JsonObject,
+) -> None:
+    span.set_attributes(build_tool_execution_attributes(tool_name=_TOOL_NAME, parameters=args))
+    span.set_attributes(
+        build_output_attributes(error_result, mime_type=OpenInferenceMimeTypeValues.JSON)
+    )
+    span.set_attribute("chat.tool.error", True)
+    span.set_attribute("chat.tool.error_message", error_msg)
+    span.record_exception(exc)
+    span.set_status(StatusCode.ERROR, error_msg)
+
+
+def _trace_response(*, span: trace.Span, validated_args: JsonObject, result: JsonObject) -> None:
+    span.set_attributes(
+        build_tool_execution_attributes(tool_name=_TOOL_NAME, parameters=validated_args)
+    )
+    span.set_attributes(build_output_attributes(result, mime_type=OpenInferenceMimeTypeValues.JSON))
 
 
 class RetrievalTool:
@@ -60,66 +96,44 @@ Returns relevant text chunks with source paths, chunk IDs, content, and similari
     ) -> tuple[JsonObject, list[ToolEvent]]:
         """Retrieve chunks for *args[\"query\"]* and return them as structured JSON."""
         with tracer.start_as_current_span(SPAN_CHAT_TOOL_SEARCH_DOCUMENTS) as span:
+            _trace_request(span=span, args=args)
             try:
                 search_input = _SearchInput.model_validate(args)
             except ValidationError as exc:
                 error_msg = f"Invalid arguments: {exc}"
-                span.set_attribute("chat.tool.error", True)
-                span.set_attribute("chat.tool.error_message", error_msg)
-                span.set_attribute("chat.tool.arguments", to_attribute_text(args))
-                span.record_exception(exc)
-                span.set_status(StatusCode.ERROR, error_msg)
-                return {"error": error_msg}, []
+                error_result: JsonObject = {"error": error_msg}
+                _trace_error(
+                    span=span, args=args, exc=exc, error_msg=error_msg, error_result=error_result
+                )
+                return error_result, []
 
-            span.set_attribute("chat.tool.query", to_attribute_text(search_input.query))
             sources: list[SourceChunk] = await self._retriever.retrieve(search_input.query)
             logger.info(
                 "retrieval_tool.executed",
                 query=search_input.query,
                 chunks=len(sources),
             )
-            span.set_attribute("chat.tool.chunks", len(sources))
-            span.set_attribute(
-                "chat.tool.chunk_preview",
-                to_attribute_text(
-                    [
+            result: JsonObject = (
+                {
+                    "chunks": [
                         {
                             "source": chunk.source,
                             "chunk_id": chunk.chunk_id,
+                            "content": chunk.content,
                             "score": chunk.score,
+                            "title": chunk.title,
+                            "author": chunk.author,
+                            "publication_date": chunk.publication_date,
+                            "source_url": chunk.source_url,
+                            "page": chunk.page,
                         }
-                        for chunk in sources[:5]
+                        for chunk in sources
                     ]
-                ),
+                }
+                if sources
+                else {"chunks": [], "message": "No relevant documents found."}
             )
-            span.set_attribute(
-                "chat.tool.chunk_content_preview",
-                to_attribute_text(
-                    [
-                        {
-                            "source": chunk.source,
-                            "chunk_id": chunk.chunk_id,
-                            "content_preview": to_attribute_text(chunk.content, max_chars=200),
-                        }
-                        for chunk in sources[:3]
-                    ]
-                ),
+            _trace_response(
+                span=span, validated_args=search_input.model_dump(mode="json"), result=result
             )
-            if not sources:
-                return {"chunks": [], "message": "No relevant documents found."}, []
-            return {
-                "chunks": [
-                    {
-                        "source": chunk.source,
-                        "chunk_id": chunk.chunk_id,
-                        "content": chunk.content,
-                        "score": chunk.score,
-                        "title": chunk.title,
-                        "author": chunk.author,
-                        "publication_date": chunk.publication_date,
-                        "source_url": chunk.source_url,
-                        "page": chunk.page,
-                    }
-                    for chunk in sources
-                ]
-            }, []
+            return result, []

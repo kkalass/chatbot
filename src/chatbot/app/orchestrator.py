@@ -20,9 +20,9 @@ grounding provenance is captured as a
 
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
-from typing import cast
 
 import structlog
+from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
@@ -45,11 +45,15 @@ from src.chatbot.app.protocols import (
     ToolEvent,
     ToolSchema,
 )
-from src.chatbot.app.tracing import summarize_messages, summarize_search_result
 from src.chatbot.observability import to_attribute_text
+from src.chatbot.observability.openinference import (
+    build_input_attributes,
+    build_output_attributes,
+    build_span_kind_attributes,
+    build_tool_execution_attributes,
+)
 from src.chatbot.observability.schema import (
     SPAN_CHAT_ORCHESTRATOR_CITATION_PASS,
-    SPAN_CHAT_ORCHESTRATOR_PROCESS_MESSAGE,
     SPAN_CHAT_ORCHESTRATOR_ROUND,
     SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH,
 )
@@ -60,6 +64,205 @@ tracer = trace.get_tracer(__name__)
 _MAX_TOOL_ROUNDS = 10  # safety limit to prevent infinite agentic loops
 _SEARCH_TOOL_NAME = "search_documents"
 _CITATION_TOOL_NAME = "cite_sources"
+
+
+def _trace_round_request(
+    *,
+    span: trace.Span,
+    round_num: int,
+    messages: list[ChatMessage],
+    tool_schemas: list[ToolSchema] | None,
+) -> None:
+    span.set_attribute("chat.round", round_num)
+    span.set_attributes(
+        build_input_attributes(
+            {
+                "message_count": len(messages),
+                "round_num": round_num,
+                "tool_count": len(tool_schemas) if tool_schemas else 0,
+            },
+            mime_type=OpenInferenceMimeTypeValues.JSON,
+        )
+    )
+
+
+def _trace_round_response(
+    *,
+    span: trace.Span,
+    collected: list[str],
+    tool_calls: list[ToolCallInfo],
+    assistant_text: str | None = None,
+) -> None:
+    span.set_attribute("chat.round.text_chars", len("".join(collected)))
+    span.set_attribute("chat.round.tool_call_count", len(tool_calls))
+    span.set_attribute(
+        "chat.round.tool_calls",
+        to_attribute_text([tc.name for tc in tool_calls]),
+    )
+    if assistant_text is not None:
+        span.set_attribute(
+            "chat.round.output_preview",
+            to_attribute_text(assistant_text),
+        )
+
+
+def _trace_citation_pass_request(
+    *,
+    span: trace.Span,
+    citation_tool_available: bool,
+    search_call_ids_in_turn: set[str],
+    available_chunk_count: int,
+    citation_user_prompt: str,
+    messages: list[ChatMessage],
+) -> None:
+    span.set_attribute("chat.citation_tool_available", citation_tool_available)
+    span.set_attribute("chat.citation_pass.recovery_attempted", False)
+    span.set_attribute("chat.citation_pass.recovery_succeeded", False)
+    span.set_attribute(
+        "chat.citation_pass.search_call_ids",
+        to_attribute_text(sorted(search_call_ids_in_turn)),
+    )
+    span.set_attribute("chat.citation_pass.available_chunk_count", available_chunk_count)
+    span.set_attribute(
+        "chat.citation_pass.request_prompt",
+        to_attribute_text(citation_user_prompt),
+    )
+    span.set_attributes(
+        build_input_attributes(
+            {
+                "search_call_count": len(search_call_ids_in_turn),
+                "available_chunk_count": available_chunk_count,
+                "message_count": len(messages),
+            },
+            mime_type=OpenInferenceMimeTypeValues.JSON,
+        )
+    )
+
+
+def _trace_citation_pass_response(
+    *,
+    span: trace.Span,
+    cite_calls: list[ToolCallInfo],
+    cite_text: list[str],
+) -> None:
+    model_output = "".join(cite_text)
+    span.set_attribute("chat.citation_pass.tool_call_count", len(cite_calls))
+    span.set_attribute(
+        "chat.citation_pass.tool_calls",
+        to_attribute_text([tc.name for tc in cite_calls]),
+    )
+    span.set_attribute("chat.citation_pass.model_output_chars", len(model_output))
+    span.set_attribute(
+        "chat.citation_pass.model_output_preview",
+        to_attribute_text(model_output),
+    )
+
+
+def _trace_citation_pass_error(
+    *,
+    span: trace.Span,
+    failure_reason: str,
+    no_tool_call: bool = False,
+) -> None:
+    if no_tool_call:
+        span.set_attribute("chat.citation_pass.no_tool_call", True)
+    span.set_attribute("chat.citation_pass.failure_reason", failure_reason)
+
+
+def _trace_citation_pass_recovery(
+    *,
+    span: trace.Span,
+    recovery_attempted: bool,
+    recovery_succeeded: bool,
+    recovered_serialized_tool_call: bool = False,
+) -> None:
+    span.set_attribute("chat.citation_pass.recovery_attempted", recovery_attempted)
+    span.set_attribute("chat.citation_pass.recovery_succeeded", recovery_succeeded)
+    if recovered_serialized_tool_call:
+        span.set_attribute("chat.citation_pass.recovered_serialized_tool_call", True)
+
+
+def _trace_citation_pass_dispatch_result(
+    *,
+    span: trace.Span,
+    result: JsonObject,
+) -> None:
+    span.set_attribute(
+        "chat.citation_pass.dispatch_result_preview",
+        to_attribute_text(result),
+    )
+
+
+def _trace_citation_pass_missing_tool(*, span: trace.Span, available: bool) -> None:
+    span.set_attribute("chat.citation_tool_available", available)
+    span.set_attribute("chat.citation_pass.recovery_attempted", False)
+    span.set_attribute("chat.citation_pass.recovery_succeeded", False)
+
+
+def _trace_citation_pass_non_citation_calls(
+    *,
+    span: trace.Span,
+    cite_calls: list[ToolCallInfo],
+    allowed_calls: list[ToolCallInfo],
+) -> None:
+    span.set_attribute(
+        "chat.citation_pass.non_citation_tool_call_count",
+        len(cite_calls) - len(allowed_calls),
+    )
+
+
+def _trace_tool_dispatch_request(*, span: trace.Span, tc: ToolCallInfo) -> None:
+    span.set_attributes(build_span_kind_attributes(OpenInferenceSpanKindValues.CHAIN))
+    span.set_attribute("chat.tool.call_id", tc.call_id)
+    span.set_attributes(
+        build_input_attributes(
+            {
+                "tool_name": tc.name,
+                "call_id": tc.call_id,
+                "arguments": tc.arguments,
+            },
+            mime_type=OpenInferenceMimeTypeValues.JSON,
+        )
+    )
+    span.set_attributes(build_tool_execution_attributes(tool_name=tc.name, parameters=tc.arguments))
+
+
+def _trace_tool_dispatch_response(
+    *,
+    span: trace.Span,
+    result: JsonObject,
+    events: list[ToolEvent],
+) -> None:
+    span.set_attributes(
+        build_output_attributes(
+            {
+                "status": "ok",
+                "result_keys": sorted(result.keys()),
+                "event_count": len(events),
+            },
+            mime_type=OpenInferenceMimeTypeValues.JSON,
+        )
+    )
+
+
+def _trace_tool_dispatch_error(
+    *,
+    span: trace.Span,
+    error_msg: str,
+    exc: Exception | None = None,
+) -> None:
+    if exc is not None:
+        span.record_exception(exc)
+    span.set_attributes(
+        build_output_attributes(
+            {
+                "status": "error",
+                "message": error_msg,
+            },
+            mime_type=OpenInferenceMimeTypeValues.JSON,
+        )
+    )
+    span.set_status(StatusCode.ERROR, error_msg)
 
 
 class ChatOrchestrator:
@@ -124,234 +327,206 @@ class ChatOrchestrator:
             emitted_citation_events: list[SourceCitationEvent] = []
             search_call_ids_in_turn: set[str] = set()
             final_assistant_text = ""
-            citation_recovery_attempts = 0
-            citation_recovery_successes = 0
-            with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_PROCESS_MESSAGE) as turn_span:
-                turn_span.set_attribute("chat.user_message.length", len(user_text))
-                turn_span.set_attribute("chat.user_message.preview", to_attribute_text(user_text))
-                turn_span.set_attribute("chat.tool_count", len(tool_map))
 
-                for round_num in range(_MAX_TOOL_ROUNDS):
-                    with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_ROUND) as round_span:
-                        round_span.set_attribute("chat.round", round_num)
-                        system_text = prompts.system_prompt(datetime.now(tz=UTC))
-                        messages = [ChatMessage(role="system", content=system_text), *history]
-                        round_span.set_attribute(
-                            "chat.round.input_summary",
-                            to_attribute_text(summarize_messages(messages)),
-                        )
-                        collected: list[str] = []
-                        tool_calls: list[ToolCallInfo] = []
-
-                        async for item in model.stream(messages, tools=tool_schemas):
-                            if isinstance(item, str):
-                                collected.append(item)
-                            else:
-                                tool_calls.extend(item)
-
-                        round_span.set_attribute("chat.round.text_chars", len("".join(collected)))
-                        round_span.set_attribute("chat.round.tool_call_count", len(tool_calls))
-                        round_span.set_attribute(
-                            "chat.round.tool_calls",
-                            to_attribute_text([tc.name for tc in tool_calls]),
-                        )
-
-                        if not tool_calls:
-                            assistant_text = "".join(collected)
-                            final_assistant_text = assistant_text
-                            round_span.set_attribute(
-                                "chat.round.output_preview",
-                                to_attribute_text(assistant_text),
-                            )
-                            history.append(ChatMessage(role="assistant", content=assistant_text))
-                            for text_chunk in collected:
-                                yield text_chunk
-                            break
-
-                        logger.info(
-                            "orchestrator.tool_round",
-                            round=round_num,
-                            calls=[tc.name for tc in tool_calls],
-                        )
-                        history.append(
-                            ChatMessage(
-                                role="assistant",
-                                content="".join(collected),
-                                tool_calls=tuple(tool_calls),
-                            )
-                        )
-                        for tc in tool_calls:
-                            if tc.name == _SEARCH_TOOL_NAME:
-                                search_call_ids_in_turn.add(tc.call_id)
-                        async for event in _dispatch_tool_calls(tool_calls, history, tool_map):
-                            yield event
-                            match event:
-                                case SourceCitationEvent():
-                                    emitted_citation_events.append(event)
-                else:
-                    # Safety: exceeded max rounds — one final response without tools.
-                    logger.warning("orchestrator.max_tool_rounds_exceeded", limit=_MAX_TOOL_ROUNDS)
+            for round_num in range(_MAX_TOOL_ROUNDS):
+                with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_ROUND) as round_span:
                     system_text = prompts.system_prompt(datetime.now(tz=UTC))
                     messages = [ChatMessage(role="system", content=system_text), *history]
-                    final: list[str] = []
-                    async for item in model.stream(messages, tools=None):
+                    _trace_round_request(
+                        span=round_span,
+                        round_num=round_num,
+                        messages=messages,
+                        tool_schemas=tool_schemas,
+                    )
+                    collected: list[str] = []
+                    tool_calls: list[ToolCallInfo] = []
+
+                    async for item in model.stream(messages, tools=tool_schemas):
                         if isinstance(item, str):
-                            final.append(item)
-                            yield item
-                    final_assistant_text = "".join(final)
-                    history.append(ChatMessage(role="assistant", content=final_assistant_text))
+                            collected.append(item)
+                        else:
+                            tool_calls.extend(item)
 
-                # Citation pass: only for the current turn when search results were
-                # consumed and no citation event was emitted during the main loop.
-                if not emitted_citation_events and search_call_ids_in_turn:
-                    with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_CITATION_PASS) as span:
-                        citation_tool = tool_map.get(_CITATION_TOOL_NAME)
-                        citation_schema = tool_schema_map.get(_CITATION_TOOL_NAME)
-                        span.set_attribute(
-                            "chat.citation_tool_available",
-                            citation_tool is not None and citation_schema is not None,
+                    if not tool_calls:
+                        assistant_text = "".join(collected)
+                        final_assistant_text = assistant_text
+                        _trace_round_response(
+                            span=round_span,
+                            collected=collected,
+                            tool_calls=tool_calls,
+                            assistant_text=assistant_text,
                         )
-                        span.set_attribute("chat.citation_pass.recovery_attempted", False)
-                        span.set_attribute("chat.citation_pass.recovery_succeeded", False)
-                        if citation_tool is not None and citation_schema is not None:
-                            available_chunks = collect_search_chunks(
-                                tuple(history),
-                                search_call_ids=search_call_ids_in_turn,
+                        history.append(ChatMessage(role="assistant", content=assistant_text))
+                        for text_chunk in collected:
+                            yield text_chunk
+                        break
+
+                    _trace_round_response(
+                        span=round_span,
+                        collected=collected,
+                        tool_calls=tool_calls,
+                    )
+
+                    logger.info(
+                        "orchestrator.tool_round",
+                        round=round_num,
+                        calls=[tc.name for tc in tool_calls],
+                    )
+                    history.append(
+                        ChatMessage(
+                            role="assistant",
+                            content="".join(collected),
+                            tool_calls=tuple(tool_calls),
+                        )
+                    )
+                    for tc in tool_calls:
+                        if tc.name == _SEARCH_TOOL_NAME:
+                            search_call_ids_in_turn.add(tc.call_id)
+                    async for event in _dispatch_tool_calls(tool_calls, history, tool_map):
+                        yield event
+                        match event:
+                            case SourceCitationEvent():
+                                emitted_citation_events.append(event)
+            else:
+                # Safety: exceeded max rounds — one final response without tools.
+                logger.warning("orchestrator.max_tool_rounds_exceeded", limit=_MAX_TOOL_ROUNDS)
+                system_text = prompts.system_prompt(datetime.now(tz=UTC))
+                messages = [ChatMessage(role="system", content=system_text), *history]
+                final: list[str] = []
+                async for item in model.stream(messages, tools=None):
+                    if isinstance(item, str):
+                        final.append(item)
+                        yield item
+                final_assistant_text = "".join(final)
+                history.append(ChatMessage(role="assistant", content=final_assistant_text))
+
+            # Citation pass: only for the current turn when search results were
+            # consumed and no citation event was emitted during the main loop.
+            if not emitted_citation_events and search_call_ids_in_turn:
+                with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_CITATION_PASS) as span:
+                    citation_tool = tool_map.get(_CITATION_TOOL_NAME)
+                    citation_schema = tool_schema_map.get(_CITATION_TOOL_NAME)
+                    citation_tool_available = (
+                        citation_tool is not None and citation_schema is not None
+                    )
+                    _trace_citation_pass_missing_tool(
+                        span=span,
+                        available=citation_tool_available,
+                    )
+                    if citation_tool_available:
+                        assert citation_tool is not None
+                        assert citation_schema is not None
+                        available_chunks = collect_search_chunks(
+                            tuple(history),
+                            search_call_ids=search_call_ids_in_turn,
+                        )
+                        if not available_chunks:
+                            _trace_citation_pass_error(
+                                span=span,
+                                failure_reason="no search chunks correlated to current-turn search calls",
                             )
-                            if not available_chunks:
-                                span.set_attribute(
-                                    "chat.citation_pass.failure_reason",
-                                    "no search chunks correlated to current-turn search calls",
-                                )
-                                logger.warning("orchestrator.citation_pass_no_search_chunks")
-                            else:
-                                rendered_search_results = render_search_results_for_prompt(
-                                    tuple(available_chunks.values())
-                                )
-                                citation_user_prompt = prompts.citation_request_message(
-                                    rendered_search_results,
-                                    final_assistant_text,
-                                )
-                                citation_schemas: list[ToolSchema] = [citation_schema]
-                                span.set_attribute(
-                                    "chat.citation_pass.search_call_ids",
-                                    to_attribute_text(sorted(search_call_ids_in_turn)),
-                                )
-                                span.set_attribute(
-                                    "chat.citation_pass.available_chunk_count",
-                                    len(available_chunks),
-                                )
-                                span.set_attribute(
-                                    "chat.citation_pass.request_prompt",
-                                    to_attribute_text(citation_user_prompt),
-                                )
-                                system_text = prompts.citation_system_prompt(
-                                    datetime.now(tz=UTC)
-                                )
-                                messages = [
-                                    ChatMessage(role="system", content=system_text),
-                                    ChatMessage(role="user", content=citation_user_prompt),
-                                ]
-                                span.set_attribute(
-                                    "chat.citation_pass.input_summary",
-                                    to_attribute_text(summarize_messages(messages)),
-                                )
-                                cite_calls: list[ToolCallInfo] = []
-                                cite_text: list[str] = []
+                            logger.warning("orchestrator.citation_pass_no_search_chunks")
+                        else:
+                            rendered_search_results = render_search_results_for_prompt(
+                                tuple(available_chunks.values())
+                            )
+                            citation_user_prompt = prompts.citation_request_message(
+                                rendered_search_results,
+                                final_assistant_text,
+                            )
+                            citation_schemas: list[ToolSchema] = [citation_schema]
+                            system_text = prompts.citation_system_prompt(datetime.now(tz=UTC))
+                            messages = [
+                                ChatMessage(role="system", content=system_text),
+                                ChatMessage(role="user", content=citation_user_prompt),
+                            ]
+                            _trace_citation_pass_request(
+                                span=span,
+                                citation_tool_available=citation_tool_available,
+                                search_call_ids_in_turn=search_call_ids_in_turn,
+                                available_chunk_count=len(available_chunks),
+                                citation_user_prompt=citation_user_prompt,
+                                messages=messages,
+                            )
+                            cite_calls: list[ToolCallInfo] = []
+                            cite_text: list[str] = []
 
-                                async for item in model.stream(messages, tools=citation_schemas):
-                                    if isinstance(item, str):
-                                        cite_text.append(item)
-                                    else:
-                                        cite_calls.extend(item)
+                            async for item in model.stream(messages, tools=citation_schemas):
+                                if isinstance(item, str):
+                                    cite_text.append(item)
+                                else:
+                                    cite_calls.extend(item)
 
-                                span.set_attribute(
-                                    "chat.citation_pass.tool_call_count", len(cite_calls)
-                                )
-                                span.set_attribute(
-                                    "chat.citation_pass.tool_calls",
-                                    to_attribute_text([tc.name for tc in cite_calls]),
-                                )
-                                span.set_attribute(
-                                    "chat.citation_pass.model_output_chars",
-                                    len("".join(cite_text)),
-                                )
-                                span.set_attribute(
-                                    "chat.citation_pass.model_output_preview",
-                                    to_attribute_text("".join(cite_text)),
-                                )
+                            _trace_citation_pass_response(
+                                span=span,
+                                cite_calls=cite_calls,
+                                cite_text=cite_text,
+                            )
 
-                                if not cite_calls:
-                                    citation_recovery_attempts += 1
-                                    span.set_attribute("chat.citation_pass.recovery_attempted", True)
-                                    parsed_call = parse_serialized_citation_tool_call(
-                                        "".join(cite_text)
+                            if not cite_calls:
+                                _trace_citation_pass_recovery(
+                                    span=span,
+                                    recovery_attempted=True,
+                                    recovery_succeeded=False,
+                                )
+                                parsed_call = parse_serialized_citation_tool_call(
+                                    "".join(cite_text)
+                                )
+                                if parsed_call is None:
+                                    logger.warning("orchestrator.citation_pass_no_tool_call")
+                                    _trace_citation_pass_error(
+                                        span=span,
+                                        failure_reason="model returned text instead of cite_sources tool call",
+                                        no_tool_call=True,
                                     )
-                                    if parsed_call is None:
-                                        logger.warning("orchestrator.citation_pass_no_tool_call")
-                                        span.set_attribute("chat.citation_pass.no_tool_call", True)
-                                        span.set_attribute(
-                                            "chat.citation_pass.failure_reason",
-                                            "model returned text instead of cite_sources tool call",
-                                        )
-                                    else:
-                                        citation_recovery_successes += 1
-                                        span.set_attribute(
-                                            "chat.citation_pass.recovered_serialized_tool_call",
-                                            True,
-                                        )
-                                        span.set_attribute(
-                                            "chat.citation_pass.recovery_succeeded",
-                                            True,
-                                        )
+                                else:
+                                    _trace_citation_pass_recovery(
+                                        span=span,
+                                        recovery_attempted=True,
+                                        recovery_succeeded=True,
+                                        recovered_serialized_tool_call=True,
+                                    )
+                                    result, events = await _dispatch(
+                                        parsed_call,
+                                        tool_map,
+                                        ToolContext(history=tuple(history)),
+                                    )
+                                    _trace_citation_pass_dispatch_result(span=span, result=result)
+                                    for event in events:
+                                        emitted_citation_events.append(event)
+                                        yield event
+                            else:
+                                allowed_calls = [
+                                    tc for tc in cite_calls if tc.name == _CITATION_TOOL_NAME
+                                ]
+                                _trace_citation_pass_non_citation_calls(
+                                    span=span,
+                                    cite_calls=cite_calls,
+                                    allowed_calls=allowed_calls,
+                                )
+                                if not allowed_calls:
+                                    _trace_citation_pass_error(
+                                        span=span,
+                                        failure_reason="no cite_sources call in citation pass output",
+                                    )
+                                    logger.warning(
+                                        "orchestrator.citation_pass_wrong_tool_calls",
+                                        calls=[tc.name for tc in cite_calls],
+                                    )
+                                else:
+                                    for tc in allowed_calls[:1]:
                                         result, events = await _dispatch(
-                                            parsed_call,
+                                            tc,
                                             tool_map,
                                             ToolContext(history=tuple(history)),
                                         )
-                                        span.set_attribute(
-                                            "chat.citation_pass.dispatch_result_preview",
-                                            to_attribute_text(result),
+                                        _trace_citation_pass_dispatch_result(
+                                            span=span,
+                                            result=result,
                                         )
                                         for event in events:
                                             emitted_citation_events.append(event)
                                             yield event
-                                else:
-                                    allowed_calls = [
-                                        tc for tc in cite_calls if tc.name == _CITATION_TOOL_NAME
-                                    ]
-                                    span.set_attribute(
-                                        "chat.citation_pass.non_citation_tool_call_count",
-                                        len(cite_calls) - len(allowed_calls),
-                                    )
-                                    if not allowed_calls:
-                                        span.set_attribute(
-                                            "chat.citation_pass.failure_reason",
-                                            "no cite_sources call in citation pass output",
-                                        )
-                                        logger.warning(
-                                            "orchestrator.citation_pass_wrong_tool_calls",
-                                            calls=[tc.name for tc in cite_calls],
-                                        )
-                                    else:
-                                        for tc in allowed_calls[:1]:
-                                            result, events = await _dispatch(
-                                                tc,
-                                                tool_map,
-                                                ToolContext(history=tuple(history)),
-                                            )
-                                            span.set_attribute(
-                                                "chat.citation_pass.dispatch_result_preview",
-                                                to_attribute_text(result),
-                                            )
-                                            for event in events:
-                                                emitted_citation_events.append(event)
-                                                yield event
-
-                turn_span.set_attribute("chat.citation_events", len(emitted_citation_events))
-                turn_span.set_attribute("chat.citation_recovery_attempts", citation_recovery_attempts)
-                turn_span.set_attribute("chat.citation_recovery_successes", citation_recovery_successes)
-                turn_span.set_attribute("chat.history_entries", len(history))
 
         return _gen()
 
@@ -392,49 +567,19 @@ async def _dispatch(
 ) -> tuple[JsonObject, list[ToolEvent]]:
     """Look up the named tool, execute it, and return its structured result and events."""
     with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH) as span:
-        span.set_attribute("chat.tool.name", tc.name)
-        span.set_attribute("chat.tool.call_id", tc.call_id)
-        span.set_attribute("chat.tool.arguments", to_attribute_text(tc.arguments))
+        _trace_tool_dispatch_request(span=span, tc=tc)
 
         tool = tool_map.get(tc.name)
         if tool is None:
             logger.error("orchestrator.unknown_tool", name=tc.name)
             error_msg = f"unknown tool '{tc.name}'"
-            span.set_attribute("chat.tool.error", True)
-            span.set_attribute("chat.tool.error_message", error_msg)
-            span.set_status(StatusCode.ERROR, error_msg)
+            _trace_tool_dispatch_error(span=span, error_msg=error_msg)
             return {"error": error_msg}, []
         try:
             result, events = await tool.execute(tc.arguments, context)
-            span.set_attribute("chat.tool.result_keys", to_attribute_text(sorted(result.keys())))
-            if tc.name == _SEARCH_TOOL_NAME:
-                span.set_attribute(
-                    "chat.tool.result_chunk_preview",
-                    to_attribute_text(summarize_search_result(result)),
-                )
-            if tc.name == _CITATION_TOOL_NAME:
-                validated = cast(object, result.get("validated"))
-                unvalidated = cast(object, result.get("unvalidated"))
-                validated_list = (
-                    cast(list[object], validated) if isinstance(validated, list) else []
-                )
-                unvalidated_list = (
-                    cast(list[object], unvalidated) if isinstance(unvalidated, list) else []
-                )
-                span.set_attribute(
-                    "chat.tool.result_validated",
-                    len(validated_list),
-                )
-                span.set_attribute(
-                    "chat.tool.result_unvalidated",
-                    len(unvalidated_list),
-                )
-            span.set_attribute("chat.tool.events", len(events))
+            _trace_tool_dispatch_response(span=span, result=result, events=events)
             return result, events
         except Exception as exc:
             logger.exception("orchestrator.tool_error", name=tc.name, exc=str(exc))
-            span.record_exception(exc)
-            span.set_attribute("chat.tool.error", True)
-            span.set_attribute("chat.tool.error_message", str(exc))
-            span.set_status(StatusCode.ERROR, str(exc))
+            _trace_tool_dispatch_error(span=span, error_msg=str(exc), exc=exc)
             return {"error": f"Tool '{tc.name}' raised an error: {exc}"}, []
