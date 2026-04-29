@@ -238,3 +238,171 @@ class TestCitationValidationIntegration:
         assert len(validated) == 1
         assert validated[0].source == valid["source"]
         assert validated[0].chunk_id == valid["chunk_id"]
+
+
+class TestInlineQuoteOrchestratorIntegration:
+    """WP7 integration tests for the inline-quote streaming path.
+
+    These tests exercise the real orchestrator with ``inline_quotes_enabled=True``
+    and ``citation_round_trip_enabled=False`` against live Qdrant + Ollama.
+    They verify the happy path (retrieval-grounded answer completes and produces
+    a response) and the regression path (non-retrieval tool answer does not hang).
+
+    Quote marker emission is model-dependent and is NOT asserted here — only
+    that the pipeline handles any model output correctly.
+    """
+
+    async def test_grounded_query_completes_without_error_on_inline_flow(
+        self, ingested_store: None
+    ) -> None:
+        """A retrieval-grounded query processed via inline-quote flow yields a
+        non-empty response and does not raise."""
+        from src.chatbot.app.orchestrator import ChatOrchestrator
+        from src.chatbot.app.protocols import (
+            ChatRuntimeFlags,
+            QuoteReferenceEvent,
+            SourceCitationEvent,
+        )
+        from src.chatbot.infrastructure.chat import (
+            ChatModelConfig,
+            build_chat_model,
+            build_chat_prompt_profile,
+        )
+        from src.chatbot.infrastructure.chat._inline_quotes import (
+            build_inline_quote_parsing_chat_model,
+        )
+        from src.chatbot.tools.retrieval.tool import RetrievalTool
+        from src.settings import get_settings
+
+        settings = get_settings()
+        config = ChatModelConfig(base_url=settings.ollama_base_url, model=settings.chat_model)
+        prompt_profile = build_chat_prompt_profile(config)
+        base_model = build_chat_model(config)
+        model = build_inline_quote_parsing_chat_model(base_model)
+        retriever = build_retriever(
+            config=_RETRIEVER_CONFIG,
+            text_embedder=build_text_embedder(_TEXT_EMBEDDER_CONFIG),
+        )
+        retrieval_tool = RetrievalTool(retriever=retriever)
+
+        orchestrator = ChatOrchestrator(
+            model=model,
+            tools=[retrieval_tool],
+            prompt_profile=prompt_profile,
+            runtime_flags=ChatRuntimeFlags(
+                inline_quotes_enabled=True,
+                citation_round_trip_enabled=False,
+            ),
+        )
+        response = ""
+        quote_ref_events: list[QuoteReferenceEvent] = []
+        citation_events: list[SourceCitationEvent] = []
+
+        async for event in orchestrator.process_message("What is Zurich known for?"):
+            if isinstance(event, str):
+                response += event
+            elif isinstance(event, QuoteReferenceEvent):
+                quote_ref_events.append(event)
+            else:
+                citation_events.append(event)
+
+        assert response, "Inline-quote flow must produce a non-empty response"
+        # If the model emitted inline quotes, they must be numbered from 1.
+        for _i, ref in enumerate(quote_ref_events, start=1):
+            assert ref.reference_number >= 1, (
+                f"Reference number must be >= 1, got {ref.reference_number}"
+            )
+        # Citation events, if emitted, must reference zurich.txt chunks.
+        if citation_events:
+            all_validated = [c for evt in citation_events for c in evt.validated]
+            assert all_validated, "Citation event must carry validated chunks"
+            assert any("zurich.txt" in c.source for c in all_validated), (
+                "Expected at least one citation from zurich.txt"
+            )
+
+    async def test_non_grounded_query_produces_no_source_citation_event(
+        self, ingested_store: None
+    ) -> None:
+        """A purely conversational query with inline-quote flow produces a response
+        and emits no SourceCitationEvent (no retrieval chunks cited)."""
+        from src.chatbot.app.orchestrator import ChatOrchestrator
+        from src.chatbot.app.protocols import ChatRuntimeFlags, SourceCitationEvent
+        from src.chatbot.infrastructure.chat import (
+            ChatModelConfig,
+            build_chat_model,
+            build_chat_prompt_profile,
+        )
+        from src.chatbot.infrastructure.chat._inline_quotes import (
+            build_inline_quote_parsing_chat_model,
+        )
+        from src.settings import get_settings
+
+        settings = get_settings()
+        config = ChatModelConfig(base_url=settings.ollama_base_url, model=settings.chat_model)
+        prompt_profile = build_chat_prompt_profile(config)
+        base_model = build_chat_model(config)
+        model = build_inline_quote_parsing_chat_model(base_model)
+
+        # No retrieval tool — model must answer from prior knowledge only.
+        orchestrator = ChatOrchestrator(
+            model=model,
+            prompt_profile=prompt_profile,
+            runtime_flags=ChatRuntimeFlags(
+                inline_quotes_enabled=True,
+                citation_round_trip_enabled=False,
+            ),
+        )
+        response = ""
+        citation_events: list[SourceCitationEvent] = []
+
+        async for event in orchestrator.process_message("What is two plus two?"):
+            if isinstance(event, str):
+                response += event
+            elif isinstance(event, SourceCitationEvent):
+                citation_events.append(event)
+
+        assert response, "Non-grounded query must still produce a response"
+        assert citation_events == [], (
+            "No SourceCitationEvent expected when no retrieval tool is available"
+        )
+
+    async def test_inline_parser_survives_model_output_without_markers(
+        self, ingested_store: None
+    ) -> None:
+        """Inline quote parser must pass through arbitrary model output unchanged when
+        no quote markers are present — verifying the non-blocking fallback path."""
+        from src.chatbot.app.orchestrator import ChatOrchestrator
+        from src.chatbot.app.protocols import ChatRuntimeFlags
+        from src.chatbot.infrastructure.chat import (
+            ChatModelConfig,
+            build_chat_model,
+            build_chat_prompt_profile,
+        )
+        from src.chatbot.infrastructure.chat._inline_quotes import (
+            build_inline_quote_parsing_chat_model,
+        )
+        from src.settings import get_settings
+
+        settings = get_settings()
+        config = ChatModelConfig(base_url=settings.ollama_base_url, model=settings.chat_model)
+        prompt_profile = build_chat_prompt_profile(config)
+        base_model = build_chat_model(config)
+        model = build_inline_quote_parsing_chat_model(base_model)
+
+        orchestrator = ChatOrchestrator(
+            model=model,
+            prompt_profile=prompt_profile,
+            runtime_flags=ChatRuntimeFlags(
+                inline_quotes_enabled=True,
+                citation_round_trip_enabled=False,
+            ),
+        )
+
+        # A simple factual question is unlikely to produce quote markers.
+        # The test asserts only that the stream completes without raising.
+        response = ""
+        async for event in orchestrator.process_message("Say hello."):
+            if isinstance(event, str):
+                response += event
+
+        assert response, "Parser wrapper must not swallow all model output"

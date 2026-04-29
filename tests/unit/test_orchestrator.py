@@ -1225,3 +1225,166 @@ class TestWP6FlagGatedBehavior:
         assert len(model.stream_calls) == 1
         assert not any(isinstance(e, SourceCitationEvent) for e in events)
         assert not any(isinstance(e, QuoteReferenceEvent) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# WP7: Regression tests — non-retrieval GPU-hang scenario
+#
+# These tests guard against the failure mode where a non-search tool call
+# (e.g. vacation_days) triggered the legacy citation pass, causing some
+# models to run indefinitely without returning a usable result.
+# ---------------------------------------------------------------------------
+
+
+class TestNonRetrievalRegressionGPUHang:
+    """Regression tests: non-search tool calls must never trigger a citation pass.
+
+    The GPU-hang failure mode: when citation_round_trip_enabled=True and a
+    non-retrieval tool (e.g. get_vacation_days) is called, older code could
+    trigger a second model pass that hangs on certain models.  The guard
+    condition ``search_call_ids_in_turn`` must remain empty for non-search tools,
+    ensuring the citation pass branch is never entered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_search_tool_call_does_not_trigger_citation_pass(self) -> None:
+        """Regression: vacation_days-style tool call with citation_round_trip_enabled=True
+        must not cause a third model stream call (the citation pass)."""
+        vacation_tc = ToolCallInfo(
+            name="get_vacation_days", arguments={"year": 2025}, call_id="v1"
+        )
+        vacation_tool = _FakeTool("get_vacation_days", result={"remaining_days": 27})
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={"validated": [], "unvalidated": []},
+            events=[],
+        )
+        # Model turn 1: call vacation_days; turn 2: final text.
+        # If a citation pass were triggered, a turn 3 would be required — this
+        # fake model has no turn 3 configured, so any third call would return the
+        # last defined turn (turn 2 answer).  We assert stream_calls length to
+        # catch the regression explicitly.
+        model = _FakeChatModel(
+            turns=[
+                ([], [vacation_tc]),
+                (["You have 27 days of vacation remaining."], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[vacation_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+            # citation_round_trip_enabled=True is the dangerous default that
+            # triggered the GPU hang in the pre-fix code.
+            runtime_flags=_FLAGS_ROUND_TRIP_ONLY,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("How many vacation days?"))
+
+        assert text == "You have 27 days of vacation remaining."
+        # Exactly two model calls — tool step + final answer.  No citation pass.
+        assert len(model.stream_calls) == 2, (
+            "Citation pass must not fire for non-search tool calls "
+            f"(got {len(model.stream_calls)} model calls)"
+        )
+        assert events == []
+        assert cite_tool.calls == []
+
+    @pytest.mark.asyncio
+    async def test_multiple_non_search_tools_skip_citation_pass(self) -> None:
+        """Multiple non-retrieval tool calls in one turn must not trigger citation pass."""
+        tc1 = ToolCallInfo(name="get_vacation_days", arguments={"year": 2025}, call_id="v1")
+        tc2 = ToolCallInfo(name="get_profile", arguments={}, call_id="p1")
+        tool1 = _FakeTool("get_vacation_days", result={"remaining_days": 10})
+        tool2 = _FakeTool("get_profile", result={"name": "Alice"})
+        cite_tool = _FakeTool("cite_sources", result={}, events=[])
+        model = _FakeChatModel(
+            turns=[
+                ([], [tc1, tc2]),
+                (["Alice has 10 days left."], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool1, tool2, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+            runtime_flags=_FLAGS_ROUND_TRIP_ONLY,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("vacation info?"))
+
+        assert text == "Alice has 10 days left."
+        assert len(model.stream_calls) == 2
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_non_search_tool_with_inline_quotes_enabled_produces_no_search_citations(
+        self,
+    ) -> None:
+        """Inline flow with a non-search tool emits ToolCallQuote references but no
+        SourceCitationEvent (since no retrieval chunks are in history)."""
+        vacation_tc = ToolCallInfo(
+            name="get_vacation_days", arguments={"year": 2025}, call_id="v1"
+        )
+        quote = ToolCallQuote(
+            claim="27 days remaining",
+            tool_call_id="v1",
+            tool_name="get_vacation_days",
+        )
+        vacation_tool = _FakeTool("get_vacation_days", result={"remaining_days": 27})
+        model = _FakeChatModel(
+            turns=[([], [vacation_tc]), (["You have ", quote, " vacation days."], [])]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[vacation_tool],
+            prompt_profile=_IdentityPromptProfile(),
+            runtime_flags=_FLAGS_INLINE_ONLY,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("vacation days?"))
+
+        assert text == "You have  vacation days."
+        assert len(model.stream_calls) == 2
+        ref_events = [e for e in events if isinstance(e, QuoteReferenceEvent)]
+        assert len(ref_events) == 1
+        assert ref_events[0].reference_number == 1
+        # No SourceCitationEvent — no retrieval chunks involved.
+        assert not any(isinstance(e, SourceCitationEvent) for e in events)
+
+    @pytest.mark.asyncio
+    async def test_non_retrieval_turn_with_both_flags_enabled_produces_no_citation_pass(
+        self,
+    ) -> None:
+        """Both flags enabled + non-search tool: inline quotes fire but citation pass
+        is suppressed because no search_call_ids_in_turn were accumulated."""
+        vacation_tc = ToolCallInfo(
+            name="get_vacation_days", arguments={"year": 2025}, call_id="v1"
+        )
+        quote = ToolCallQuote(
+            claim="27 days remaining",
+            tool_call_id="v1",
+            tool_name="get_vacation_days",
+        )
+        vacation_tool = _FakeTool("get_vacation_days", result={"remaining_days": 27})
+        cite_tool = _FakeTool("cite_sources", result={}, events=[])
+        model = _FakeChatModel(
+            turns=[([], [vacation_tc]), (["You have ", quote, " days."], [])]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[vacation_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+            runtime_flags=_FLAGS_BOTH,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("vacation?"))
+
+        assert text == "You have  days."
+        # No citation pass — search_call_ids_in_turn is empty.
+        assert len(model.stream_calls) == 2
+        assert cite_tool.calls == []
+        # Tool quote reference is emitted; no SourceCitationEvent.
+        ref_events = [e for e in events if isinstance(e, QuoteReferenceEvent)]
+        assert len(ref_events) == 1
+        assert not any(isinstance(e, SourceCitationEvent) for e in events)
