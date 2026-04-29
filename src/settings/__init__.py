@@ -191,6 +191,16 @@ class Settings(BaseSettings):
         description="Dataset snapshot/version identifier for experiment runs.",
     )
 
+    # --- Phase 7 rollout flags ---
+    inline_quotes_enabled: bool = Field(
+        default=True,
+        description="Enable inline quote stream items in the chat pipeline.",
+    )
+    citation_round_trip_enabled: bool = Field(
+        default=True,
+        description="Enable legacy citation round-trip pass while inline-quote rollout is in progress.",
+    )
+
 
 def get_settings() -> Settings:
     """Construct and return a validated :class:`Settings` instance.

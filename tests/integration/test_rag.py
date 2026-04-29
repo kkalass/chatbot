@@ -161,7 +161,7 @@ class TestOrchestratorWithRetrieval:
         async for event in orchestrator.process_message("What is Zurich known for?"):
             if isinstance(event, str):
                 response += event
-            else:
+            elif isinstance(event, SourceCitationEvent):
                 citation_events.append(event)
 
         assert response, "Expected a non-empty response from the model"

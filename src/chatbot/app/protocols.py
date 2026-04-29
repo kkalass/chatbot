@@ -7,7 +7,9 @@ contracts that don't belong to a single subsystem live here.
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.chatbot.app.prompts import Prompts
 
@@ -98,13 +100,54 @@ class SourceCitationEvent:
     validated: tuple[SourceChunk, ...]
 
 
+class SearchResultQuote(BaseModel):
+    """Quote emitted for claims grounded in ``search_documents`` output."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["search_result"] = "search_result"
+    claim: str
+    tool_call_id: str
+    source: str
+    chunk_id: str
+    quote_text: str | None = None
+
+
+class ToolCallQuote(BaseModel):
+    """Quote emitted for claims grounded in non-retrieval tool outputs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["tool_call"] = "tool_call"
+    claim: str
+    tool_call_id: str
+    tool_name: str
+    output_path: str | None = None
+    quote_text: str | None = None
+
+
+type Quote = SearchResultQuote | ToolCallQuote
+
+
+class QuoteReferenceEvent(BaseModel):
+    """Inline reference emitted by the orchestrator for a validated quote."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reference_number: int = Field(ge=1)
+    canonical_key: str
+
+
 # Union of all events that a tool may emit alongside its JSON result.
 type ToolEvent = SourceCitationEvent
 
 # Union of all items yielded by :meth:`~src.chatbot.app.orchestrator.ChatOrchestrator.process_message`.
 # ``str`` items are streamed text chunks; ``ToolEvent`` items carry structured
 # metadata (citations, etc.) that the UI renders separately.
-type ProcessEvent = str | ToolEvent
+type ProcessEvent = str | ToolEvent | QuoteReferenceEvent
+
+
+type ChatStreamItem = str | list[ToolCallInfo] | Quote
 
 
 @dataclass(frozen=True)
@@ -161,15 +204,15 @@ class ChatModel(Protocol):
     turns.  It yields text chunks as they arrive from the model.  If the model
     requests tool calls instead of a text response, a single
     ``list[ToolCallInfo]`` is yielded as the final item; otherwise the stream
-    ends after the text chunks.  Text and tool calls are mutually exclusive
-    within one turn.
+    ends after the text chunks. Quote items may also be yielded when a model
+    wrapper extracts structured quote payloads from inline markers.
     """
 
     def stream(
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[ToolSchema] | None = None,
-    ) -> AsyncIterator[str | list[ToolCallInfo]]:
+    ) -> AsyncIterator[ChatStreamItem]:
         """Stream a chat completion, optionally advertising tool schemas.
 
         Args:
@@ -179,7 +222,8 @@ class ChatModel(Protocol):
         Yields:
             ``str`` chunks while the model generates a text response, followed
             by a single ``list[ToolCallInfo]`` if the model chose to invoke
-            tools rather than reply with text.
+            tools rather than reply with text. ``Quote`` items may appear when
+            inline quote extraction is enabled.
         """
         ...
 

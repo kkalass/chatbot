@@ -143,15 +143,15 @@ async def _collect(stream: AsyncIterator[ProcessEvent]) -> str:
     return "".join(parts)
 
 
-async def _collect_all(stream: AsyncIterator[ProcessEvent]) -> tuple[str, list[ToolEvent]]:
+async def _collect_all(stream: AsyncIterator[ProcessEvent]) -> tuple[str, list[ProcessEvent]]:
     text_parts: list[str] = []
-    tool_events: list[ToolEvent] = []
+    non_text_events: list[ProcessEvent] = []
     async for event in stream:
         if isinstance(event, str):
             text_parts.append(event)
         else:
-            tool_events.append(event)
-    return "".join(text_parts), tool_events
+            non_text_events.append(event)
+    return "".join(text_parts), non_text_events
 
 
 class TestChatOrchestratorStreaming:

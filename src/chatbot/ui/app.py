@@ -19,7 +19,13 @@ from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferen
 from opentelemetry import trace
 
 from src.chatbot.app.orchestrator import ChatOrchestrator
-from src.chatbot.app.protocols import ProcessEvent, Retriever, SourceChunk, SourceCitationEvent
+from src.chatbot.app.protocols import (
+    ProcessEvent,
+    QuoteReferenceEvent,
+    Retriever,
+    SourceChunk,
+    SourceCitationEvent,
+)
 from src.chatbot.config import (
     build_chat_model_config,
     build_retriever_config,
@@ -259,6 +265,10 @@ async def on_message(message: cl.Message) -> None:
                     await response.stream_token(event)
                 case SourceCitationEvent():
                     citation_events.append(event)
+                case QuoteReferenceEvent():
+                    # Inline quote rendering is introduced in a later phase.
+                    # Keep this variant handled now to preserve exhaustive typing.
+                    pass
                 case _:
                     assert_never(event)
 

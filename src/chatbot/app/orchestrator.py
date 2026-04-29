@@ -35,6 +35,7 @@ from src.chatbot.app.prompts import DEFAULT_PROMPTS
 from src.chatbot.app.protocols import (
     ChatMessage,
     ChatModel,
+    ChatStreamItem,
     JsonObject,
     ProcessEvent,
     PromptProfile,
@@ -64,6 +65,25 @@ tracer = trace.get_tracer(__name__)
 _MAX_TOOL_STEPS = 10  # safety limit to prevent infinite agentic loops
 _SEARCH_TOOL_NAME = "search_documents"
 _CITATION_TOOL_NAME = "cite_sources"
+
+
+def _append_stream_item(
+    *,
+    item: ChatStreamItem,
+    collected_text: list[str],
+    tool_calls: list[ToolCallInfo],
+) -> None:
+    """Append one chat stream item to text/tool buffers.
+
+    Quote items are intentionally ignored in WP1 and handled in a later phase.
+    """
+    if isinstance(item, str):
+        collected_text.append(item)
+        return
+    if isinstance(item, list):
+        tool_calls.extend(item)
+        return
+    logger.debug("orchestrator.quote_item_ignored_wp1", kind=item.kind)
 
 
 def _trace_step_request(
@@ -346,7 +366,11 @@ class ChatOrchestrator:
                             collected.append(item)
                             yield item
                         else:
-                            tool_calls.extend(item)
+                            _append_stream_item(
+                                item=item,
+                                collected_text=collected,
+                                tool_calls=tool_calls,
+                            )
 
                     if not tool_calls:
                         assistant_text = "".join(collected)
@@ -396,6 +420,12 @@ class ChatOrchestrator:
                     if isinstance(item, str):
                         final.append(item)
                         yield item
+                    else:
+                        _append_stream_item(
+                            item=item,
+                            collected_text=final,
+                            tool_calls=[],
+                        )
                 final_assistant_text = "".join(final)
                 history.append(ChatMessage(role="assistant", content=final_assistant_text))
 
@@ -454,7 +484,11 @@ class ChatOrchestrator:
                                 if isinstance(item, str):
                                     cite_text.append(item)
                                 else:
-                                    cite_calls.extend(item)
+                                    _append_stream_item(
+                                        item=item,
+                                        collected_text=cite_text,
+                                        tool_calls=cite_calls,
+                                    )
 
                             _trace_citation_pass_response(
                                 span=span,

@@ -37,6 +37,8 @@ class TestSettingsDefaults:
                 "EVAL_RETRIEVAL_VERSION",
                 "EVAL_CORPUS_VERSION",
                 "EVAL_DATASET_VERSION",
+                "INLINE_QUOTES_ENABLED",
+                "CITATION_ROUND_TRIP_ENABLED",
             ):
                 mp.delenv(key, raising=False)
             settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
@@ -68,6 +70,8 @@ class TestSettingsDefaults:
         assert settings.eval_retrieval_version is None
         assert settings.eval_corpus_version is None
         assert settings.eval_dataset_version is None
+        assert settings.inline_quotes_enabled is True
+        assert settings.citation_round_trip_enabled is True
 
     def test_get_settings_returns_settings_instance(self) -> None:
         settings = get_settings()
@@ -88,6 +92,8 @@ class TestSettingsDefaults:
             mp.setenv("MODEL_SEED", "42")
             mp.setenv("EVAL_NAME", "eval-2026-04")
             mp.setenv("EVAL_CANDIDATE_ID", "mistral__ans-7__cit-3__ret-1")
+            mp.setenv("INLINE_QUOTES_ENABLED", "false")
+            mp.setenv("CITATION_ROUND_TRIP_ENABLED", "false")
             settings = Settings()
             assert settings.chat_model == "mistral"
             assert settings.retrieval_top_k == 10
@@ -100,6 +106,8 @@ class TestSettingsDefaults:
             assert settings.model_seed == 42
             assert settings.eval_name == "eval-2026-04"
             assert settings.eval_candidate_id == "mistral__ans-7__cit-3__ret-1"
+            assert settings.inline_quotes_enabled is False
+            assert settings.citation_round_trip_enabled is False
 
     def test_log_format_validation_rejects_invalid(self) -> None:
         import pytest
