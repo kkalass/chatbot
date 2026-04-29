@@ -26,19 +26,19 @@ anywhere else in your response.
 
 For a statement grounded in a `search_documents` result:
 {QUOTE_START_MARKER}
-{{"kind":"search_result","claim":"<brief statement being supported>","tool_call_id":"<exact call_id from search_documents result>","source":"<exact source path from search result>","chunk_id":"<exact chunk_id from search result>"}}
+{{"kind":"search_result","tool_call_id":"<exact call_id from search_documents result>","source":"<exact source path from search result>","chunk_id":"<exact chunk_id from search result>"}}
 {QUOTE_END_MARKER}
 
 For a statement grounded in another tool output:
 {QUOTE_START_MARKER}
-{{"kind":"tool_call","claim":"<brief statement being supported>","tool_call_id":"<exact call_id from the tool result>","tool_name":"<exact tool name>"}}
+{{"kind":"tool_call","tool_call_id":"<exact call_id from the tool result>"}}
 {QUOTE_END_MARKER}
 
 Rules:
 - Emit exactly one JSON object per marker block.
-- Only use `tool_call_id`, `source`, `chunk_id`, and `tool_name` values that
-  appear verbatim in tool results already present in the conversation context.
-- The optional `quote_text` field may carry a short verbatim extract.
+- Only use `tool_call_id`, `source`, and `chunk_id` values that appear verbatim
+    in tool results already present in the conversation context.
+- Optional fields: `claim` and `quote_text` (search_result only).
 - Do not emit markers for unsupported, inferred, or uncertain claims.
 - Keep all normal user-facing answer text outside the markers."""
 
@@ -52,9 +52,26 @@ class Prompts:
             and returns the system instruction string.  Accepting ``datetime`` as a
             parameter ensures the date is evaluated lazily at request time rather
             than at module import time.
+        user_message: Callable used to format the current user turn for the
+            model call. The formatted variant is never stored in history; it is
+            only used while assembling the per-step ``messages`` list.
     """
 
     system_prompt: Callable[[datetime], str]
+    user_message: Callable[[str], str] = lambda user_text: (
+        "Reminder: when your answer uses search results or tool outputs, emit "
+        "inline citation markers immediately after the supported claims. Use "
+        "exactly the marker tokens <°_quote_°> and </°_quote_°>; do not use "
+        "any marker variants. For search-backed claims, include kind, "
+        "tool_call_id, source, and chunk_id. For tool-backed claims, include "
+        "only kind=tool_call and tool_call_id. Copy tool_call_id, source, and "
+        "chunk_id exactly from the tool results already present in the "
+        "conversation context. Emit at most one marker per tool call — multiple "
+        "statements backed by the same tool call share one marker."
+        "\n\n"
+        "The actual user message is:"
+        f"{user_text}\n\n"
+    )
 
 
 def _base_system_prompt(now: datetime) -> str:

@@ -116,20 +116,17 @@ class TestVacationDaysInput:
 class TestVacationDaysOutput:
     def test_constructs_with_all_fields(self) -> None:
         output = VacationDaysOutput(
-            employee_username="alice",
-            year=2025,
             total_days=25,
             used_days=8,
             remaining_days=17,
         )
         assert output.remaining_days == 17
-        assert output.employee_username == "alice"
+        assert output.total_days == 25
 
     def test_rejects_missing_fields(self) -> None:
         with pytest.raises(ValidationError):
             VacationDaysOutput(  # type: ignore[call-arg]
-                employee_username="alice",
-                year=2025,
+                total_days=25,
             )
 
 
@@ -145,8 +142,6 @@ class TestSimulatedVacationDaysAdapter:
         result = await adapter.get_vacation_days(
             VacationDaysInput(year=2025), username="alice", password="alice123"
         )
-        assert result.employee_username == "alice"
-        assert result.year == 2025
         assert result.total_days == 25
         assert result.used_days == 8
         assert result.remaining_days == 17
@@ -181,7 +176,7 @@ class TestSimulatedVacationDaysAdapter:
         result = await adapter.get_vacation_days(
             VacationDaysInput(year=2023), username="demo", password="demo"
         )
-        assert result.year == 2023
+        assert result.remaining_days == 15  # 25 - 10
 
     @pytest.mark.asyncio
     async def test_all_simulated_users_authenticate(self) -> None:
@@ -194,7 +189,7 @@ class TestSimulatedVacationDaysAdapter:
             result = await adapter.get_vacation_days(
                 VacationDaysInput(year=2025), username=username, password=password
             )
-            assert result.employee_username == username
+            assert result.remaining_days >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +270,6 @@ class TestVacationDaysTool:
         )
         service = _FakeVacationDaysService(
             result=VacationDaysOutput(
-                employee_username="alice",
-                year=2025,
                 total_days=25,
                 used_days=8,
                 remaining_days=17,
@@ -285,8 +278,6 @@ class TestVacationDaysTool:
         tool = _make_tool(auth=auth, service=service)
         result, events = await tool.execute({"year": 2025}, ToolContext(history=()))
 
-        assert result["employee_username"] == "alice"
-        assert result["year"] == 2025
         assert result["total_days"] == 25
         assert result["remaining_days"] == 17
         assert events == []
@@ -314,8 +305,6 @@ class TestVacationDaysTool:
         )
         service = _FakeVacationDaysService(
             result=VacationDaysOutput(
-                employee_username="alice",
-                year=2025,
                 total_days=25,
                 used_days=8,
                 remaining_days=17,
@@ -343,8 +332,6 @@ class TestVacationDaysTool:
     async def test_collects_credentials_when_not_cached(self) -> None:
         service = _FakeVacationDaysService(
             result=VacationDaysOutput(
-                employee_username="alice",
-                year=2025,
                 total_days=25,
                 used_days=8,
                 remaining_days=17,
@@ -353,7 +340,7 @@ class TestVacationDaysTool:
         tool = _make_tool(ask_responses=["alice", "alice123"], service=service)
         result, events = await tool.execute({"year": 2025}, ToolContext(history=()))
 
-        assert result["employee_username"] == "alice"
+        assert result["total_days"] == 25
         assert result["remaining_days"] == 17
         assert events == []
 

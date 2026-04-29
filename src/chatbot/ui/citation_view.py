@@ -5,10 +5,11 @@ Formats citations for two presentation surfaces:
 - a compact, deduplicated source list appended to the answer bubble
 """
 
+import json
 from collections.abc import Sequence
 from textwrap import dedent
 
-from src.chatbot.app.protocols import SourceChunk
+from src.chatbot.app.protocols import SourceChunk, ToolCitationEvent
 
 
 def build_citation_name(chunk: SourceChunk) -> str:
@@ -46,6 +47,40 @@ def build_citation_markdown(chunks: Sequence[SourceChunk]) -> str:
     lines = ["---", "**Sources**", ""]
     for index, chunk in enumerate(unique_chunks, start=1):
         lines.append(f"{index}. {_build_source_list_item(chunk)}")
+    return "\n".join(lines)
+
+
+def build_tool_citation_name(tool_citation: ToolCitationEvent) -> str:
+    """Return a compact label for a non-retrieval tool citation."""
+    return f"Tool: {tool_citation.tool_name}"
+
+
+def build_tool_citation_content(tool_citation: ToolCitationEvent) -> str:
+    """Return structured Markdown for a tool citation side-panel element.
+
+    Top-level keys of the result are rendered as a property list; each value is
+    formatted as inline JSON so nested objects stay readable without extra nesting.
+    Only called for successful results (no ``error`` key).
+    """
+    lines = [f"### {tool_citation.tool_name}", ""]
+    for key, value in tool_citation.result.items():
+        if isinstance(value, (dict, list)):
+            formatted = f"`{json.dumps(value, ensure_ascii=False)}`"
+        else:
+            formatted = str(value)
+        lines.append(f"**{key}:** {formatted}  ")
+    return "\n".join(lines)
+
+
+def build_tool_citation_markdown(tool_citations: Sequence[ToolCitationEvent]) -> str:
+    """Return a compact deduplicated Markdown list for tool-backed claims."""
+    unique_tool_citations = _deduplicate_tool_citations(tool_citations)
+    if not unique_tool_citations:
+        return ""
+
+    lines = ["---", "**Tools**", ""]
+    for index, tool_citation in enumerate(unique_tool_citations, start=1):
+        lines.append(f"{index}. {tool_citation.tool_name}")
     return "\n".join(lines)
 
 
@@ -111,4 +146,18 @@ def _deduplicate_sources(chunks: Sequence[SourceChunk]) -> list[SourceChunk]:
             continue
         seen.add(key)
         deduplicated.append(chunk)
+    return deduplicated
+
+
+def _deduplicate_tool_citations(
+    tool_citations: Sequence[ToolCitationEvent],
+) -> list[ToolCitationEvent]:
+    seen: set[str] = set()
+    deduplicated: list[ToolCitationEvent] = []
+    for tool_citation in tool_citations:
+        key = tool_citation.tool_call_id
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(tool_citation)
     return deduplicated

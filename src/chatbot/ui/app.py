@@ -17,6 +17,7 @@ import chainlit as cl
 import structlog
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.orchestrator import ChatOrchestrator
 from src.chatbot.app.prompts import build_default_prompts
@@ -27,6 +28,7 @@ from src.chatbot.app.protocols import (
     SourceChunk,
     SourceCitationEvent,
     Tool,
+    ToolCitationEvent,
 )
 from src.chatbot.config import (
     build_chat_model_config,
@@ -56,6 +58,9 @@ from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
     build_citation_name,
+    build_tool_citation_content,
+    build_tool_citation_markdown,
+    build_tool_citation_name,
 )
 from src.chatbot.ui.logging_config import configure_logging
 from src.settings import get_settings
@@ -111,6 +116,57 @@ def collect_unique_citation_chunks(
             seen_chunks.add(key)
             unique_chunks.append(chunk)
     return unique_chunks
+
+
+def collect_unique_tool_citations(
+    tool_citation_events: list[ToolCitationEvent],
+) -> list[ToolCitationEvent]:
+    """Deduplicate tool citations while preserving first-seen order."""
+    seen_call_ids: set[str] = set()
+    unique_tool_citations: list[ToolCitationEvent] = []
+    for tool_citation_event in tool_citation_events:
+        if tool_citation_event.tool_call_id in seen_call_ids:
+            continue
+        seen_call_ids.add(tool_citation_event.tool_call_id)
+        unique_tool_citations.append(tool_citation_event)
+    return unique_tool_citations
+
+
+def _build_source_elements(unique_chunks: list[SourceChunk]) -> list[cl.Text]:
+    """Build sidebar source elements with stable duplicate disambiguation."""
+    base_names = [build_citation_name(chunk) for chunk in unique_chunks]
+    total_counts = Counter(base_names)
+    seen_counts: defaultdict[str, int] = defaultdict(int)
+    elements: list[cl.Text] = []
+    for chunk, base_name in zip(unique_chunks, base_names, strict=True):
+        seen_counts[base_name] += 1
+        display_name = base_name
+        if total_counts[base_name] > 1:
+            display_name = f"{base_name} ({seen_counts[base_name]}/{total_counts[base_name]})"
+        elements.append(
+            cl.Text(
+                name=display_name,
+                content=build_citation_content(chunk),
+                display="side",
+            )
+        )
+    return elements
+
+
+def _build_tool_source_elements(tool_citations: list[ToolCitationEvent]) -> list[cl.Text]:
+    """Build sidebar source elements for successful (non-error) tool results."""
+    elements: list[cl.Text] = []
+    for tool_citation in tool_citations:
+        if "error" in tool_citation.result:
+            continue
+        elements.append(
+            cl.Text(
+                name=build_tool_citation_name(tool_citation),
+                content=build_tool_citation_content(tool_citation),
+                display="side",
+            )
+        )
+    return elements
 
 
 def _build_vacation_days_tool() -> VacationDaysTool:
@@ -198,16 +254,26 @@ def _trace_response(
     emitted_chars: int,
     emitted_chunks: list[str],
     citation_events: list[SourceCitationEvent],
+    tool_citation_events: list[ToolCitationEvent],
 ) -> None:
     span.set_attributes(
         build_output_attributes(final_response_text, mime_type=OpenInferenceMimeTypeValues.TEXT)
     )
-    span.set_attributes(build_metadata_attributes({"citation_events": len(citation_events)}))
+    span.set_attributes(
+        build_metadata_attributes(
+            {
+                "citation_events": len(citation_events),
+                "tool_citation_events": len(tool_citation_events),
+            }
+        )
+    )
     span.set_attribute("chat.response.emitted_chars", emitted_chars)
     span.set_attribute(
         "chat.response.preview", to_attribute_text("".join(emitted_chunks), max_chars=600)
     )
     span.set_attribute("chat.response.citation_events", len(citation_events))
+    span.set_attribute("chat.response.tool_citation_events", len(tool_citation_events))
+    span.set_status(StatusCode.OK)
 
 
 @cl.on_chat_start  # pyright: ignore[reportUnknownMemberType]  # chainlit decorators are dynamically typed
@@ -242,6 +308,7 @@ async def on_message(message: cl.Message) -> None:
     # an empty placeholder and the eventual answer.
     response: cl.Message | None = None
     citation_events: list[SourceCitationEvent] = []
+    tool_citation_events: list[ToolCitationEvent] = []
     emitted_chars = 0
     emitted_chunks: list[str] = []
 
@@ -267,6 +334,8 @@ async def on_message(message: cl.Message) -> None:
                     await response.stream_token(event)
                 case SourceCitationEvent():
                     citation_events.append(event)
+                case ToolCitationEvent():
+                    tool_citation_events.append(event)
                 case QuoteReferenceEvent():
                     # The model may emit quote markers in a separate paragraph block,
                     # which would render detached "[n]" lines in the streamed text.
@@ -280,36 +349,37 @@ async def on_message(message: cl.Message) -> None:
                     assert_never(event)
 
         unique_chunks = collect_unique_citation_chunks(citation_events)
+        unique_tool_citations = collect_unique_tool_citations(tool_citation_events)
 
-        # Append a compact, deduplicated source list directly to the answer so
-        # provenance remains visible even when the side panel is collapsed.
-        if response is not None and unique_chunks:
-            sources_markdown = build_citation_markdown(unique_chunks)
-            if sources_markdown:
-                response.content = f"{response.content.rstrip()}\n\n{sources_markdown}"
+        if (unique_chunks or unique_tool_citations) and response is None:
+            # Ensure citations can still be rendered even if no text token was emitted.
+            response = cl.Message(content="")
+            await response.send()
 
-        # Render validated citation chunks as Chainlit Text elements attached to
-        # the response message so the user can inspect the grounding context.
-        if unique_chunks and response is not None:
-            base_names = [build_citation_name(chunk) for chunk in unique_chunks]
-            total_counts = Counter(base_names)
-            seen_counts: defaultdict[str, int] = defaultdict(int)
-            elements: list[cl.Text] = []
-            for chunk, base_name in zip(unique_chunks, base_names, strict=True):
-                seen_counts[base_name] += 1
-                name = base_name
-                if total_counts[base_name] > 1:
-                    name = f"{base_name} ({seen_counts[base_name]}/{total_counts[base_name]})"
-                elements.append(
-                    cl.Text(
-                        name=name,
-                        content=build_citation_content(chunk),
-                        display="side",
+        if response is not None:
+            if unique_chunks or unique_tool_citations:
+                appendix_sections: list[str] = []
+                sources_markdown = build_citation_markdown(unique_chunks)
+                if sources_markdown:
+                    appendix_sections.append(sources_markdown)
+
+                tool_citations_markdown = build_tool_citation_markdown(unique_tool_citations)
+                if tool_citations_markdown:
+                    appendix_sections.append(tool_citations_markdown)
+
+                if appendix_sections:
+                    response.content = (
+                        f"{response.content.rstrip()}\n\n{'\n\n'.join(appendix_sections)}"
                     )
-                )
-            response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
-            logger.info("session.sources_displayed", count=len(elements))
 
+                elements = [
+                    *_build_source_elements(unique_chunks),
+                    *_build_tool_source_elements(unique_tool_citations),
+                ]
+                response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
+                logger.info("session.sources_displayed", count=len(elements))
+
+            # Finalize the streamed message even when no post-processing payload exists.
             await response.update()
 
         trace_final_response_text = (
@@ -321,6 +391,7 @@ async def on_message(message: cl.Message) -> None:
             emitted_chars=emitted_chars,
             emitted_chunks=emitted_chunks,
             citation_events=citation_events,
+            tool_citation_events=tool_citation_events,
         )
 
     logger.info("session.message_handled", length=len(user_text))

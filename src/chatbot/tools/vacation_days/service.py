@@ -25,8 +25,6 @@ class VacationDaysInput(ToolInputModel):
 class VacationDaysOutput(BaseModel):
     """Structured response returned by a vacation-days service."""
 
-    employee_username: str
-    year: int
     total_days: int
     used_days: int
     remaining_days: int

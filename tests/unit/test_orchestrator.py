@@ -18,6 +18,7 @@ from src.chatbot.app.protocols import (
     SourceCitationEvent,
     ToolCallInfo,
     ToolCallQuote,
+    ToolCitationEvent,
     ToolContext,
     ToolEvent,
     ToolSchema,
@@ -148,6 +149,38 @@ class TestChatOrchestratorStreaming:
         assert model.stream_calls[0][0].role == "system"
         assert model.stream_calls[0][0].content == "You are a test bot."
 
+    @pytest.mark.asyncio
+    async def test_current_user_turn_is_formatted_for_model_call_only(self) -> None:
+        model = _FakeChatModel(turns=[(["response"], []), (["next response"], [])])
+
+        def _format_user_message(user_text: str) -> str:
+            return f"QUESTION:\n{user_text}\n\nRemember citations."
+
+        prompts = replace(
+            DEFAULT_PROMPTS,
+            user_message=_format_user_message,
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            prompt_profile=_IdentityPromptProfile(),
+            prompts=prompts,
+        )
+
+        await _collect(orchestrator.process_message("Hi"))
+
+        assert model.stream_calls[0][1].role == "user"
+        assert model.stream_calls[0][1].content == "QUESTION:\nHi\n\nRemember citations."
+
+        await _collect(orchestrator.process_message("Next"))
+
+        second_turn_user_messages = [
+            message.content for message in model.stream_calls[1] if message.role == "user"
+        ]
+        assert second_turn_user_messages == [
+            "Hi",
+            "QUESTION:\nNext\n\nRemember citations.",
+        ]
+
 
 class TestAgenticLoop:
     @pytest.mark.asyncio
@@ -168,6 +201,35 @@ class TestAgenticLoop:
         second_call_messages = model.stream_calls[1]
         tool_msgs = [m for m in second_call_messages if m.role == "tool"]
         assert tool_msgs and tool_msgs[-1].tool_call_id == "c1"
+
+    @pytest.mark.asyncio
+    async def test_follow_up_step_keeps_formatting_latest_user_turn_without_extra_message(
+        self,
+    ) -> None:
+        tool = _FakeTool("echo", result={"value": "from_tool"})
+        tc = ToolCallInfo(name="echo", arguments={"x": 1}, call_id="c1")
+
+        def _format_user_message(user_text: str) -> str:
+            return f"{user_text}\n\nCite tool-backed claims inline."
+
+        prompts = replace(
+            DEFAULT_PROMPTS,
+            user_message=_format_user_message,
+        )
+        model = _FakeChatModel(turns=[([], [tc]), (["Done."], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+            prompts=prompts,
+        )
+
+        await _collect(orchestrator.process_message("do thing"))
+
+        second_call_messages = model.stream_calls[1]
+        user_messages = [m for m in second_call_messages if m.role == "user"]
+        assert len(user_messages) == 1
+        assert user_messages[0].content == "do thing\n\nCite tool-backed claims inline."
 
 
 class TestInlineQuotePipeline:
@@ -248,12 +310,10 @@ class TestInlineQuotePipeline:
         assert not any(isinstance(e, SourceCitationEvent) for e in events)
 
     @pytest.mark.asyncio
-    async def test_tool_call_quote_emits_reference_only(self) -> None:
+    async def test_tool_call_quote_emits_reference_and_tool_citation(self) -> None:
         vacation_tc = ToolCallInfo(name="get_vacation_days", arguments={}, call_id="v1")
         quote = ToolCallQuote(
-            claim="27 days remaining",
             tool_call_id="v1",
-            tool_name="get_vacation_days",
         )
         vacation_tool = _FakeTool("get_vacation_days", result={"remaining_days": 27})
         model = _FakeChatModel(turns=[([], [vacation_tc]), (["You have ", quote, " days."], [])])
@@ -268,6 +328,10 @@ class TestInlineQuotePipeline:
         assert text == "You have  days."
         assert len([e for e in events if isinstance(e, QuoteReferenceEvent)]) == 1
         assert not any(isinstance(e, SourceCitationEvent) for e in events)
+        tool_citation_events = [e for e in events if isinstance(e, ToolCitationEvent)]
+        assert len(tool_citation_events) == 1
+        assert tool_citation_events[0].tool_name == "get_vacation_days"
+        assert tool_citation_events[0].result == {"remaining_days": 27}
 
     @pytest.mark.asyncio
     async def test_quote_reference_events_keep_stream_order(self) -> None:

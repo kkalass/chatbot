@@ -1,11 +1,19 @@
 """Unit tests for UI citation rendering helpers."""
 
-from src.chatbot.app.protocols import QuoteReferenceEvent, SourceChunk, SourceCitationEvent
-from src.chatbot.ui.app import collect_unique_citation_chunks
+from src.chatbot.app.protocols import (
+    QuoteReferenceEvent,
+    SourceChunk,
+    SourceCitationEvent,
+    ToolCitationEvent,
+)
+from src.chatbot.ui.app import collect_unique_citation_chunks, collect_unique_tool_citations
 from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
     build_citation_name,
+    build_tool_citation_content,
+    build_tool_citation_markdown,
+    build_tool_citation_name,
 )
 
 
@@ -177,6 +185,47 @@ class TestCitationView:
         assert "Policy - p. 1" in markdown
         assert "Policy - p. 2" in markdown
 
+    def test_build_tool_citation_name_uses_tool_name(self) -> None:
+        tool_citation = ToolCitationEvent(
+            tool_call_id="v1",
+            tool_name="get_vacation_days",
+            result={},
+        )
+
+        assert build_tool_citation_name(tool_citation) == "Tool: get_vacation_days"
+
+    def test_build_tool_citation_content_renders_result_properties(self) -> None:
+        tool_citation = ToolCitationEvent(
+            tool_call_id="v1",
+            tool_name="get_vacation_days",
+            result={"remaining_days": 15, "total_days": 25, "used_days": 10},
+        )
+
+        content = build_tool_citation_content(tool_citation)
+
+        assert "get_vacation_days" in content
+        assert "**remaining_days:**" in content
+        assert "15" in content
+        assert "**total_days:**" in content
+        assert "25" in content
+
+    def test_build_tool_citation_markdown_deduplicates_tool_entries(self) -> None:
+        first = ToolCitationEvent(
+            tool_call_id="v1",
+            tool_name="get_vacation_days",
+            result={"remaining_days": 15},
+        )
+        duplicate = ToolCitationEvent(
+            tool_call_id="v1",
+            tool_name="get_vacation_days",
+            result={"remaining_days": 15},
+        )
+
+        markdown = build_tool_citation_markdown([first, duplicate])
+
+        assert markdown.count("1. ") == 1
+        assert "get_vacation_days" in markdown
+
 
 class TestQuoteReferenceEventToken:
     def test_reference_token_format(self) -> None:
@@ -229,3 +278,16 @@ class TestCollectUniqueCitationChunks:
         event = SourceCitationEvent(validated=(a, b))
         result = collect_unique_citation_chunks([event])
         assert len(result) == 2
+
+
+class TestCollectUniqueToolCitations:
+    def test_deduplicates_same_tool_citation(self) -> None:
+        tool_citation = ToolCitationEvent(
+            tool_call_id="v1",
+            tool_name="get_vacation_days",
+            result={"remaining_days": 15},
+        )
+
+        result = collect_unique_tool_citations([tool_citation, tool_citation])
+
+        assert result == [tool_citation]

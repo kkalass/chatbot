@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from src.chatbot.app.protocols import SourceCitationEvent
 from src.chatbot.infrastructure.embeddings_text import TextEmbedderConfig, build_text_embedder
 from src.chatbot.infrastructure.retrieval import RetrieverConfig, build_retriever
 from src.ingest.infrastructure.document_store import DocumentStoreConfig, build_document_store
@@ -234,6 +235,7 @@ class TestCitationValidationIntegration:
         assert result["unvalidated"] == [invalid]  # type: ignore[comparison-overlap]
         assert len(events) == 1
 
+        assert isinstance(events[0], SourceCitationEvent)
         validated = events[0].validated
         assert len(validated) == 1
         assert validated[0].source == valid["source"]
@@ -258,10 +260,7 @@ class TestInlineQuoteOrchestratorIntegration:
         """A retrieval-grounded query processed via inline-quote flow yields a
         non-empty response and does not raise."""
         from src.chatbot.app.orchestrator import ChatOrchestrator
-        from src.chatbot.app.protocols import (
-            QuoteReferenceEvent,
-            SourceCitationEvent,
-        )
+        from src.chatbot.app.protocols import QuoteReferenceEvent, SourceCitationEvent
         from src.chatbot.infrastructure.chat import (
             ChatModelConfig,
             build_chat_model,
@@ -298,7 +297,7 @@ class TestInlineQuoteOrchestratorIntegration:
                 response += event
             elif isinstance(event, QuoteReferenceEvent):
                 quote_ref_events.append(event)
-            else:
+            elif isinstance(event, SourceCitationEvent):
                 citation_events.append(event)
 
         assert response, "Inline-quote flow must produce a non-empty response"

@@ -49,10 +49,12 @@ class VacationDaysTool:
         # source of truth.
         self.schema = ToolSchema(
             name=_TOOL_NAME,
-            description="""Look up the vacation day balance for the currently authenticated employee.
+            description="""Retrieve the vacation day balance (Urlaubstage / Resturlaub) for the current employee directly from the HR system.
 
-Provide the calendar year to query.
-Returns total allocation, used days, and remaining days for that year.""",
+Use this tool whenever the user asks about vacation days, remaining leave, used days, or annual leave entitlement — do NOT use the document search tool for this.
+
+Parameter: year (integer) — the calendar year to query (e.g. 2026).
+Returns: total_days (annual entitlement), used_days, remaining_days.""",
             parameters_schema=VacationDaysInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
 

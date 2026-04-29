@@ -226,6 +226,7 @@ class TestCitationToolExecute:
             ctx,
         )
 
+        assert isinstance(events[0], SourceCitationEvent)
         c: SourceChunk = events[0].validated[0]  # type: ignore[union-attr]
         assert c.content == "Finance data"
         assert c.score == pytest.approx(0.85)  # type: ignore[arg-type]
@@ -252,6 +253,7 @@ class TestCitationToolExecute:
         )
 
         assert len(events) == 1
+        assert isinstance(events[0], SourceCitationEvent)
         c: SourceChunk = events[0].validated[0]  # type: ignore[union-attr]
         assert c.content == "higher"
         assert c.score == pytest.approx(0.9)  # type: ignore[arg-type]
@@ -290,6 +292,7 @@ class TestCitationToolExecute:
         )
 
         assert len(events) == 1
+        assert isinstance(events[0], SourceCitationEvent)
         c: SourceChunk = events[0].validated[0]  # type: ignore[union-attr]
         assert c.content == "high"
         assert c.score == pytest.approx(0.95)  # type: ignore[arg-type]

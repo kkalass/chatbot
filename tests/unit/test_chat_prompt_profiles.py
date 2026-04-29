@@ -59,6 +59,32 @@ class TestBuildDefaultPrompts:
         # Base instructions must still be present.
         assert "You are a helpful assistant" in system_text
 
+    def test_default_user_message_reminder_includes_exact_quote_markers(self) -> None:
+        prompts = build_default_prompts()
+        user_text = prompts.user_message("How many vacation days do I have?")
+
+        assert QUOTE_START_MARKER in user_text
+        assert QUOTE_END_MARKER in user_text
+        assert "do not use any marker variants" in user_text
+
+    def test_default_user_message_reminder_requires_tool_call_fields(self) -> None:
+        prompts = build_default_prompts()
+        user_text = prompts.user_message("How many vacation days do I have?")
+
+        assert "kind=tool_call" in user_text
+        assert "tool_call_id" in user_text
+        assert "source" in user_text
+        assert "chunk_id" in user_text
+        assert "include kind, claim," not in user_text
+        # tool_name is no longer required in tool_call markers (model output is untrusted)
+        assert "tool_name" not in user_text or "tool_call_id" in user_text
+
+    def test_default_user_message_reminder_encourages_single_marker_per_tool_call(self) -> None:
+        prompts = build_default_prompts()
+        user_text = prompts.user_message("How many vacation days do I have?")
+
+        assert "at most one marker per tool call" in user_text
+
 
 class TestChatPromptProfiles:
     def test_build_chat_prompt_profile_returns_small_for_llama_model(self) -> None:

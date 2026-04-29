@@ -42,7 +42,7 @@ never as JSON-encoded strings and never as schema metadata.
 
 Inline citation JSON rules (when emitting quote markers):
 - The JSON inside markers must be a single strict object with no extra fields.
-- Copy tool_call_id, source, chunk_id, and tool_name values exactly as they
+- Copy tool_call_id, source, and chunk_id values exactly as they
   appear in tool results — do not paraphrase or abbreviate them."""
 
         return Prompts(system_prompt=_system_prompt)

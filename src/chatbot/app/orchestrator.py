@@ -31,7 +31,6 @@ from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
     ChatMessage,
     ChatModel,
-    ChatStreamItem,
     JsonObject,
     ProcessEvent,
     PromptProfile,
@@ -42,6 +41,8 @@ from src.chatbot.app.protocols import (
     SourceCitationEvent,
     Tool,
     ToolCallInfo,
+    ToolCallQuote,
+    ToolCitationEvent,
     ToolContext,
     ToolEvent,
     ToolSchema,
@@ -64,42 +65,51 @@ tracer = trace.get_tracer(__name__)
 _MAX_TOOL_STEPS = 10  # safety limit to prevent infinite agentic loops
 
 
-def _append_stream_item(
+def _build_step_messages(
     *,
-    item: ChatStreamItem,
-    collected_text: list[str],
-    tool_calls: list[ToolCallInfo],
-) -> None:
-    """Append one chat stream item to text/tool buffers.
-
-    Quote items are intentionally ignored here — this helper is used only in
-    the max-steps fallback where quote handling is not expected.
-    """
-    if isinstance(item, str):
-        collected_text.append(item)
-        return
-    if isinstance(item, list):
-        tool_calls.extend(item)
-        return
-    logger.debug("orchestrator.quote_item_ignored_non_main_loop", kind=item.kind)
+    system_text: str,
+    history: list[ChatMessage],
+    prompts: Prompts,
+) -> list[ChatMessage]:
+    """Build one step's model input without mutating persisted history."""
+    latest_user_index = next(
+        (index for index in range(len(history) - 1, -1, -1) if history[index].role == "user"),
+        None,
+    )
+    step_history: list[ChatMessage] = []
+    for index, message in enumerate(history):
+        if index == latest_user_index and isinstance(message.content, str):
+            step_history.append(
+                ChatMessage(role=message.role, content=prompts.user_message(message.content))
+            )
+            continue
+        step_history.append(message)
+    return [ChatMessage(role="system", content=system_text), *step_history]
 
 
 def _resolve_quote(
     quote: Quote,
     history: tuple[ChatMessage, ...],
-) -> SourceChunk | bool:
+) -> SourceChunk | ToolCallInfo | None:
     """Validate a quote against conversation history.
 
     Returns:
         A ``SourceChunk`` for a valid ``SearchResultQuote``.
-        ``True`` for a valid ``ToolCallQuote``.
-        ``False`` when validation fails.
+        A ``ToolCallInfo`` (the actual call from history) for a valid ``ToolCallQuote``.
+        ``None`` when validation fails.
     """
     if isinstance(quote, SearchResultQuote):
-        chunk = validate_search_quote(quote, history)
-        return chunk if chunk is not None else False
-    # ToolCallQuote
+        return validate_search_quote(quote, history)  # SourceChunk | None
+    # ToolCallQuote — returns authoritative ToolCallInfo so tool_name cannot be spoofed
     return validate_tool_call_quote(quote, history)
+
+
+def _find_tool_result(call_id: str, history: tuple[ChatMessage, ...]) -> JsonObject | None:
+    """Return the tool-result JSON for *call_id* from history, or ``None`` if not found."""
+    for msg in history:
+        if msg.role == "tool" and msg.tool_call_id == call_id and isinstance(msg.content, dict):
+            return msg.content  # type: ignore[return-value]  # JsonObject is dict[str, object]
+    return None
 
 
 def _trace_quote_counts(
@@ -269,6 +279,7 @@ class ChatOrchestrator:
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             emitted_citation_events: list[SourceCitationEvent] = []
+            emitted_tool_citation_events: list[ToolCitationEvent] = []
 
             # Inline-quote tracking.
             quote_dedup: dict[str, int] = {}  # canonical_key -> reference_number
@@ -282,7 +293,11 @@ class ChatOrchestrator:
             for step_num in range(_MAX_TOOL_STEPS):
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:
                     system_text = prompts.system_prompt(datetime.now(tz=UTC))
-                    messages = [ChatMessage(role="system", content=system_text), *history]
+                    messages = _build_step_messages(
+                        system_text=system_text,
+                        history=history,
+                        prompts=prompts,
+                    )
                     _trace_step_request(
                         span=step_span,
                         step_num=step_num,
@@ -309,24 +324,37 @@ class ChatOrchestrator:
                                 )
                             else:
                                 chunk = _resolve_quote(item, tuple(history))
-                                if chunk is not False:
+                                if chunk is not None:
                                     quote_validated += 1
                                     quote_ref_counter += 1
                                     quote_dedup[canonical_key] = quote_ref_counter
                                     if isinstance(chunk, SourceChunk):
                                         validated_search_chunks.append(chunk)
+                                    elif isinstance(item, ToolCallQuote):
+                                        # Use authoritative name from history, not the model's (potentially hallucinated) tool_name
+                                        tool_result = _find_tool_result(
+                                            item.tool_call_id, tuple(history)
+                                        )
+                                        emitted_tool_citation_events.append(
+                                            ToolCitationEvent(
+                                                tool_call_id=item.tool_call_id,
+                                                tool_name=chunk.name,
+                                                result=tool_result or {},
+                                            )
+                                        )
                                     yield QuoteReferenceEvent(
                                         reference_number=quote_ref_counter,
                                         canonical_key=canonical_key,
                                     )
                                 else:
                                     quote_invalid += 1
-                                logger.debug(
-                                    "orchestrator.quote_invalid",
-                                    kind=item.kind,
-                                    canonical_key=canonical_key,
-                                )
+                                    logger.debug(
+                                        "orchestrator.quote_invalid",
+                                        kind=item.kind,
+                                        canonical_key=canonical_key,
+                                    )
 
+                    # If this is the final, text message (e.g. no tool calls)
                     if not tool_calls:
                         assistant_text = "".join(collected)
                         _trace_step_response(
@@ -338,6 +366,7 @@ class ChatOrchestrator:
                         history.append(ChatMessage(role="assistant", content=assistant_text))
                         break
 
+                    # tool calls present — emit step response and loop to execute tools and continue.
                     _trace_step_response(
                         span=step_span,
                         collected=collected,
@@ -357,10 +386,15 @@ class ChatOrchestrator:
                         )
                     )
                     async for event in _dispatch_tool_calls(tool_calls, history, tool_map):
+                        # FIXME: we don't have the cite tool any more, right? So I think this events might never need dispatch?
+                        # Can we simplify this code by inlinig _dispatch_tool_calls and not yielding events, only appending to history?
+                        # Or can we think of other uses for tools to dispatch events?
                         yield event
                         match event:
                             case SourceCitationEvent():
                                 emitted_citation_events.append(event)
+                            case ToolCitationEvent():
+                                emitted_tool_citation_events.append(event)
             else:
                 # Safety: exceeded max steps — one final response without tools.
                 logger.warning("orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS)
@@ -371,12 +405,7 @@ class ChatOrchestrator:
                     if isinstance(item, str):
                         final.append(item)
                         yield item
-                    else:
-                        _append_stream_item(
-                            item=item,
-                            collected_text=final,
-                            tool_calls=[],
-                        )
+
                 history.append(ChatMessage(role="assistant", content="".join(final)))
 
             # Emit a SourceCitationEvent from validated inline search quotes.
@@ -384,6 +413,9 @@ class ChatOrchestrator:
                 inline_citation = SourceCitationEvent(validated=tuple(validated_search_chunks))
                 emitted_citation_events.append(inline_citation)
                 yield inline_citation
+
+            for tool_citation_event in emitted_tool_citation_events:
+                yield tool_citation_event
 
             # Tracing — quote counts collected across all steps of this turn.
             _trace_quote_counts(

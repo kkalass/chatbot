@@ -100,13 +100,26 @@ class SourceCitationEvent:
     validated: tuple[SourceChunk, ...]
 
 
+@dataclass(frozen=True)
+class ToolCitationEvent:
+    """Emitted when an inline quote is validated against a non-retrieval tool call.
+
+    ``result`` carries the raw tool-result JSON from conversation history so the UI
+    can render the authoritative data without accessing history directly.
+    """
+
+    tool_call_id: str
+    tool_name: str
+    result: JsonObject
+
+
 class SearchResultQuote(BaseModel):
     """Quote emitted for claims grounded in ``search_documents`` output."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["search_result"] = "search_result"
-    claim: str
+    claim: str | None = None
     tool_call_id: str
     source: str
     chunk_id: str
@@ -114,16 +127,16 @@ class SearchResultQuote(BaseModel):
 
 
 class ToolCallQuote(BaseModel):
-    """Quote emitted for claims grounded in non-retrieval tool outputs."""
+    """Quote emitted for claims grounded in non-retrieval tool outputs.
+
+    Only ``tool_call_id`` is used for validation. The authoritative tool name is
+    always resolved from conversation history.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["tool_call"] = "tool_call"
-    claim: str
     tool_call_id: str
-    tool_name: str
-    output_path: str | None = None
-    quote_text: str | None = None
 
 
 type Quote = SearchResultQuote | ToolCallQuote
@@ -139,7 +152,7 @@ class QuoteReferenceEvent(BaseModel):
 
 
 # Union of all events that a tool may emit alongside its JSON result.
-type ToolEvent = SourceCitationEvent
+type ToolEvent = SourceCitationEvent | ToolCitationEvent
 
 # Union of all items yielded by :meth:`~src.chatbot.app.orchestrator.ChatOrchestrator.process_message`.
 # ``str`` items are streamed text chunks; ``ToolEvent`` items carry structured

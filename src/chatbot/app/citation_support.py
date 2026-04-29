@@ -27,9 +27,8 @@ def build_canonical_key(quote: Quote) -> str:
     """
     if isinstance(quote, SearchResultQuote):
         return f"search:{quote.tool_call_id}:{quote.source}:{quote.chunk_id}"
-    # ToolCallQuote
-    output_path = quote.output_path or ""
-    return f"tool:{quote.tool_call_id}:{quote.tool_name}:{output_path}"
+    # ToolCallQuote — keyed only on call_id so all quotes for the same call deduplicate
+    return f"tool:{quote.tool_call_id}"
 
 
 def validate_search_quote(
@@ -48,19 +47,20 @@ def validate_search_quote(
 def validate_tool_call_quote(
     quote: ToolCallQuote,
     history: tuple[ChatMessage, ...],
-) -> bool:
-    """Return ``True`` when ``quote.tool_call_id`` / ``tool_name`` exist in history.
+) -> ToolCallInfo | None:
+    """Return the matching ``ToolCallInfo`` from history, or ``None`` if not found.
 
-    A tool-call quote is valid only when the exact ``(call_id, tool_name)`` pair
-    appears as an assistant tool-call request in ``history``.
+    Matches on ``call_id`` only — ``tool_name`` in the model's quote is not trusted
+    since the model can hallucinate it.  The caller should use the returned
+    ``ToolCallInfo.name`` as the authoritative tool name.
     """
     for msg in history:
         if msg.role != "assistant" or not msg.tool_calls:
             continue
         for tc in msg.tool_calls:
-            if tc.call_id == quote.tool_call_id and tc.name == quote.tool_name:
-                return True
-    return False
+            if tc.call_id == quote.tool_call_id:
+                return tc
+    return None
 
 
 def collect_search_chunks(

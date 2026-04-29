@@ -7,6 +7,7 @@ from src.chatbot.app.protocols import (
     ChatStreamItem,
     SearchResultQuote,
     ToolCallInfo,
+    ToolCallQuote,
     ToolSchema,
 )
 from src.chatbot.infrastructure.chat._inline_quotes import (
@@ -18,6 +19,7 @@ _SEARCH_QUOTE_JSON = (
     '{"kind":"search_result","claim":"Supported by search.",'
     '"tool_call_id":"search-1","source":"corpus/report.txt","chunk_id":"chunk-7"}'
 )
+_TOOL_QUOTE_JSON = '{"kind":"tool_call","tool_call_id":"get_vacation_days"}'
 
 
 class _FakeChatModel:
@@ -118,6 +120,22 @@ class TestInlineQuoteParsingChatModel:
         events = await _collect(model.stream(messages=[]))
 
         assert events == ["Hello", tool_calls]
+
+    async def test_parses_tool_call_quote_without_tool_name(self) -> None:
+        model = InlineQuoteParsingChatModel(
+            _FakeChatModel(
+                [
+                    f"Text <°_quote_°>{_TOOL_QUOTE_JSON}</°_quote_°> end",
+                ]
+            )
+        )
+
+        events = await _collect(model.stream(messages=[]))
+
+        assert events[0] == "Text "
+        assert isinstance(events[1], ToolCallQuote)
+        assert events[1].tool_call_id == "get_vacation_days"
+        assert events[2] == " end"
 
 
 class TestInlineQuoteStreamParserCounts:

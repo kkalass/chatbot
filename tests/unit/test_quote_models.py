@@ -9,7 +9,6 @@ from src.chatbot.app.protocols import QuoteReferenceEvent, SearchResultQuote, To
 class TestQuoteModels:
     def test_search_result_quote_validates_expected_fields(self) -> None:
         quote = SearchResultQuote(
-            claim="The report states automation impact is moderate.",
             tool_call_id="search-1",
             source="corpus/report.txt",
             chunk_id="chunk-42",
@@ -33,14 +32,11 @@ class TestQuoteModels:
 
     def test_tool_call_quote_validates_expected_fields(self) -> None:
         quote = ToolCallQuote(
-            claim="The tool confirms 27 remaining vacation days.",
             tool_call_id="tool-1",
-            tool_name="get_vacation_days",
-            output_path="$.remaining_days",
         )
 
         assert quote.kind == "tool_call"
-        assert quote.output_path == "$.remaining_days"
+        assert quote.tool_call_id == "tool-1"
 
     def test_quote_reference_event_requires_positive_reference_number(self) -> None:
         with pytest.raises(ValidationError):
