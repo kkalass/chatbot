@@ -344,6 +344,7 @@ class ChatOrchestrator:
                     async for item in model.stream(messages, tools=tool_schemas):
                         if isinstance(item, str):
                             collected.append(item)
+                            yield item
                         else:
                             tool_calls.extend(item)
 
@@ -357,8 +358,6 @@ class ChatOrchestrator:
                             assistant_text=assistant_text,
                         )
                         history.append(ChatMessage(role="assistant", content=assistant_text))
-                        for text_chunk in collected:
-                            yield text_chunk
                         break
 
                     _trace_step_response(

@@ -304,6 +304,29 @@ class TestChatOrchestratorAgenticLoop:
         assert len(tool.calls) == 1
 
     @pytest.mark.asyncio
+    async def test_yields_text_before_tool_call_immediately(self) -> None:
+        citation_event = SourceCitationEvent(validated=())
+        tool = _FakeTool("get_data", result={"value": 42}, events=[citation_event])
+        tc = ToolCallInfo(name="get_data", arguments={})
+        model = _FakeChatModel(
+            turns=[
+                (["Working on it..."], [tc]),
+                (["Done."], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        events: list[ProcessEvent] = []
+        async for event in orchestrator.process_message("give me data"):
+            events.append(event)
+
+        assert events == ["Working on it...", citation_event, "Done."]
+
+    @pytest.mark.asyncio
     async def test_tool_result_appended_before_second_complete_call(self) -> None:
         tool = _FakeTool("get_data", result={"value": 99})
         tc = ToolCallInfo(name="get_data", arguments={"x": 1}, call_id="call-abc")
