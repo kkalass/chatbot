@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from typing import cast
 
 import structlog
+from opentelemetry import trace
 from pydantic import ValidationError
 
 from src.chatbot.app.protocols import (
@@ -72,6 +73,8 @@ class _InlineQuoteStreamParser:
         self._max_quote_block_chars = max_quote_block_chars
         self._plain_buffer = ""
         self._quote_buffer: str | None = None
+        self.parsed_count: int = 0
+        self.parse_failed_count: int = 0
 
     def feed(self, chunk: str) -> list[ChatStreamItem]:
         outputs: list[ChatStreamItem] = []
@@ -131,7 +134,12 @@ class _InlineQuoteStreamParser:
                 continue
 
             parsed_quote = _parse_quote_block(raw_block)
-            outputs.append(parsed_quote if parsed_quote is not None else raw_block)
+            if parsed_quote is not None:
+                self.parsed_count += 1
+                outputs.append(parsed_quote)
+            else:
+                self.parse_failed_count += 1
+                outputs.append(raw_block)
             self._quote_buffer = None
             remaining = trailing
             if not remaining:
@@ -191,6 +199,10 @@ class InlineQuoteParsingChatModel:
 
             for parsed_item in parser.finish():
                 yield parsed_item
+
+            span = trace.get_current_span()
+            span.set_attribute("quote.parsed.count", parser.parsed_count)
+            span.set_attribute("quote.parse_failed.count", parser.parse_failed_count)
 
         return _gen()
 

@@ -9,7 +9,10 @@ from src.chatbot.app.protocols import (
     ToolCallInfo,
     ToolSchema,
 )
-from src.chatbot.infrastructure.chat._inline_quotes import InlineQuoteParsingChatModel
+from src.chatbot.infrastructure.chat._inline_quotes import (
+    InlineQuoteParsingChatModel,
+    _InlineQuoteStreamParser,  # pyright: ignore[reportPrivateUsage]
+)
 
 _SEARCH_QUOTE_JSON = (
     '{"kind":"search_result","claim":"Supported by search.",'
@@ -115,3 +118,34 @@ class TestInlineQuoteParsingChatModel:
         events = await _collect(model.stream(messages=[]))
 
         assert events == ["Hello", tool_calls]
+
+
+class TestInlineQuoteStreamParserCounts:
+    """Verify parsed_count and parse_failed_count are tracked on the parser."""
+
+    def test_successful_parse_increments_parsed_count(self) -> None:
+        parser = _InlineQuoteStreamParser(max_quote_block_chars=16_384)
+        valid_block = f"<°_quote_°>{_SEARCH_QUOTE_JSON}</°_quote_°>"
+
+        parser.feed(valid_block)
+
+        assert parser.parsed_count == 1
+        assert parser.parse_failed_count == 0
+
+    def test_failed_parse_increments_parse_failed_count(self) -> None:
+        parser = _InlineQuoteStreamParser(max_quote_block_chars=16_384)
+
+        parser.feed("<°_quote_°>{not json}</°_quote_°>")
+
+        assert parser.parsed_count == 0
+        assert parser.parse_failed_count == 1
+
+    def test_mixed_valid_and_invalid_blocks_counted_separately(self) -> None:
+        parser = _InlineQuoteStreamParser(max_quote_block_chars=16_384)
+
+        parser.feed(f"<°_quote_°>{_SEARCH_QUOTE_JSON}</°_quote_°>")
+        parser.feed("<°_quote_°>{bad}</°_quote_°>")
+        parser.feed(f"<°_quote_°>{_SEARCH_QUOTE_JSON}</°_quote_°>")
+
+        assert parser.parsed_count == 2
+        assert parser.parse_failed_count == 1
