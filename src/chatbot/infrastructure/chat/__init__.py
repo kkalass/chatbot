@@ -47,6 +47,8 @@ def build_chat_prompt_profile(config: ChatModelConfig) -> PromptProfile:
     match model_name:
         case name if "llama" in name:
             return SmallModelPromptProfile()
+        case name if "qwen" in name:
+            return SmallModelPromptProfile()
         case _:
             return DefaultChatPromptProfile()
 

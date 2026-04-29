@@ -79,6 +79,13 @@ class TestBuildDefaultPrompts:
         # tool_name is no longer required in tool_call markers (model output is untrusted)
         assert "tool_name" not in user_text or "tool_call_id" in user_text
 
+    def test_default_user_message_reminder_disallows_invented_tool_call_ids(self) -> None:
+        prompts = build_default_prompts()
+        user_text = prompts.user_message("How many vacation days do I have?")
+
+        assert "Never invent IDs" in user_text
+        assert "If the exact ID is not visible, emit no marker" in user_text
+
     def test_default_user_message_reminder_encourages_single_marker_per_tool_call(self) -> None:
         prompts = build_default_prompts()
         user_text = prompts.user_message("How many vacation days do I have?")
@@ -89,6 +96,13 @@ class TestBuildDefaultPrompts:
 class TestChatPromptProfiles:
     def test_build_chat_prompt_profile_returns_small_for_llama_model(self) -> None:
         config = ChatModelConfig(base_url="http://localhost:11434", model="llama3.1:8b")
+
+        profile = build_chat_prompt_profile(config)
+
+        assert isinstance(profile, SmallModelPromptProfile)
+
+    def test_build_chat_prompt_profile_returns_small_for_qwen_model(self) -> None:
+        config = ChatModelConfig(base_url="http://localhost:11434", model="qwen3.5:9b")
 
         profile = build_chat_prompt_profile(config)
 

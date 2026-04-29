@@ -34,10 +34,19 @@ For a statement grounded in another tool output:
 {{"kind":"tool_call","tool_call_id":"<exact call_id from the tool result>"}}
 {QUOTE_END_MARKER}
 
+Concrete example (vacation-days tool):
+- If the assistant tool call was {{"id":"get_vacation_days","function":{{"name":"get_vacation_days",...}}}},
+  then emit exactly:
+  {QUOTE_START_MARKER}
+  {{"kind":"tool_call","tool_call_id":"get_vacation_days"}}
+  {QUOTE_END_MARKER}
+
 Rules:
 - Emit exactly one JSON object per marker block.
 - Only use `tool_call_id`, `source`, and `chunk_id` values that appear verbatim
-    in tool results already present in the conversation context.
+    in prior assistant tool calls and tool results already present in the conversation context.
+- Never invent IDs (no timestamps, suffixes, prefixes, or reformatted variants).
+- If an exact `tool_call_id` is not visible in conversation context, do not emit a marker.
 - Optional fields: `claim` and `quote_text` (search_result only).
 - Do not emit markers for unsupported, inferred, or uncertain claims.
 - Keep all normal user-facing answer text outside the markers."""
@@ -65,11 +74,13 @@ class Prompts:
         "any marker variants. For search-backed claims, include kind, "
         "tool_call_id, source, and chunk_id. For tool-backed claims, include "
         "only kind=tool_call and tool_call_id. Copy tool_call_id, source, and "
-        "chunk_id exactly from the tool results already present in the "
-        "conversation context. Emit at most one marker per tool call — multiple "
+        "chunk_id exactly from prior assistant tool calls and tool results already "
+        "present in the conversation context. Never invent IDs or append suffixes. "
+        "If the exact ID is not visible, emit no marker. Emit at most one marker per "
+        "tool call - multiple "
         "statements backed by the same tool call share one marker."
         "\n\n"
-        "The actual user message is:"
+        "The actual user message is:\n\n"
         f"{user_text}\n\n"
     )
 
