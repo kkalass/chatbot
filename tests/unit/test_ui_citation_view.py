@@ -184,7 +184,10 @@ class TestQuoteReferenceEventToken:
         assert f"[{event.reference_number}]" == "[3]"
 
     def test_reference_numbers_are_sequential(self) -> None:
-        tokens = [f"[{QuoteReferenceEvent(reference_number=n, canonical_key=f'k{n}').reference_number}]" for n in range(1, 5)]
+        tokens = [
+            f"[{QuoteReferenceEvent(reference_number=n, canonical_key=f'k{n}').reference_number}]"
+            for n in range(1, 5)
+        ]
         assert tokens == ["[1]", "[2]", "[3]", "[4]"]
 
 

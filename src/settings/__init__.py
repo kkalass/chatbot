@@ -197,8 +197,12 @@ class Settings(BaseSettings):
         description="Enable inline quote stream items in the chat pipeline.",
     )
     citation_round_trip_enabled: bool = Field(
-        default=True,
-        description="Enable legacy citation round-trip pass while inline-quote rollout is in progress.",
+        default=False,
+        description=(
+            "Enable legacy citation round-trip pass. "
+            "Kept for one migration window to allow A/B comparison; "
+            "defaults to disabled now that inline-quote flow is the production default."
+        ),
     )
 
 

@@ -1113,3 +1113,115 @@ class TestInlineQuotePipeline:
         inline_events = [e for e in all_events if isinstance(e, (str, QuoteReferenceEvent))]
         expected_ref = QuoteReferenceEvent(reference_number=1, canonical_key="search:s1:doc.txt:c1")
         assert inline_events == ["before", expected_ref, "after"]
+
+
+# ---------------------------------------------------------------------------
+# WP6: Migration and Legacy Path Sunset
+# ---------------------------------------------------------------------------
+
+
+class TestWP6FlagGatedBehavior:
+    """WP6: verify that both flows can be toggled and that inline flow runs
+    end-to-end without invoking the citation round-trip."""
+
+    @pytest.mark.asyncio
+    async def test_inline_only_flag_produces_no_citation_pass(self) -> None:
+        """With inline_quotes_enabled=True, citation_round_trip_enabled=False:
+        search results are cited inline and no citation pass is invoked."""
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
+        search_tool = _FakeTool("search_documents", result=_make_search_tool_result())
+        # CitationTool is intentionally NOT registered — mirrors the new production default.
+        model = _FakeChatModel(turns=[([], [search_tc]), (["Answer.", quote], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool],
+            prompt_profile=_IdentityPromptProfile(),
+            runtime_flags=_FLAGS_INLINE_ONLY,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("find info"))
+
+        assert text == "Answer."
+        # Exactly two model stream calls — no citation pass step.
+        assert len(model.stream_calls) == 2
+        citation_events = [e for e in events if isinstance(e, SourceCitationEvent)]
+        assert len(citation_events) == 1
+        assert citation_events[0].validated[0].source == "doc.txt"
+
+    @pytest.mark.asyncio
+    async def test_round_trip_only_flag_triggers_citation_pass(self) -> None:
+        """With inline_quotes_enabled=False, citation_round_trip_enabled=True:
+        the legacy citation pass fires as before WP4."""
+        chunk = SourceChunk(content="body", source="doc.txt", score=0.9, chunk_id="c1")
+        cite_event = SourceCitationEvent(validated=(chunk,))
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        cite_tc = ToolCallInfo(
+            name="cite_sources",
+            arguments={"citations": [{"source": "doc.txt", "chunk_id": "c1"}]},
+            call_id="c1",
+        )
+        search_tool = _FakeTool("search_documents", result=_make_search_tool_result())
+        cite_tool = _FakeTool(
+            "cite_sources",
+            result={"validated": [{"source": "doc.txt", "chunk_id": "c1"}], "unvalidated": []},
+            events=[cite_event],
+        )
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc]),
+                (["Based on results."], []),
+                ([], [cite_tc]),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool, cite_tool],
+            prompt_profile=_IdentityPromptProfile(),
+            runtime_flags=_FLAGS_ROUND_TRIP_ONLY,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("find info"))
+
+        assert text == "Based on results."
+        # Three stream calls: search step + final text + citation pass.
+        assert len(model.stream_calls) == 3
+        citation_events = [e for e in events if isinstance(e, SourceCitationEvent)]
+        assert len(citation_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_both_flags_disabled_yields_no_citations(self) -> None:
+        """With both flags off: no inline quotes and no citation pass — search result
+        is consumed but no citation event is produced."""
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        search_tool = _FakeTool("search_documents", result=_make_search_tool_result())
+        model = _FakeChatModel(turns=[([], [search_tc]), (["Answer."], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool],
+            prompt_profile=_IdentityPromptProfile(),
+            runtime_flags=_FLAGS_NEITHER,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("find info"))
+
+        assert text == "Answer."
+        assert len(model.stream_calls) == 2
+        assert not any(isinstance(e, SourceCitationEvent) for e in events)
+
+    @pytest.mark.asyncio
+    async def test_inline_only_no_search_results_produces_no_citations(self) -> None:
+        """Inline flow with no retrieval turn: no citation event, no citation pass."""
+        model = _FakeChatModel(turns=[(["Plain conversational answer."], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            prompt_profile=_IdentityPromptProfile(),
+            runtime_flags=_FLAGS_INLINE_ONLY,
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("how are you?"))
+
+        assert text == "Plain conversational answer."
+        assert len(model.stream_calls) == 1
+        assert not any(isinstance(e, SourceCitationEvent) for e in events)
+        assert not any(isinstance(e, QuoteReferenceEvent) for e in events)

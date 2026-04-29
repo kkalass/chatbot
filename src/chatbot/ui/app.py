@@ -26,6 +26,7 @@ from src.chatbot.app.protocols import (
     Retriever,
     SourceChunk,
     SourceCitationEvent,
+    Tool,
 )
 from src.chatbot.config import (
     build_chat_model_config,
@@ -146,10 +147,15 @@ def _build_orchestrator() -> ChatOrchestrator:
     )
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
-    citation_tool = CitationTool()
+    # Register CitationTool only when the legacy citation round-trip is enabled.
+    # When citation_round_trip_enabled=False the tool is not needed and should not
+    # appear in the model's tool schema list.
+    tools: list[Tool] = [vacation_days_tool, retrieval_tool]
+    if runtime_flags.citation_round_trip_enabled:
+        tools.append(CitationTool())
     return ChatOrchestrator(
         model=chat_model,
-        tools=[vacation_days_tool, retrieval_tool, citation_tool],
+        tools=tools,
         prompt_profile=prompt_profile,
         prompts=build_default_prompts(inline_quotes_enabled=runtime_flags.inline_quotes_enabled),
         runtime_flags=runtime_flags,

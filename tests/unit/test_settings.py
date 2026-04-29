@@ -71,7 +71,7 @@ class TestSettingsDefaults:
         assert settings.eval_corpus_version is None
         assert settings.eval_dataset_version is None
         assert settings.inline_quotes_enabled is True
-        assert settings.citation_round_trip_enabled is True
+        assert settings.citation_round_trip_enabled is False
 
     def test_get_settings_returns_settings_instance(self) -> None:
         settings = get_settings()
