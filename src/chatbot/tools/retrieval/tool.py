@@ -87,7 +87,9 @@ class RetrievalTool:
             description="""Search the document corpus for information relevant to a query.
 
 Call this tool when the user's request may be answered from the uploaded documents.
-Returns relevant text chunks with source paths, chunk IDs, content, and similarity scores.""",
+Returns relevant text chunks with source paths, chunk IDs, content, and similarity scores.
+Note that the search is an embedding based vector search, not a keyword search.
+""",
             parameters_schema=_SearchInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
 
