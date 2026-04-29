@@ -6,7 +6,7 @@ and to make trace queries deterministic.
 
 Attribute ownership rules (high-level):
 - UI span: user input preview + final emitted response preview + evaluation metadata.
-- Orchestrator spans: control-flow state (rounds, tool dispatch, citation pass).
+- Orchestrator spans: control-flow state (steps, tool dispatch, citation pass).
 - Model span: compact request/response summaries.
 - Tool spans: tool-specific input/result summaries.
 - Retriever span: infrastructure-only — params (top_k, score_threshold), result_count, top_scores.
@@ -17,7 +17,7 @@ Attribute ownership rules (high-level):
 SPAN_CHAT_UI_ON_MESSAGE = "chat.ui.on_message"
 
 # Orchestration spans
-SPAN_CHAT_ORCHESTRATOR_ROUND = "chat.orchestrator.round"
+SPAN_CHAT_ORCHESTRATOR_STEP = "chat.orchestrator.step"
 SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH = "chat.orchestrator.tool_dispatch"
 SPAN_CHAT_ORCHESTRATOR_CITATION_PASS = "chat.orchestrator.citation_pass"
 

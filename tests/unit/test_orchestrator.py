@@ -287,8 +287,8 @@ class TestChatOrchestratorAgenticLoop:
         tc = ToolCallInfo(name="get_data", arguments={})
         model = _FakeChatModel(
             turns=[
-                ([], [tc]),  # round 1: model requests tool
-                (["Here is 42!"], []),  # round 2: final text response
+                ([], [tc]),  # step 1: model requests tool
+                (["Here is 42!"], []),  # step 2: final text response
             ]
         )
         orchestrator = ChatOrchestrator(
@@ -495,7 +495,7 @@ class TestCitationPass:
         assert text == "Based on sources."
         assert len(events) == 1
         assert isinstance(events[0], SourceCitationEvent)
-        # Main loop (2 rounds) + single citation round.
+        # Main loop (2 steps) + single citation step.
         assert len(model.stream_calls) == 3
         # Citation pass receives a dedicated two-message prompt (system + citation request).
         citation_messages = model.stream_calls[2]
@@ -619,7 +619,7 @@ class TestCitationPass:
 
         model = _FakeChatModel(
             turns=[
-                ([], [search_tc, cite_tc]),  # main loop: both tools in one round
+                ([], [search_tc, cite_tc]),  # main loop: both tools in one step
                 (["answer"], []),  # main loop: final text
             ]
         )

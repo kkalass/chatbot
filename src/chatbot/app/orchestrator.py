@@ -54,31 +54,31 @@ from src.chatbot.observability.openinference import (
 )
 from src.chatbot.observability.schema import (
     SPAN_CHAT_ORCHESTRATOR_CITATION_PASS,
-    SPAN_CHAT_ORCHESTRATOR_ROUND,
+    SPAN_CHAT_ORCHESTRATOR_STEP,
     SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH,
 )
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
-_MAX_TOOL_ROUNDS = 10  # safety limit to prevent infinite agentic loops
+_MAX_TOOL_STEPS = 10  # safety limit to prevent infinite agentic loops
 _SEARCH_TOOL_NAME = "search_documents"
 _CITATION_TOOL_NAME = "cite_sources"
 
 
-def _trace_round_request(
+def _trace_step_request(
     *,
     span: trace.Span,
-    round_num: int,
+    step_num: int,
     messages: list[ChatMessage],
     tool_schemas: list[ToolSchema] | None,
 ) -> None:
-    span.set_attribute("chat.round", round_num)
+    span.set_attribute("chat.step", step_num)
     span.set_attributes(
         build_input_attributes(
             {
                 "message_count": len(messages),
-                "round_num": round_num,
+                "step_num": step_num,
                 "tool_count": len(tool_schemas) if tool_schemas else 0,
             },
             mime_type=OpenInferenceMimeTypeValues.JSON,
@@ -86,22 +86,22 @@ def _trace_round_request(
     )
 
 
-def _trace_round_response(
+def _trace_step_response(
     *,
     span: trace.Span,
     collected: list[str],
     tool_calls: list[ToolCallInfo],
     assistant_text: str | None = None,
 ) -> None:
-    span.set_attribute("chat.round.text_chars", len("".join(collected)))
-    span.set_attribute("chat.round.tool_call_count", len(tool_calls))
+    span.set_attribute("chat.step.text_chars", len("".join(collected)))
+    span.set_attribute("chat.step.tool_call_count", len(tool_calls))
     span.set_attribute(
-        "chat.round.tool_calls",
+        "chat.step.tool_calls",
         to_attribute_text([tc.name for tc in tool_calls]),
     )
     if assistant_text is not None:
         span.set_attribute(
-            "chat.round.output_preview",
+            "chat.step.output_preview",
             to_attribute_text(assistant_text),
         )
 
@@ -303,7 +303,7 @@ class ChatOrchestrator:
 
         Appends the user message to history eagerly (before iteration begins),
         then returns a lazy async iterator that runs the agentic loop.  Tool
-        result messages are appended to history during tool rounds but are not
+        result messages are appended to history during tool steps but are not
         yielded to the caller — only text chunks (``str``) and
         :class:`~src.chatbot.app.protocols.ToolEvent` items are streamed back.
 
@@ -328,13 +328,13 @@ class ChatOrchestrator:
             search_call_ids_in_turn: set[str] = set()
             final_assistant_text = ""
 
-            for round_num in range(_MAX_TOOL_ROUNDS):
-                with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_ROUND) as round_span:
+            for step_num in range(_MAX_TOOL_STEPS):
+                with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:
                     system_text = prompts.system_prompt(datetime.now(tz=UTC))
                     messages = [ChatMessage(role="system", content=system_text), *history]
-                    _trace_round_request(
-                        span=round_span,
-                        round_num=round_num,
+                    _trace_step_request(
+                        span=step_span,
+                        step_num=step_num,
                         messages=messages,
                         tool_schemas=tool_schemas,
                     )
@@ -350,8 +350,8 @@ class ChatOrchestrator:
                     if not tool_calls:
                         assistant_text = "".join(collected)
                         final_assistant_text = assistant_text
-                        _trace_round_response(
-                            span=round_span,
+                        _trace_step_response(
+                            span=step_span,
                             collected=collected,
                             tool_calls=tool_calls,
                             assistant_text=assistant_text,
@@ -361,15 +361,15 @@ class ChatOrchestrator:
                             yield text_chunk
                         break
 
-                    _trace_round_response(
-                        span=round_span,
+                    _trace_step_response(
+                        span=step_span,
                         collected=collected,
                         tool_calls=tool_calls,
                     )
 
                     logger.info(
-                        "orchestrator.tool_round",
-                        round=round_num,
+                        "orchestrator.tool_step",
+                        step=step_num,
                         calls=[tc.name for tc in tool_calls],
                     )
                     history.append(
@@ -388,8 +388,8 @@ class ChatOrchestrator:
                             case SourceCitationEvent():
                                 emitted_citation_events.append(event)
             else:
-                # Safety: exceeded max rounds — one final response without tools.
-                logger.warning("orchestrator.max_tool_rounds_exceeded", limit=_MAX_TOOL_ROUNDS)
+                # Safety: exceeded max steps — one final response without tools.
+                logger.warning("orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS)
                 system_text = prompts.system_prompt(datetime.now(tz=UTC))
                 messages = [ChatMessage(role="system", content=system_text), *history]
                 final: list[str] = []
