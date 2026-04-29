@@ -3,20 +3,11 @@
 Pure data transformation — no I/O, no object construction.
 """
 
-from dataclasses import dataclass
-
+from src.chatbot.app.protocols import ChatRuntimeFlags as ChatRuntimeFlags
 from src.chatbot.infrastructure.chat import ChatModelConfig
 from src.chatbot.infrastructure.embeddings_text import TextEmbedderConfig
 from src.chatbot.infrastructure.retrieval import RetrieverConfig
 from src.settings import Settings
-
-
-@dataclass(frozen=True)
-class ChatRuntimeFlags:
-    """Runtime feature toggles used by chat orchestration wiring."""
-
-    inline_quotes_enabled: bool
-    citation_round_trip_enabled: bool
 
 
 def build_text_embedder_config(settings: Settings) -> TextEmbedderConfig:

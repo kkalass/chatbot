@@ -151,6 +151,14 @@ type ChatStreamItem = str | list[ToolCallInfo] | Quote
 
 
 @dataclass(frozen=True)
+class ChatRuntimeFlags:
+    """Runtime feature toggles used by chat orchestration wiring."""
+
+    inline_quotes_enabled: bool
+    citation_round_trip_enabled: bool
+
+
+@dataclass(frozen=True)
 class ToolContext:
     """Snapshot of conversation history passed to every tool execution.
 

@@ -152,6 +152,7 @@ def _build_orchestrator() -> ChatOrchestrator:
         tools=[vacation_days_tool, retrieval_tool, citation_tool],
         prompt_profile=prompt_profile,
         prompts=build_default_prompts(inline_quotes_enabled=runtime_flags.inline_quotes_enabled),
+        runtime_flags=runtime_flags,
     )
 
 

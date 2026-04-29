@@ -27,18 +27,26 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.citation_support import (
+    build_canonical_key,
     collect_search_chunks,
     parse_serialized_citation_tool_call,
     render_search_results_for_prompt,
+    validate_search_quote,
+    validate_tool_call_quote,
 )
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
     ChatMessage,
     ChatModel,
+    ChatRuntimeFlags,
     ChatStreamItem,
     JsonObject,
     ProcessEvent,
     PromptProfile,
+    Quote,
+    QuoteReferenceEvent,
+    SearchResultQuote,
+    SourceChunk,
     SourceCitationEvent,
     Tool,
     ToolCallInfo,
@@ -75,7 +83,9 @@ def _append_stream_item(
 ) -> None:
     """Append one chat stream item to text/tool buffers.
 
-    Quote items are intentionally ignored in WP1 and handled in a later phase.
+    Quote items are intentionally ignored here — this helper is used only in
+    the citation-pass loop and the max-steps fallback, where quote handling
+    is not expected.
     """
     if isinstance(item, str):
         collected_text.append(item)
@@ -83,7 +93,39 @@ def _append_stream_item(
     if isinstance(item, list):
         tool_calls.extend(item)
         return
-    logger.debug("orchestrator.quote_item_ignored_wp1", kind=item.kind)
+    logger.debug("orchestrator.quote_item_ignored_non_main_loop", kind=item.kind)
+
+
+def _resolve_quote(
+    quote: Quote,
+    history: tuple[ChatMessage, ...],
+) -> SourceChunk | bool:
+    """Validate a quote against conversation history.
+
+    Returns:
+        A ``SourceChunk`` for a valid ``SearchResultQuote``.
+        ``True`` for a valid ``ToolCallQuote``.
+        ``False`` when validation fails.
+    """
+    if isinstance(quote, SearchResultQuote):
+        chunk = validate_search_quote(quote, history)
+        return chunk if chunk is not None else False
+    # ToolCallQuote
+    return validate_tool_call_quote(quote, history)
+
+
+def _trace_quote_counts(
+    *,
+    detected: int,
+    validated: int,
+    invalid: int,
+    duplicate: int,
+) -> None:
+    span = trace.get_current_span()
+    span.set_attribute("quote.detected.count", detected)
+    span.set_attribute("quote.validated.count", validated)
+    span.set_attribute("quote.invalid.count", invalid)
+    span.set_attribute("quote.duplicate.count", duplicate)
 
 
 def _trace_step_request(
@@ -285,6 +327,12 @@ def _trace_tool_dispatch_error(
     span.set_status(StatusCode.ERROR, error_msg)
 
 
+_DEFAULT_RUNTIME_FLAGS = ChatRuntimeFlags(
+    inline_quotes_enabled=False,
+    citation_round_trip_enabled=True,
+)
+
+
 class ChatOrchestrator:
     """Manages per-session conversation history and the agentic tool-call loop.
 
@@ -307,9 +355,11 @@ class ChatOrchestrator:
         prompt_profile: PromptProfile,
         tools: list[Tool] | None = None,
         prompts: Prompts = DEFAULT_PROMPTS,
+        runtime_flags: ChatRuntimeFlags = _DEFAULT_RUNTIME_FLAGS,
     ) -> None:
         self._model = model
         self._prompts = prompt_profile.adjust_prompts(prompts)
+        self._runtime_flags = runtime_flags
         _tools = tools or []
         self._tool_map: dict[str, Tool] = {t.schema.name: t for t in _tools}
         adjusted_schemas = [
@@ -343,11 +393,21 @@ class ChatOrchestrator:
         tool_schema_map = self._tool_schema_map
         tool_map = self._tool_map
         prompts = self._prompts
+        runtime_flags = self._runtime_flags
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             emitted_citation_events: list[SourceCitationEvent] = []
             search_call_ids_in_turn: set[str] = set()
             final_assistant_text = ""
+
+            # Inline-quote tracking — populated only when inline_quotes_enabled.
+            quote_dedup: dict[str, int] = {}  # canonical_key -> reference_number
+            quote_ref_counter = 0
+            validated_search_chunks: list[SourceChunk] = []
+            quote_detected = 0
+            quote_validated = 0
+            quote_invalid = 0
+            quote_duplicate = 0
 
             for step_num in range(_MAX_TOOL_STEPS):
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:
@@ -366,12 +426,42 @@ class ChatOrchestrator:
                         if isinstance(item, str):
                             collected.append(item)
                             yield item
+                        elif isinstance(item, list):
+                            tool_calls.extend(item)
                         else:
-                            _append_stream_item(
-                                item=item,
-                                collected_text=collected,
-                                tool_calls=tool_calls,
-                            )
+                            if runtime_flags.inline_quotes_enabled:
+                                quote_detected += 1
+                                canonical_key = build_canonical_key(item)
+                                if canonical_key in quote_dedup:
+                                    quote_duplicate += 1
+                                    yield QuoteReferenceEvent(
+                                        reference_number=quote_dedup[canonical_key],
+                                        canonical_key=canonical_key,
+                                    )
+                                else:
+                                    chunk = _resolve_quote(item, tuple(history))
+                                    if chunk is not False:
+                                        quote_validated += 1
+                                        quote_ref_counter += 1
+                                        quote_dedup[canonical_key] = quote_ref_counter
+                                        if isinstance(chunk, SourceChunk):
+                                            validated_search_chunks.append(chunk)
+                                        yield QuoteReferenceEvent(
+                                            reference_number=quote_ref_counter,
+                                            canonical_key=canonical_key,
+                                        )
+                                    else:
+                                        quote_invalid += 1
+                                        logger.debug(
+                                            "orchestrator.quote_invalid",
+                                            kind=item.kind,
+                                            canonical_key=canonical_key,
+                                        )
+                            else:
+                                logger.debug(
+                                    "orchestrator.quote_item_skipped_flag_disabled",
+                                    kind=item.kind,
+                                )
 
                     if not tool_calls:
                         assistant_text = "".join(collected)
@@ -430,9 +520,30 @@ class ChatOrchestrator:
                 final_assistant_text = "".join(final)
                 history.append(ChatMessage(role="assistant", content=final_assistant_text))
 
-            # Citation pass: only for the current turn when search results were
-            # consumed and no citation event was emitted during the main loop.
-            if not emitted_citation_events and search_call_ids_in_turn:
+            # Emit a SourceCitationEvent from inline quotes when the feature is enabled
+            # and quotes were validated.  This runs before the legacy citation pass so that
+            # the emitted_citation_events guard prevents a redundant citation round-trip.
+            if runtime_flags.inline_quotes_enabled and validated_search_chunks:
+                inline_citation = SourceCitationEvent(validated=tuple(validated_search_chunks))
+                emitted_citation_events.append(inline_citation)
+                yield inline_citation
+
+            # Tracing — quote counts collected across all steps of this turn.
+            if runtime_flags.inline_quotes_enabled:
+                _trace_quote_counts(
+                    detected=quote_detected,
+                    validated=quote_validated,
+                    invalid=quote_invalid,
+                    duplicate=quote_duplicate,
+                )
+
+            # Citation pass: only when search results were consumed, no citation event
+            # has been emitted yet, and the legacy pass has not been disabled.
+            if (
+                not emitted_citation_events
+                and search_call_ids_in_turn
+                and runtime_flags.citation_round_trip_enabled
+            ):
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_CITATION_PASS) as span:
                     citation_tool = tool_map.get(_CITATION_TOOL_NAME)
                     citation_schema = tool_schema_map.get(_CITATION_TOOL_NAME)

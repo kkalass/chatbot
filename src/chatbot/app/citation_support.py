@@ -5,10 +5,62 @@ import re
 from collections.abc import Sequence
 from typing import cast
 
-from src.chatbot.app.protocols import ChatMessage, SourceChunk, ToolCallInfo
+from src.chatbot.app.protocols import (
+    ChatMessage,
+    Quote,
+    SearchResultQuote,
+    SourceChunk,
+    ToolCallInfo,
+    ToolCallQuote,
+)
 
 _SEARCH_TOOL_NAME = "search_documents"
 _CITATION_TOOL_NAME = "cite_sources"
+
+
+def build_canonical_key(quote: Quote) -> str:
+    """Build the canonical deduplication key for a quote.
+
+    Keys are structurally derived so equality is exact and deterministic:
+    - Search: ``search:<tool_call_id>:<source>:<chunk_id>``
+    - Tool:   ``tool:<tool_call_id>:<tool_name>:<output_path>``
+    """
+    if isinstance(quote, SearchResultQuote):
+        return f"search:{quote.tool_call_id}:{quote.source}:{quote.chunk_id}"
+    # ToolCallQuote
+    output_path = quote.output_path or ""
+    return f"tool:{quote.tool_call_id}:{quote.tool_name}:{output_path}"
+
+
+def validate_search_quote(
+    quote: SearchResultQuote,
+    history: tuple[ChatMessage, ...],
+) -> SourceChunk | None:
+    """Return the matching ``SourceChunk`` from history, or ``None`` if the quote is invalid.
+
+    A search quote is valid only when its ``(source, chunk_id)`` pair is present in a
+    ``search_documents`` tool-result message in ``history``.
+    """
+    chunks = collect_search_chunks(history)
+    return chunks.get((quote.source, quote.chunk_id))
+
+
+def validate_tool_call_quote(
+    quote: ToolCallQuote,
+    history: tuple[ChatMessage, ...],
+) -> bool:
+    """Return ``True`` when ``quote.tool_call_id`` / ``tool_name`` exist in history.
+
+    A tool-call quote is valid only when the exact ``(call_id, tool_name)`` pair
+    appears as an assistant tool-call request in ``history``.
+    """
+    for msg in history:
+        if msg.role != "assistant" or not msg.tool_calls:
+            continue
+        for tc in msg.tool_calls:
+            if tc.call_id == quote.tool_call_id and tc.name == quote.tool_name:
+                return True
+    return False
 
 
 def collect_search_chunks(
