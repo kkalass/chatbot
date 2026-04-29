@@ -1,6 +1,7 @@
 """Unit tests for UI citation rendering helpers."""
 
-from src.chatbot.app.protocols import SourceChunk
+from src.chatbot.app.protocols import QuoteReferenceEvent, SourceChunk, SourceCitationEvent
+from src.chatbot.ui.app import collect_unique_citation_chunks
 from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
@@ -175,3 +176,53 @@ class TestCitationView:
         assert markdown.count("2. ") == 1
         assert "Policy - p. 1" in markdown
         assert "Policy - p. 2" in markdown
+
+
+class TestQuoteReferenceEventToken:
+    def test_reference_token_format(self) -> None:
+        event = QuoteReferenceEvent(reference_number=3, canonical_key="search:id:src:cid")
+        assert f"[{event.reference_number}]" == "[3]"
+
+    def test_reference_numbers_are_sequential(self) -> None:
+        tokens = [f"[{QuoteReferenceEvent(reference_number=n, canonical_key=f'k{n}').reference_number}]" for n in range(1, 5)]
+        assert tokens == ["[1]", "[2]", "[3]", "[4]"]
+
+
+class TestCollectUniqueCitationChunks:
+    def _chunk(self, source: str, chunk_id: str, content: str = "body") -> SourceChunk:
+        return SourceChunk(content=content, source=source, score=0.9, chunk_id=chunk_id)
+
+    def test_empty_events_returns_empty(self) -> None:
+        assert collect_unique_citation_chunks([]) == []
+
+    def test_single_event_preserves_order(self) -> None:
+        a = self._chunk("doc.txt", "1")
+        b = self._chunk("doc.txt", "2")
+        event = SourceCitationEvent(validated=(a, b))
+        result = collect_unique_citation_chunks([event])
+        assert result == [a, b]
+
+    def test_deduplicates_same_source_and_chunk_id_across_events(self) -> None:
+        a = self._chunk("doc.txt", "1")
+        b = self._chunk("doc.txt", "2")
+        # Same (source, chunk_id) pair in two separate events — second occurrence is dropped.
+        event1 = SourceCitationEvent(validated=(a,))
+        event2 = SourceCitationEvent(validated=(a, b))
+        result = collect_unique_citation_chunks([event1, event2])
+        assert result == [a, b]
+
+    def test_preserves_first_seen_order_across_events(self) -> None:
+        a = self._chunk("a.txt", "1")
+        b = self._chunk("b.txt", "1")
+        c = self._chunk("c.txt", "1")
+        event1 = SourceCitationEvent(validated=(b, a))
+        event2 = SourceCitationEvent(validated=(c,))
+        result = collect_unique_citation_chunks([event1, event2])
+        assert result == [b, a, c]
+
+    def test_different_chunk_ids_same_source_are_kept_separate(self) -> None:
+        a = self._chunk("doc.txt", "1")
+        b = self._chunk("doc.txt", "2")
+        event = SourceCitationEvent(validated=(a, b))
+        result = collect_unique_citation_chunks([event])
+        assert len(result) == 2

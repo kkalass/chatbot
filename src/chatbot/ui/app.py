@@ -98,7 +98,7 @@ async def _ask_user(prompt: str) -> str | None:
     return str(value).strip() if value else None
 
 
-def _collect_unique_citation_chunks(
+def collect_unique_citation_chunks(
     citation_events: list[SourceCitationEvent],
 ) -> list[SourceChunk]:
     """Flatten and deduplicate citation chunks while preserving first-seen order."""
@@ -274,13 +274,17 @@ async def on_message(message: cl.Message) -> None:
                 case SourceCitationEvent():
                     citation_events.append(event)
                 case QuoteReferenceEvent():
-                    # Inline quote rendering is introduced in a later phase.
-                    # Keep this variant handled now to preserve exhaustive typing.
-                    pass
+                    ref_token = f"[{event.reference_number}]"
+                    emitted_chars += len(ref_token)
+                    emitted_chunks.append(ref_token)
+                    if response is None:
+                        response = cl.Message(content="")
+                        await response.send()
+                    await response.stream_token(ref_token)
                 case _:
                     assert_never(event)
 
-        unique_chunks = _collect_unique_citation_chunks(citation_events)
+        unique_chunks = collect_unique_citation_chunks(citation_events)
 
         # Append a compact, deduplicated source list directly to the answer so
         # provenance remains visible even when the side panel is collapsed.
