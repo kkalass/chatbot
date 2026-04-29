@@ -9,6 +9,7 @@ from typing import Literal, assert_never
 
 from src.chatbot.app.protocols import ChatModel, PromptProfile
 
+from ._inline_quotes import build_inline_quote_parsing_chat_model
 from ._ollama import build_ollama_chat_model
 from ._prompt_profile import DefaultChatPromptProfile, SmallModelPromptProfile
 
@@ -52,16 +53,21 @@ def build_chat_prompt_profile(config: ChatModelConfig) -> PromptProfile:
 
 def build_chat_model(
     config: ChatModelConfig,
+    *,
+    inline_quotes_enabled: bool = False,
 ) -> ChatModel:
     """Construct the chat model prescribed by ``config.provider``."""
     match config.provider:
         case "ollama":
-            return build_ollama_chat_model(
+            model = build_ollama_chat_model(
                 base_url=config.base_url,
                 model=config.model,
                 temperature=config.temperature,
                 seed=config.seed,
             )
+            if inline_quotes_enabled:
+                return build_inline_quote_parsing_chat_model(model)
+            return model
         case _:
             assert_never(config.provider)
 

@@ -28,6 +28,7 @@ from src.chatbot.app.protocols import (
 )
 from src.chatbot.config import (
     build_chat_model_config,
+    build_chat_runtime_flags,
     build_retriever_config,
     build_text_embedder_config,
 )
@@ -135,9 +136,13 @@ def _build_retriever() -> Retriever:
 def _build_orchestrator() -> ChatOrchestrator:
     """Compose one session-scoped chat orchestrator instance."""
     chat_model_config = build_chat_model_config(_settings)
+    runtime_flags = build_chat_runtime_flags(_settings)
     prompt_profile = build_chat_prompt_profile(chat_model_config)
 
-    chat_model = build_chat_model(chat_model_config)
+    chat_model = build_chat_model(
+        chat_model_config,
+        inline_quotes_enabled=runtime_flags.inline_quotes_enabled,
+    )
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
     citation_tool = CitationTool()
