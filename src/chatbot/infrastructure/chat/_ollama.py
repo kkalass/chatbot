@@ -36,6 +36,7 @@ from src.chatbot.observability.schema import SPAN_CHAT_MODEL_OLLAMA_STREAM
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
+
 def _to_ollama_tool(tool_schema: ToolSchema) -> OllamaTool:
     """Convert a ``ToolSchema`` to an Ollama function-tool schema."""
     return OllamaTool.model_validate(
