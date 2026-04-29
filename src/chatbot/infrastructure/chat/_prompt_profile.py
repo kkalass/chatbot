@@ -38,7 +38,12 @@ class SmallModelPromptProfile(DefaultChatPromptProfile):
             return f"""{prompts.system_prompt(now)}
 
 When calling tools, provide arguments as native JSON values (arrays/objects),
-never as JSON-encoded strings and never as schema metadata."""
+never as JSON-encoded strings and never as schema metadata.
+
+Inline citation JSON rules (when emitting quote markers):
+- The JSON inside markers must be a single strict object with no extra fields.
+- Copy tool_call_id, source, chunk_id, and tool_name values exactly as they
+  appear in tool results — do not paraphrase or abbreviate them."""
 
         def _citation_system_prompt(now: datetime) -> str:
             return f"""{prompts.citation_system_prompt(now)}

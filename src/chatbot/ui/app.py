@@ -19,6 +19,7 @@ from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferen
 from opentelemetry import trace
 
 from src.chatbot.app.orchestrator import ChatOrchestrator
+from src.chatbot.app.prompts import build_default_prompts
 from src.chatbot.app.protocols import (
     ProcessEvent,
     QuoteReferenceEvent,
@@ -150,6 +151,7 @@ def _build_orchestrator() -> ChatOrchestrator:
         model=chat_model,
         tools=[vacation_days_tool, retrieval_tool, citation_tool],
         prompt_profile=prompt_profile,
+        prompts=build_default_prompts(inline_quotes_enabled=runtime_flags.inline_quotes_enabled),
     )
 
 

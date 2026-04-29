@@ -31,7 +31,7 @@ from src.chatbot.app.citation_support import (
     parse_serialized_citation_tool_call,
     render_search_results_for_prompt,
 )
-from src.chatbot.app.prompts import DEFAULT_PROMPTS
+from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
     ChatMessage,
     ChatModel,
@@ -306,9 +306,10 @@ class ChatOrchestrator:
         *,
         prompt_profile: PromptProfile,
         tools: list[Tool] | None = None,
+        prompts: Prompts = DEFAULT_PROMPTS,
     ) -> None:
         self._model = model
-        self._prompts = prompt_profile.adjust_prompts(DEFAULT_PROMPTS)
+        self._prompts = prompt_profile.adjust_prompts(prompts)
         _tools = tools or []
         self._tool_map: dict[str, Tool] = {t.schema.name: t for t in _tools}
         adjusted_schemas = [

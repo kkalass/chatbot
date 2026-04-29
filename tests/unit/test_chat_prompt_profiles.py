@@ -2,13 +2,70 @@
 
 from datetime import datetime
 
-from src.chatbot.app.prompts import DEFAULT_PROMPTS
+from src.chatbot.app.prompts import (
+    DEFAULT_PROMPTS,
+    QUOTE_END_MARKER,
+    QUOTE_START_MARKER,
+    build_default_prompts,
+)
 from src.chatbot.infrastructure.chat import (
     ChatModelConfig,
     DefaultChatPromptProfile,
     SmallModelPromptProfile,
     build_chat_prompt_profile,
 )
+
+
+class TestBuildDefaultPrompts:
+    def test_inline_quotes_disabled_returns_default_prompts(self) -> None:
+        prompts = build_default_prompts(inline_quotes_enabled=False)
+
+        assert prompts is DEFAULT_PROMPTS
+
+    def test_inline_quotes_enabled_includes_start_marker(self) -> None:
+        prompts = build_default_prompts(inline_quotes_enabled=True)
+        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+
+        assert QUOTE_START_MARKER in system_text
+
+    def test_inline_quotes_enabled_includes_end_marker(self) -> None:
+        prompts = build_default_prompts(inline_quotes_enabled=True)
+        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+
+        assert QUOTE_END_MARKER in system_text
+
+    def test_inline_quotes_enabled_includes_search_result_kind(self) -> None:
+        prompts = build_default_prompts(inline_quotes_enabled=True)
+        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+
+        assert "search_result" in system_text
+
+    def test_inline_quotes_enabled_includes_tool_call_kind(self) -> None:
+        prompts = build_default_prompts(inline_quotes_enabled=True)
+        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+
+        assert "tool_call" in system_text
+
+    def test_inline_quotes_enabled_includes_tool_call_id_field(self) -> None:
+        prompts = build_default_prompts(inline_quotes_enabled=True)
+        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+
+        assert "tool_call_id" in system_text
+
+    def test_inline_quotes_enabled_preserves_base_assistant_instructions(self) -> None:
+        prompts = build_default_prompts(inline_quotes_enabled=True)
+        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+
+        # Base instructions must still be present.
+        assert "You are a helpful assistant" in system_text
+
+    def test_inline_quotes_enabled_preserves_citation_prompts_unchanged(self) -> None:
+        base = build_default_prompts(inline_quotes_enabled=False)
+        with_quotes = build_default_prompts(inline_quotes_enabled=True)
+        now = datetime(2026, 4, 29)
+
+        assert base.citation_system_prompt(now) == with_quotes.citation_system_prompt(now)
+        assert base.citation_request_message("results", "answer") == with_quotes.citation_request_message("results", "answer")
 
 
 class TestChatPromptProfiles:
@@ -60,6 +117,30 @@ class TestChatPromptProfiles:
         assert "native JSON values" in citation_system_text
         assert "top-level key must be exactly: citations" in citation_text
         assert "do not invent other top-level keys such as d" in citation_text
+
+    def test_small_profile_adds_inline_quote_json_hardening(self) -> None:
+        profile = SmallModelPromptProfile()
+        prompts_with_quotes = build_default_prompts(inline_quotes_enabled=True)
+
+        adjusted = profile.adjust_prompts(prompts_with_quotes)
+        system_text = adjusted.system_prompt(datetime(2026, 4, 29))
+
+        # Hardening language must be present alongside the marker contract.
+        assert "Inline citation JSON rules" in system_text
+        assert "no extra fields" in system_text
+        assert "tool_call_id" in system_text
+
+    def test_small_profile_inline_quote_hardening_present_even_without_base_markers(
+        self,
+    ) -> None:
+        # Hardening should be appended regardless of base prompt content —
+        # it is harmless when inline quotes are disabled and reinforcing when enabled.
+        profile = SmallModelPromptProfile()
+
+        adjusted = profile.adjust_prompts(DEFAULT_PROMPTS)
+        system_text = adjusted.system_prompt(datetime(2026, 4, 29))
+
+        assert "Inline citation JSON rules" in system_text
 
     def test_small_profile_appends_only_citation_tool_description(self) -> None:
         profile = SmallModelPromptProfile()
