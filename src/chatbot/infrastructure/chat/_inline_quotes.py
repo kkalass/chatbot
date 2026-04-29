@@ -156,7 +156,7 @@ class _InlineQuoteStreamParser:
                 quote_block_chars=len(self._quote_buffer),
                 raw_block_preview=_preview_text(self._quote_buffer),
             )
-            outputs.append(self._quote_buffer)
+            self.parse_failed_count += 1
             self._quote_buffer = None
 
         if self._plain_buffer:

@@ -268,13 +268,14 @@ async def on_message(message: cl.Message) -> None:
                 case SourceCitationEvent():
                     citation_events.append(event)
                 case QuoteReferenceEvent():
-                    ref_token = f"[{event.reference_number}]"
-                    emitted_chars += len(ref_token)
-                    emitted_chunks.append(ref_token)
-                    if response is None:
-                        response = cl.Message(content="")
-                        await response.send()
-                    await response.stream_token(ref_token)
+                    # The model may emit quote markers in a separate paragraph block,
+                    # which would render detached "[n]" lines in the streamed text.
+                    # Keep references in the sources section/sidebar only.
+                    logger.debug(
+                        "session.quote_reference_suppressed",
+                        reference_number=event.reference_number,
+                        canonical_key=event.canonical_key,
+                    )
                 case _:
                     assert_never(event)
 

@@ -13,6 +13,7 @@ from ollama._types import ChatResponse
 from ollama._types import Tool as OllamaTool
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.protocols import (
     ChatMessage,
@@ -34,9 +35,6 @@ from src.chatbot.observability.schema import SPAN_CHAT_MODEL_OLLAMA_STREAM
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
-
-_MAX_TRACED_RESPONSE_PREVIEW_CHARS = 1200
-
 
 def _to_ollama_tool(tool_schema: ToolSchema) -> OllamaTool:
     """Convert a ``ToolSchema`` to an Ollama function-tool schema."""
@@ -227,35 +225,40 @@ class OllamaChatModel:
                 trace_response_text_parts: list[str] = []
 
                 tool_calls: list[ToolCallInfo] = []
-                async for chunk in response_stream:
-                    content = chunk.message.content
-                    if content:
-                        trace_streamed_text_chars += len(content)
-                        if trace_streamed_text_chars < _MAX_TRACED_RESPONSE_PREVIEW_CHARS:
+                try:
+                    async for chunk in response_stream:
+                        content = chunk.message.content
+                        if content:
+                            trace_streamed_text_chars += len(content)
                             trace_response_text_parts.append(content)
-                        yield content
-                    if chunk.message.tool_calls:
-                        for tc in chunk.message.tool_calls:
-                            tool_calls.append(
-                                ToolCallInfo(
-                                    name=tc.function.name,
-                                    arguments=dict(tc.function.arguments),
-                                    call_id=tc.function.name,
+                            yield content
+                        if chunk.message.tool_calls:
+                            for tc in chunk.message.tool_calls:
+                                tool_calls.append(
+                                    ToolCallInfo(
+                                        name=tc.function.name,
+                                        arguments=dict(tc.function.arguments),
+                                        call_id=tc.function.name,
+                                    )
                                 )
-                            )
-                if tool_calls:
-                    yield tool_calls
+                    if tool_calls:
+                        yield tool_calls
 
-                _trace_response(
-                    span=span,
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    tool_calls=tool_calls,
-                    response_text="".join(trace_response_text_parts),
-                    streamed_text_chars=trace_streamed_text_chars,
-                    ollama_options=ollama_options,
-                )
+                    _trace_response(
+                        span=span,
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                        tool_calls=tool_calls,
+                        response_text="".join(trace_response_text_parts),
+                        streamed_text_chars=trace_streamed_text_chars,
+                        ollama_options=ollama_options,
+                    )
+                    span.set_status(StatusCode.OK)
+                except Exception as exc:
+                    span.record_exception(exc)
+                    span.set_status(StatusCode.ERROR, str(exc))
+                    raise
 
         return _gen()
 

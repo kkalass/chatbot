@@ -91,13 +91,13 @@ class TestInlineQuoteParsingChatModel:
         assert "".join(item for item in events if isinstance(item, str)) == raw
         assert all(isinstance(item, str) for item in events)
 
-    async def test_flushes_unclosed_quote_block_as_text_at_stream_end(self) -> None:
+    async def test_drops_unclosed_quote_block_at_stream_end(self) -> None:
         raw = f"Intro <°_quote_°>{_SEARCH_QUOTE_JSON}"
         model = InlineQuoteParsingChatModel(_FakeChatModel([raw]))
 
         events = await _collect(model.stream(messages=[]))
 
-        assert "".join(item for item in events if isinstance(item, str)) == raw
+        assert "".join(item for item in events if isinstance(item, str)) == "Intro "
         assert all(isinstance(item, str) for item in events)
 
     async def test_falls_back_to_raw_text_when_quote_buffer_limit_is_exceeded(self) -> None:
@@ -148,4 +148,13 @@ class TestInlineQuoteStreamParserCounts:
         parser.feed(f"<°_quote_°>{_SEARCH_QUOTE_JSON}</°_quote_°>")
 
         assert parser.parsed_count == 2
+        assert parser.parse_failed_count == 1
+
+    def test_unclosed_block_increments_parse_failed_count(self) -> None:
+        parser = _InlineQuoteStreamParser(max_quote_block_chars=16_384)
+
+        parser.feed(f"Intro <°_quote_°>{_SEARCH_QUOTE_JSON}")
+        parser.finish()
+
+        assert parser.parsed_count == 0
         assert parser.parse_failed_count == 1
