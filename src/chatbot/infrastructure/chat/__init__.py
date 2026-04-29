@@ -53,8 +53,6 @@ def build_chat_prompt_profile(config: ChatModelConfig) -> PromptProfile:
 
 def build_chat_model(
     config: ChatModelConfig,
-    *,
-    inline_quotes_enabled: bool = False,
 ) -> ChatModel:
     """Construct the chat model prescribed by ``config.provider``."""
     match config.provider:
@@ -65,9 +63,7 @@ def build_chat_model(
                 temperature=config.temperature,
                 seed=config.seed,
             )
-            if inline_quotes_enabled:
-                return build_inline_quote_parsing_chat_model(model)
-            return model
+            return build_inline_quote_parsing_chat_model(model)
         case _:
             assert_never(config.provider)
 

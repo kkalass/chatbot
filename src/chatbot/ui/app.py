@@ -30,7 +30,6 @@ from src.chatbot.app.protocols import (
 )
 from src.chatbot.config import (
     build_chat_model_config,
-    build_chat_runtime_flags,
     build_retriever_config,
     build_text_embedder_config,
 )
@@ -47,7 +46,6 @@ from src.chatbot.observability.openinference import (
     using_session_attributes,
 )
 from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
-from src.chatbot.tools.citation.tool import CitationTool
 from src.chatbot.tools.retrieval.tool import RetrievalTool
 from src.chatbot.tools.vacation_days import (
     InteractiveVacationDaysAuthSession,
@@ -138,27 +136,17 @@ def _build_retriever() -> Retriever:
 def _build_orchestrator() -> ChatOrchestrator:
     """Compose one session-scoped chat orchestrator instance."""
     chat_model_config = build_chat_model_config(_settings)
-    runtime_flags = build_chat_runtime_flags(_settings)
     prompt_profile = build_chat_prompt_profile(chat_model_config)
 
-    chat_model = build_chat_model(
-        chat_model_config,
-        inline_quotes_enabled=runtime_flags.inline_quotes_enabled,
-    )
+    chat_model = build_chat_model(chat_model_config)
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
-    # Register CitationTool only when the legacy citation round-trip is enabled.
-    # When citation_round_trip_enabled=False the tool is not needed and should not
-    # appear in the model's tool schema list.
     tools: list[Tool] = [vacation_days_tool, retrieval_tool]
-    if runtime_flags.citation_round_trip_enabled:
-        tools.append(CitationTool())
     return ChatOrchestrator(
         model=chat_model,
         tools=tools,
         prompt_profile=prompt_profile,
-        prompts=build_default_prompts(inline_quotes_enabled=runtime_flags.inline_quotes_enabled),
-        runtime_flags=runtime_flags,
+        prompts=build_default_prompts(),
     )
 
 

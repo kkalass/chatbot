@@ -3,7 +3,6 @@
 Pure data transformation — no I/O, no object construction.
 """
 
-from src.chatbot.app.protocols import ChatRuntimeFlags as ChatRuntimeFlags
 from src.chatbot.infrastructure.chat import ChatModelConfig
 from src.chatbot.infrastructure.embeddings_text import TextEmbedderConfig
 from src.chatbot.infrastructure.retrieval import RetrieverConfig
@@ -40,12 +39,4 @@ def build_chat_model_config(settings: Settings) -> ChatModelConfig:
         temperature=settings.model_temperature,
         seed=settings.model_seed,
         provider="ollama",
-    )
-
-
-def build_chat_runtime_flags(settings: Settings) -> ChatRuntimeFlags:
-    """Map settings to chat runtime feature toggles."""
-    return ChatRuntimeFlags(
-        inline_quotes_enabled=settings.inline_quotes_enabled,
-        citation_round_trip_enabled=settings.citation_round_trip_enabled,
     )

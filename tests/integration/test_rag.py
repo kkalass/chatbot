@@ -243,8 +243,8 @@ class TestCitationValidationIntegration:
 class TestInlineQuoteOrchestratorIntegration:
     """WP7 integration tests for the inline-quote streaming path.
 
-    These tests exercise the real orchestrator with ``inline_quotes_enabled=True``
-    and ``citation_round_trip_enabled=False`` against live Qdrant + Ollama.
+    These tests exercise the real orchestrator in inline-quote-only mode
+    against live Qdrant + Ollama.
     They verify the happy path (retrieval-grounded answer completes and produces
     a response) and the regression path (non-retrieval tool answer does not hang).
 
@@ -259,7 +259,6 @@ class TestInlineQuoteOrchestratorIntegration:
         non-empty response and does not raise."""
         from src.chatbot.app.orchestrator import ChatOrchestrator
         from src.chatbot.app.protocols import (
-            ChatRuntimeFlags,
             QuoteReferenceEvent,
             SourceCitationEvent,
         )
@@ -289,10 +288,6 @@ class TestInlineQuoteOrchestratorIntegration:
             model=model,
             tools=[retrieval_tool],
             prompt_profile=prompt_profile,
-            runtime_flags=ChatRuntimeFlags(
-                inline_quotes_enabled=True,
-                citation_round_trip_enabled=False,
-            ),
         )
         response = ""
         quote_ref_events: list[QuoteReferenceEvent] = []
@@ -326,7 +321,7 @@ class TestInlineQuoteOrchestratorIntegration:
         """A purely conversational query with inline-quote flow produces a response
         and emits no SourceCitationEvent (no retrieval chunks cited)."""
         from src.chatbot.app.orchestrator import ChatOrchestrator
-        from src.chatbot.app.protocols import ChatRuntimeFlags, SourceCitationEvent
+        from src.chatbot.app.protocols import SourceCitationEvent
         from src.chatbot.infrastructure.chat import (
             ChatModelConfig,
             build_chat_model,
@@ -347,10 +342,6 @@ class TestInlineQuoteOrchestratorIntegration:
         orchestrator = ChatOrchestrator(
             model=model,
             prompt_profile=prompt_profile,
-            runtime_flags=ChatRuntimeFlags(
-                inline_quotes_enabled=True,
-                citation_round_trip_enabled=False,
-            ),
         )
         response = ""
         citation_events: list[SourceCitationEvent] = []
@@ -372,7 +363,6 @@ class TestInlineQuoteOrchestratorIntegration:
         """Inline quote parser must pass through arbitrary model output unchanged when
         no quote markers are present — verifying the non-blocking fallback path."""
         from src.chatbot.app.orchestrator import ChatOrchestrator
-        from src.chatbot.app.protocols import ChatRuntimeFlags
         from src.chatbot.infrastructure.chat import (
             ChatModelConfig,
             build_chat_model,
@@ -392,10 +382,6 @@ class TestInlineQuoteOrchestratorIntegration:
         orchestrator = ChatOrchestrator(
             model=model,
             prompt_profile=prompt_profile,
-            runtime_flags=ChatRuntimeFlags(
-                inline_quotes_enabled=True,
-                citation_round_trip_enabled=False,
-            ),
         )
 
         # A simple factual question is unlikely to produce quote markers.
