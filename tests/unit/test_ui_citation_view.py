@@ -127,7 +127,7 @@ class TestCitationView:
         assert content.startswith("### [Executive Order 14110](https://example.com/eo-14110)")
         assert "[Open source](" not in content
 
-    def test_build_citation_markdown_deduplicates_sources_and_links_url(self) -> None:
+    def test_build_citation_markdown_keeps_distinct_chunks_even_with_same_metadata(self) -> None:
         first = SourceChunk(
             content="Chunk A",
             source="doc.txt",
@@ -161,9 +161,12 @@ class TestCitationView:
 
         assert markdown.count("1. ") == 1
         assert markdown.count("2. ") == 1
-        assert "[Nice Title](https://example.com/doc) - Alice - 2024-10-01 - p. 2" in markdown
+        assert markdown.count("3. ") == 1
+        assert (
+            markdown.count("[Nice Title](https://example.com/doc) - Alice - 2024-10-01 - p. 2") == 2
+        )
         assert "fallback.txt" in markdown
-        assert markdown.count("Nice Title") == 1
+        assert markdown.count("Nice Title") == 2
 
     def test_build_citation_markdown_keeps_same_source_for_different_pages(self) -> None:
         page_1 = SourceChunk(

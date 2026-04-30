@@ -39,13 +39,17 @@ def build_citation_content(chunk: SourceChunk) -> str:
 
 
 def build_citation_markdown(chunks: Sequence[SourceChunk]) -> str:
-    """Return a compact deduplicated Markdown source list for the answer bubble."""
-    unique_chunks = _deduplicate_sources(chunks)
-    if not unique_chunks:
+    """Return a Markdown source list for the answer bubble.
+
+    The caller already provides chunks deduplicated by ``(source, chunk_id)``.
+    Keep that granularity so each distinct cited chunk remains visible in the
+    rendered source list.
+    """
+    if not chunks:
         return ""
 
     lines = ["---", "**Sources**", ""]
-    for index, chunk in enumerate(unique_chunks, start=1):
+    for index, chunk in enumerate(chunks, start=1):
         lines.append(f"{index}. {_build_source_list_item(chunk)}")
     return "\n".join(lines)
 
@@ -128,25 +132,6 @@ def _link_or_text(label: str, source_url: str | None) -> str:
     if source_url:
         return f"[{label}]({source_url})"
     return label
-
-
-def _deduplicate_sources(chunks: Sequence[SourceChunk]) -> list[SourceChunk]:
-    seen: set[tuple[str | None, str | None, str | None, str | None, str | None, str]] = set()
-    deduplicated: list[SourceChunk] = []
-    for chunk in chunks:
-        key = (
-            chunk.title,
-            chunk.author,
-            chunk.publication_date,
-            chunk.source_url,
-            chunk.page,
-            chunk.source,
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduplicated.append(chunk)
-    return deduplicated
 
 
 def _deduplicate_tool_citations(
