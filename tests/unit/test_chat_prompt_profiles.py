@@ -6,7 +6,6 @@ from src.chatbot.app.prompts import (
     DEFAULT_PROMPTS,
     QUOTE_END_MARKER,
     QUOTE_START_MARKER,
-    build_default_prompts,
 )
 from src.chatbot.infrastructure.chat import (
     ChatModelConfig,
@@ -16,60 +15,47 @@ from src.chatbot.infrastructure.chat import (
 )
 
 
-class TestBuildDefaultPrompts:
-    def test_build_default_prompts_returns_default_prompts(self) -> None:
-        prompts = build_default_prompts()
-
-        assert prompts is DEFAULT_PROMPTS
-
+class TestDefaultPrompts:
     def test_includes_start_marker(self) -> None:
-        prompts = build_default_prompts()
-        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+        system_text = DEFAULT_PROMPTS.system_prompt(datetime(2026, 4, 29))
 
         assert QUOTE_START_MARKER in system_text
 
     def test_includes_end_marker(self) -> None:
-        prompts = build_default_prompts()
-        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+        system_text = DEFAULT_PROMPTS.system_prompt(datetime(2026, 4, 29))
 
         assert QUOTE_END_MARKER in system_text
 
     def test_includes_search_result_kind(self) -> None:
-        prompts = build_default_prompts()
-        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+        system_text = DEFAULT_PROMPTS.system_prompt(datetime(2026, 4, 29))
 
         assert "search_result" in system_text
 
     def test_includes_tool_call_kind(self) -> None:
-        prompts = build_default_prompts()
-        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+        system_text = DEFAULT_PROMPTS.system_prompt(datetime(2026, 4, 29))
 
         assert "tool_call" in system_text
 
     def test_includes_tool_call_id_field(self) -> None:
-        prompts = build_default_prompts()
-        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+        system_text = DEFAULT_PROMPTS.system_prompt(datetime(2026, 4, 29))
 
         assert "tool_call_id" in system_text
 
     def test_preserves_base_assistant_instructions(self) -> None:
-        prompts = build_default_prompts()
-        system_text = prompts.system_prompt(datetime(2026, 4, 29))
+        system_text = DEFAULT_PROMPTS.system_prompt(datetime(2026, 4, 29))
 
         # Base instructions must still be present.
         assert "You are a helpful assistant" in system_text
 
     def test_default_user_message_reminder_includes_exact_quote_markers(self) -> None:
-        prompts = build_default_prompts()
-        user_text = prompts.user_message("How many vacation days do I have?")
+        user_text = DEFAULT_PROMPTS.user_message("How many vacation days do I have?")
 
         assert QUOTE_START_MARKER in user_text
         assert QUOTE_END_MARKER in user_text
         assert "do not use any marker variants" in user_text
 
     def test_default_user_message_reminder_requires_tool_call_fields(self) -> None:
-        prompts = build_default_prompts()
-        user_text = prompts.user_message("How many vacation days do I have?")
+        user_text = DEFAULT_PROMPTS.user_message("How many vacation days do I have?")
 
         assert "kind=tool_call" in user_text
         assert "tool_call_id" in user_text
@@ -80,15 +66,13 @@ class TestBuildDefaultPrompts:
         assert "tool_name" not in user_text or "tool_call_id" in user_text
 
     def test_default_user_message_reminder_disallows_invented_tool_call_ids(self) -> None:
-        prompts = build_default_prompts()
-        user_text = prompts.user_message("How many vacation days do I have?")
+        user_text = DEFAULT_PROMPTS.user_message("How many vacation days do I have?")
 
         assert "Never invent IDs" in user_text
         assert "If the exact ID is not visible, emit no marker" in user_text
 
     def test_default_user_message_reminder_encourages_single_marker_per_tool_call(self) -> None:
-        prompts = build_default_prompts()
-        user_text = prompts.user_message("How many vacation days do I have?")
+        user_text = DEFAULT_PROMPTS.user_message("How many vacation days do I have?")
 
         assert "at most one marker per tool call" in user_text
 
@@ -144,7 +128,7 @@ class TestChatPromptProfiles:
 
     def test_small_profile_adds_inline_quote_json_hardening(self) -> None:
         profile = SmallModelPromptProfile()
-        prompts_with_quotes = build_default_prompts()
+        prompts_with_quotes = DEFAULT_PROMPTS
 
         adjusted = profile.adjust_prompts(prompts_with_quotes)
         system_text = adjusted.system_prompt(datetime(2026, 4, 29))

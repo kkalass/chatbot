@@ -15,8 +15,31 @@ from datetime import datetime
 QUOTE_START_MARKER = "<°_quote_°>"
 QUOTE_END_MARKER = "</°_quote_°>"
 
-# System prompt addendum that teaches the model the inline quote marker contract.
-_INLINE_QUOTE_SYSTEM_PROMPT_ADDENDUM = f"""
+
+@dataclass(frozen=True)
+class Prompts:
+    """Immutable prompt configuration injected into :class:`~src.chatbot.app.orchestrator.ChatOrchestrator`.
+
+    Args:
+        system_prompt: Callable that receives the current :class:`~datetime.datetime`
+            and returns the system instruction string.  Accepting ``datetime`` as a
+            parameter ensures the date is evaluated lazily at request time rather
+            than at module import time.
+        user_message: Callable used to format the current user turn for the
+            model call. The formatted variant is never stored in history; it is
+            only used while assembling the per-step ``messages`` list.
+    """
+
+    system_prompt: Callable[[datetime], str] = lambda now: (
+        f"""You are a helpful assistant.
+
+Answer using only information that is available from tools and retrieved documents.
+Do not rely on parametric knowledge when tool-backed evidence is missing.
+If the available evidence is insufficient, say that you do not know.
+When a factual answer requires external data, call the relevant tool before answering.
+
+Today's date is {now.strftime("%Y-%m-%d")}.
+
 ## Inline Citations
 
 Whenever a statement in your answer is supported by a specific search result or
@@ -44,63 +67,31 @@ Concrete example (vacation-days tool):
 Rules:
 - Emit exactly one JSON object per marker block.
 - Only use `tool_call_id`, `source`, and `chunk_id` values that appear verbatim
-    in prior assistant tool calls and tool results already present in the conversation context.
+  in prior assistant tool calls and tool results already present in the conversation context.
 - Never invent IDs (no timestamps, suffixes, prefixes, or reformatted variants).
 - If an exact `tool_call_id` is not visible in conversation context, do not emit a marker.
 - Optional fields: `claim` and `quote_text` (search_result only).
 - Do not emit markers for unsupported, inferred, or uncertain claims.
 - Keep all normal user-facing answer text outside the markers."""
+    )
 
-
-@dataclass(frozen=True)
-class Prompts:
-    """Immutable prompt configuration injected into :class:`~src.chatbot.app.orchestrator.ChatOrchestrator`.
-
-    Args:
-        system_prompt: Callable that receives the current :class:`~datetime.datetime`
-            and returns the system instruction string.  Accepting ``datetime`` as a
-            parameter ensures the date is evaluated lazily at request time rather
-            than at module import time.
-        user_message: Callable used to format the current user turn for the
-            model call. The formatted variant is never stored in history; it is
-            only used while assembling the per-step ``messages`` list.
-    """
-
-    system_prompt: Callable[[datetime], str]
     user_message: Callable[[str], str] = lambda user_text: (
-        "Reminder: when your answer uses search results or tool outputs, emit "
-        "inline citation markers immediately after the supported claims. Use "
-        "exactly the marker tokens <°_quote_°> and </°_quote_°>; do not use "
-        "any marker variants. For search-backed claims, include kind, "
-        "tool_call_id, source, and chunk_id. For tool-backed claims, include "
-        "only kind=tool_call and tool_call_id. Copy tool_call_id, source, and "
-        "chunk_id exactly from prior assistant tool calls and tool results already "
-        "present in the conversation context. Never invent IDs or append suffixes. "
-        "If the exact ID is not visible, emit no marker. Emit at most one marker per "
-        "tool call - multiple "
-        "statements backed by the same tool call share one marker."
-        "\n\n"
-        "The actual user message is:\n\n"
-        f"{user_text}\n\n"
+        f"""Reminder: when your answer uses search results or tool outputs, emit
+inline citation markers immediately after the supported claims. Use
+exactly the marker tokens {QUOTE_START_MARKER} and {QUOTE_END_MARKER}; do not use any marker variants.
+For search-backed claims, include kind,
+tool_call_id, source, and chunk_id. For tool-backed claims, include
+only kind=tool_call and tool_call_id. Copy tool_call_id, source, and
+chunk_id exactly from prior assistant tool calls and tool results already
+present in the conversation context. Never invent IDs or append suffixes.
+If the exact ID is not visible, emit no marker. Emit at most one marker per tool call -
+multiple statements backed by the same tool call share one marker.
+
+The actual user message is:
+
+{user_text}
+"""
     )
 
 
-def _base_system_prompt(now: datetime) -> str:
-    return f"""You are a helpful assistant.
-
-Answer using only information that is available from tools and retrieved documents.
-Do not rely on parametric knowledge when tool-backed evidence is missing.
-If the available evidence is insufficient, say that you do not know.
-When a factual answer requires external data, call the relevant tool before answering.
-
-Today's date is {now.strftime("%Y-%m-%d")}."""
-
-
-DEFAULT_PROMPTS = Prompts(
-    system_prompt=lambda now: _base_system_prompt(now) + _INLINE_QUOTE_SYSTEM_PROMPT_ADDENDUM,
-)
-
-
-def build_default_prompts() -> Prompts:
-    """Return the default prompt set for the inline-quote-only architecture."""
-    return DEFAULT_PROMPTS
+DEFAULT_PROMPTS = Prompts()

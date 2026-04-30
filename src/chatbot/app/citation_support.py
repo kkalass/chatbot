@@ -3,7 +3,7 @@
 import json
 import re
 from collections.abc import Sequence
-from typing import cast
+from typing import assert_never, cast
 
 from src.chatbot.app.protocols import (
     ChatMessage,
@@ -25,10 +25,14 @@ def build_canonical_key(quote: Quote) -> str:
     - Search: ``search:<tool_call_id>:<source>:<chunk_id>``
     - Tool:   ``tool:<tool_call_id>:<tool_name>:<output_path>``
     """
-    if isinstance(quote, SearchResultQuote):
-        return f"search:{quote.tool_call_id}:{quote.source}:{quote.chunk_id}"
-    # ToolCallQuote — keyed only on call_id so all quotes for the same call deduplicate
-    return f"tool:{quote.tool_call_id}"
+    match quote:
+        case SearchResultQuote():
+            return f"search:{quote.tool_call_id}:{quote.source}:{quote.chunk_id}"
+        case ToolCallQuote():
+            # ToolCallQuote — keyed only on call_id so all quotes for the same call deduplicate
+            return f"tool:{quote.tool_call_id}"
+        case _:
+            assert_never(quote)
 
 
 def validate_search_quote(

@@ -20,7 +20,7 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.orchestrator import ChatOrchestrator
-from src.chatbot.app.prompts import build_default_prompts
+from src.chatbot.app.prompts import DEFAULT_PROMPTS
 from src.chatbot.app.protocols import (
     ProcessEvent,
     QuoteReferenceEvent,
@@ -202,7 +202,7 @@ def _build_orchestrator() -> ChatOrchestrator:
         model=chat_model,
         tools=tools,
         prompt_profile=prompt_profile,
-        prompts=build_default_prompts(),
+        prompts=DEFAULT_PROMPTS,
     )
 
 
