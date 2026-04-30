@@ -1,8 +1,10 @@
 """Unit tests for tracing helpers."""
 
+import pytest
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 
 from src.chatbot.app.protocols import ChatMessage, SourceChunk, ToolCallInfo, ToolSchema
+from src.chatbot.observability import tracing as tracing_module
 from src.chatbot.observability.openinference import (
     build_document,
     build_input_attributes,
@@ -15,7 +17,132 @@ from src.chatbot.observability.openinference import (
     build_tool_call,
     build_tool_execution_attributes,
 )
-from src.chatbot.observability.tracing import to_attribute_text
+from src.chatbot.observability.tracing import configure_tracing, to_attribute_text
+
+
+def _reset_tracing_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing_module, "_tracing_configured", False)
+    monkeypatch.setattr(tracing_module, "_haystack_instrumented", False)
+
+
+def test_configure_tracing_adds_jaeger_exporter_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _reset_tracing_state(monkeypatch)
+    register_calls: dict[str, object] = {}
+    added_processors: list[tuple[object, bool]] = []
+
+    class FakeProvider:
+        def add_span_processor(
+            self,
+            processor: object,
+            *,
+            replace_default_processor: bool = True,
+        ) -> None:
+            added_processors.append((processor, replace_default_processor))
+
+    provider = FakeProvider()
+
+    def fake_register(**kwargs: object) -> FakeProvider:
+        register_calls.update(kwargs)
+        return provider
+
+    class FakeJaegerExporter:
+        def __init__(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+
+    def fake_build_jaeger_exporter(endpoint: str) -> FakeJaegerExporter:
+        return FakeJaegerExporter(endpoint)
+
+    class FakeHaystackInstrumentor:
+        def instrument(self, *, tracer_provider: object) -> None:
+            assert tracer_provider is provider
+
+    def fake_batch_span_processor(exporter: object) -> object:
+        return exporter
+
+    monkeypatch.setattr(tracing_module, "register", fake_register)
+    monkeypatch.setattr(
+        tracing_module,
+        "build_jaeger_exporter",
+        fake_build_jaeger_exporter,
+    )
+    monkeypatch.setattr(tracing_module, "BatchSpanProcessor", fake_batch_span_processor)
+    monkeypatch.setattr(tracing_module, "HaystackInstrumentor", lambda: FakeHaystackInstrumentor())
+
+    configure_tracing(
+        enabled=True,
+        service_name="chatbot",
+        project_name="chatbot-local",
+        deployment_environment="development",
+        phoenix_otlp_endpoint="http://localhost:6006/v1/traces",
+        phoenix_export=True,
+        jaeger_otlp_endpoint="http://localhost:4318/v1/traces",
+        jaeger_export=True,
+        sample_rate=1.0,
+        console_export=False,
+        auto_instrument_haystack=True,
+    )
+
+    assert register_calls["endpoint"] == "http://localhost:6006/v1/traces"
+    assert len(added_processors) == 1
+    jaeger_exporter, replace_default_processor = added_processors[0]
+    assert isinstance(jaeger_exporter, FakeJaegerExporter)
+    assert jaeger_exporter.endpoint == "http://localhost:4318/v1/traces"
+    assert replace_default_processor is False
+
+
+def test_build_jaeger_exporter_uses_http_for_v1_traces_endpoint() -> None:
+    exporter = tracing_module.build_jaeger_exporter("http://localhost:4318/v1/traces")
+
+    assert isinstance(exporter, tracing_module.HttpOTLPSpanExporter)
+
+
+def test_build_jaeger_exporter_uses_grpc_for_non_http_trace_endpoint() -> None:
+    exporter = tracing_module.build_jaeger_exporter("http://localhost:4317")
+
+    assert isinstance(exporter, tracing_module.GrpcOTLPSpanExporter)
+
+
+def test_configure_tracing_skips_phoenix_register_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _reset_tracing_state(monkeypatch)
+    set_provider_calls: list[object] = []
+
+    class FakeProvider:
+        def __init__(self, *, resource: object, sampler: object) -> None:
+            self.resource = resource
+            self.sampler = sampler
+
+        def add_span_processor(self, processor: object) -> None:
+            return None
+
+    def fail_register(**kwargs: object) -> object:
+        raise AssertionError("register should not be called when Phoenix export is disabled")
+
+    def fake_set_tracer_provider(provider: object) -> None:
+        set_provider_calls.append(provider)
+
+    monkeypatch.setattr(tracing_module, "register", fail_register)
+    monkeypatch.setattr(tracing_module, "TracerProvider", FakeProvider)
+    monkeypatch.setattr(tracing_module.trace, "set_tracer_provider", fake_set_tracer_provider)
+
+    configure_tracing(
+        enabled=True,
+        service_name="chatbot",
+        project_name="chatbot-local",
+        deployment_environment="development",
+        phoenix_otlp_endpoint="http://localhost:6006/v1/traces",
+        phoenix_export=False,
+        jaeger_otlp_endpoint="http://localhost:4318/v1/traces",
+        jaeger_export=False,
+        sample_rate=1.0,
+        console_export=False,
+        auto_instrument_haystack=False,
+    )
+
+    assert len(set_provider_calls) == 1
 
 
 def test_to_attribute_text_serializes_non_string_values() -> None:

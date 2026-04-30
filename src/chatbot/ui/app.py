@@ -65,7 +65,10 @@ configure_tracing(
     service_name=_settings.otel_service_name,
     project_name=_settings.phoenix_project_name,
     deployment_environment=_settings.otel_deployment_environment,
-    otlp_endpoint=_settings.otel_exporter_otlp_endpoint,
+    phoenix_otlp_endpoint=_settings.otel_phoenix_otlp_endpoint,
+    phoenix_export=_settings.otel_export_phoenix,
+    jaeger_otlp_endpoint=_settings.otel_jaeger_otlp_endpoint,
+    jaeger_export=_settings.otel_export_jaeger,
     sample_rate=_settings.otel_sample_rate,
     console_export=_settings.otel_console_export,
     auto_instrument_haystack=_settings.otel_auto_instrument_haystack,
@@ -292,7 +295,9 @@ async def on_message(message: cl.Message) -> None:
 
             await response.update()
 
-        trace_final_response_text = response.content if response is not None else "".join(emitted_chunks)
+        trace_final_response_text = (
+            response.content if response is not None else "".join(emitted_chunks)
+        )
         _trace_response(
             span=span,
             final_response_text=trace_final_response_text,

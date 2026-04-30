@@ -111,9 +111,21 @@ class Settings(BaseSettings):
         default="development",
         description="OpenTelemetry deployment environment resource attribute.",
     )
-    otel_exporter_otlp_endpoint: str = Field(
+    otel_phoenix_otlp_endpoint: str = Field(
         default="http://localhost:6006/v1/traces",
-        description="OTLP/HTTP trace endpoint.",
+        description="Phoenix OTLP/HTTP trace endpoint.",
+    )
+    otel_export_phoenix: bool = Field(
+        default=True,
+        description="Export traces to Phoenix when tracing is enabled.",
+    )
+    otel_export_jaeger: bool = Field(
+        default=True,
+        description="Export traces to Jaeger when tracing is enabled.",
+    )
+    otel_jaeger_otlp_endpoint: str = Field(
+        default="http://localhost:4318/v1/traces",
+        description="Jaeger OTLP endpoint. OTLP/HTTP (e.g. http://localhost:4318/v1/traces) is the default; non-/v1/traces endpoints use gRPC mode.",
     )
     otel_sample_rate: float = Field(
         default=1.0,

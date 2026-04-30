@@ -55,7 +55,10 @@ Key variables (all have sensible defaults):
 | `LOG_FORMAT` | `console` | `console` (dev) or `json` (CI/prod) |
 | `OTEL_ENABLED` | `false` | Enables OpenTelemetry tracing export |
 | `OTEL_SERVICE_NAME` | `chatbot` | Trace resource service name |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318/v1/traces` | OTLP/HTTP trace endpoint |
+| `OTEL_PHOENIX_OTLP_ENDPOINT` | `http://localhost:6006/v1/traces` | Phoenix OTLP/HTTP trace endpoint |
+| `OTEL_EXPORT_PHOENIX` | `true` | Enables Phoenix export when `OTEL_ENABLED=true` |
+| `OTEL_EXPORT_JAEGER` | `true` | Enables Jaeger export when `OTEL_ENABLED=true` |
+| `OTEL_JAEGER_OTLP_ENDPOINT` | `http://localhost:4318/v1/traces` | Jaeger OTLP endpoint (HTTP default; non-`/v1/traces` endpoints use gRPC mode) |
 | `OTEL_SAMPLE_RATE` | `1.0` | Root trace sampling ratio (`0.0` to `1.0`) |
 | `OTEL_CONSOLE_EXPORT` | `false` | Also print spans to stdout |
 
@@ -103,7 +106,7 @@ Opens a chat interface at `http://localhost:8000` by default.
 
 ---
 
-## Local Tracing (OpenTelemetry + Arize Phoenix)
+## Local Tracing (OpenTelemetry + Arize Phoenix + Jaeger)
 
 This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, orchestrator rounds, model call, retrieval tool, citation tool, and Qdrant retrieval).
 
@@ -115,17 +118,64 @@ uv tool run --from arize-phoenix python -m phoenix.server.main serve
 
 Phoenix UI: <http://localhost:6006>
 
-### 2. Enable tracing in `.env`
+### 2. Start local Jaeger
+
+```bash
+docker run --rm --name jaeger \
+  -e COLLECTOR_OTLP_ENABLED=true \
+  -e COLLECTOR_OTLP_GRPC_HOST_PORT=0.0.0.0:4317 \
+  -e COLLECTOR_OTLP_HTTP_HOST_PORT=0.0.0.0:4318 \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:1.59
+```
+
+Jaeger UI: <http://localhost:16686>
+
+### 3. Enable tracing in `.env`
+
+For a standard local setup, only this is required:
 
 ```bash
 OTEL_ENABLED=true
+```
+
+All other tracing variables already have sensible defaults. In this project, Jaeger defaults to OTLP/HTTP (`/v1/traces`). Set them only when you want to override targets or behavior.
+
+Optional overrides:
+
+```bash
 OTEL_SERVICE_NAME=chatbot
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006/v1/traces
+OTEL_PHOENIX_OTLP_ENDPOINT=http://localhost:6006/v1/traces
+OTEL_EXPORT_PHOENIX=true
+OTEL_EXPORT_JAEGER=true
+OTEL_JAEGER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
 OTEL_SAMPLE_RATE=1.0
 OTEL_CONSOLE_EXPORT=false
 ```
 
-### 3. Start chatbot and generate traffic
+Optional Jaeger OTLP gRPC mode:
+
+```bash
+OTEL_JAEGER_OTLP_ENDPOINT=localhost:4317
+```
+
+Use gRPC mode only when port `4317` is reachable from the app process.
+
+With `OTEL_ENABLED=true`, both exports are enabled by default. You can disable either backend independently:
+
+```bash
+# Phoenix only
+OTEL_EXPORT_PHOENIX=true
+OTEL_EXPORT_JAEGER=false
+
+# Jaeger only
+OTEL_EXPORT_PHOENIX=false
+OTEL_EXPORT_JAEGER=true
+```
+
+### 4. Start chatbot and generate traffic
 
 ```bash
 ./chatbot.sh
@@ -133,7 +183,9 @@ OTEL_CONSOLE_EXPORT=false
 
 Ask one or two questions in Chainlit, then open <http://localhost:6006> and inspect traces for service `chatbot`.
 
-### 4. What you should see in traces
+You can inspect the same traces in Phoenix (<http://localhost:6006>) and Jaeger (<http://localhost:16686>) when both exporters are enabled.
+
+### 5. What you should see in traces
 
 - Root UI span for each message (`chat.ui.on_message`)
 - Orchestrator spans (`chat.orchestrator.process_message`, `chat.orchestrator.round`)
@@ -141,7 +193,7 @@ Ask one or two questions in Chainlit, then open <http://localhost:6006> and insp
 - Tool spans (`chat.tool.search_documents`, `chat.tool.cite_sources`)
 - Retriever span (`chat.retriever.qdrant.retrieve`) with top-k result preview
 
-### 4.1 Tracing Schema (Ownership Rules)
+### 5.1 Tracing Schema (Ownership Rules)
 
 Tracing follows a strict ownership model so each span level contributes one readable view only:
 
@@ -153,11 +205,17 @@ Tracing follows a strict ownership model so each span level contributes one read
 
 Canonical span names are centralized in `src/chatbot/observability/schema.py` and should be reused instead of hard-coded string literals.
 
-### 5. Troubleshooting
+### 6. Troubleshooting
 
 - No traces in Phoenix:
   - Verify Phoenix is running on `http://localhost:6006`.
-  - Verify `OTEL_ENABLED=true` and endpoint matches `http://localhost:6006/v1/traces`.
+  - Verify `OTEL_ENABLED=true`, `OTEL_EXPORT_PHOENIX=true`, and endpoint matches `http://localhost:6006/v1/traces`.
+- No traces in Jaeger:
+  - Verify Jaeger is running with OTLP enabled (`COLLECTOR_OTLP_ENABLED=true`).
+  - Verify Jaeger OTLP receivers are bound to all interfaces (`0.0.0.0`) when running in Docker.
+  - For default OTLP/HTTP mode, verify endpoint is `http://localhost:4318/v1/traces`.
+  - For gRPC mode, verify port mapping includes `-p 4317:4317` and endpoint is `localhost:4317`.
+  - Verify `OTEL_ENABLED=true` and `OTEL_EXPORT_JAEGER=true`.
   - Set `OTEL_CONSOLE_EXPORT=true` temporarily to confirm spans are produced.
 - Too many traces:
   - Lower `OTEL_SAMPLE_RATE`, e.g. `0.2`.

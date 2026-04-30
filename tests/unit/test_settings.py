@@ -21,7 +21,10 @@ class TestSettingsDefaults:
                 "LOG_FORMAT",
                 "PHOENIX_PROJECT_NAME",
                 "OTEL_DEPLOYMENT_ENVIRONMENT",
-                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "OTEL_PHOENIX_OTLP_ENDPOINT",
+                "OTEL_EXPORT_PHOENIX",
+                "OTEL_EXPORT_JAEGER",
+                "OTEL_JAEGER_OTLP_ENDPOINT",
                 "OTEL_AUTO_INSTRUMENT_HAYSTACK",
                 "MODEL_TEMPERATURE",
                 "MODEL_SEED",
@@ -49,7 +52,10 @@ class TestSettingsDefaults:
         assert settings.log_format == "console"
         assert settings.phoenix_project_name == "chatbot-local"
         assert settings.otel_deployment_environment == "development"
-        assert settings.otel_exporter_otlp_endpoint == "http://localhost:6006/v1/traces"
+        assert settings.otel_phoenix_otlp_endpoint == "http://localhost:6006/v1/traces"
+        assert settings.otel_export_phoenix is True
+        assert settings.otel_export_jaeger is True
+        assert settings.otel_jaeger_otlp_endpoint == "http://localhost:4318/v1/traces"
         assert settings.otel_auto_instrument_haystack is True
         assert settings.model_temperature == 0.0
         assert settings.model_seed == 42
@@ -74,6 +80,10 @@ class TestSettingsDefaults:
             mp.setenv("CHAT_MODEL", "mistral")
             mp.setenv("RETRIEVAL_TOP_K", "10")
             mp.setenv("PHOENIX_PROJECT_NAME", "chatbot-ci")
+            mp.setenv("OTEL_PHOENIX_OTLP_ENDPOINT", "http://localhost:6007/v1/traces")
+            mp.setenv("OTEL_EXPORT_PHOENIX", "false")
+            mp.setenv("OTEL_EXPORT_JAEGER", "true")
+            mp.setenv("OTEL_JAEGER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
             mp.setenv("MODEL_TEMPERATURE", "0.2")
             mp.setenv("MODEL_SEED", "42")
             mp.setenv("EVAL_NAME", "eval-2026-04")
@@ -82,6 +92,10 @@ class TestSettingsDefaults:
             assert settings.chat_model == "mistral"
             assert settings.retrieval_top_k == 10
             assert settings.phoenix_project_name == "chatbot-ci"
+            assert settings.otel_phoenix_otlp_endpoint == "http://localhost:6007/v1/traces"
+            assert settings.otel_export_phoenix is False
+            assert settings.otel_export_jaeger is True
+            assert settings.otel_jaeger_otlp_endpoint == "http://localhost:4318/v1/traces"
             assert settings.model_temperature == 0.2
             assert settings.model_seed == 42
             assert settings.eval_name == "eval-2026-04"
