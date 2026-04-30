@@ -30,7 +30,13 @@ class Prompts:
             only used while assembling the per-step ``messages`` list.
     """
 
-    system_prompt: Callable[[datetime], str] = lambda now: (
+    system_prompt: Callable[[datetime], str]
+
+    user_message: Callable[[str], str]
+
+
+DEFAULT_PROMPTS = Prompts(
+    system_prompt=lambda now: (
         f"""You are a helpful assistant.
 
 Answer using only information that is available from tools and retrieved documents.
@@ -73,9 +79,8 @@ Rules:
 - Optional fields: `claim` and `quote_text` (search_result only).
 - Do not emit markers for unsupported, inferred, or uncertain claims.
 - Keep all normal user-facing answer text outside the markers."""
-    )
-
-    user_message: Callable[[str], str] = lambda user_text: (
+    ),
+    user_message=lambda user_text: (
         f"""Reminder: when your answer uses search results or tool outputs, emit
 inline citation markers immediately after the supported claims. Use
 exactly the marker tokens {QUOTE_START_MARKER} and {QUOTE_END_MARKER}; do not use any marker variants.
@@ -91,7 +96,5 @@ The actual user message is:
 
 {user_text}
 """
-    )
-
-
-DEFAULT_PROMPTS = Prompts()
+    ),
+)

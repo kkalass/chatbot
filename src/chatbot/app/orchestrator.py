@@ -16,6 +16,7 @@ items and emitted as :class:`~src.chatbot.app.protocols.SourceCitationEvent`.
 
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
+from typing import assert_never
 
 import structlog
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
@@ -71,7 +72,12 @@ def _build_step_messages(
     history: list[ChatMessage],
     prompts: Prompts,
 ) -> list[ChatMessage]:
-    """Build one step's model input without mutating persisted history."""
+    """Build one step's model input without mutating persisted history.
+
+    We want the last user message to be enriched with a prompt reminder about quote formatting,
+    but we don't want this to be stored in history because it would be duplicated over and over again,
+    needlessly consume tokens and potentially confuse the model.
+    """
     latest_user_index = next(
         (index for index in range(len(history) - 1, -1, -1) if history[index].role == "user"),
         None,
@@ -98,10 +104,13 @@ def _resolve_quote(
         A ``ToolCallInfo`` (the actual call from history) for a valid ``ToolCallQuote``.
         ``None`` when validation fails.
     """
-    if isinstance(quote, SearchResultQuote):
-        return validate_search_quote(quote, history)  # SourceChunk | None
-    # ToolCallQuote — returns authoritative ToolCallInfo so tool_name cannot be spoofed
-    return validate_tool_call_quote(quote, history)
+    match quote:
+        case SearchResultQuote():
+            return validate_search_quote(quote, history)  # SourceChunk | None
+        case ToolCallQuote():
+            return validate_tool_call_quote(quote, history)  # ToolCallInfo | None
+        case _:
+            assert_never(quote)
 
 
 def _find_tool_result(call_id: str, history: tuple[ChatMessage, ...]) -> JsonObject | None:
@@ -233,6 +242,7 @@ class ChatOrchestrator:
             the model.
         prompt_profile: Model-specific prompt profile. Used once at construction
             time to derive adjusted prompts and adjusted tool schemas.
+        prompts: Custom prompt configuration.  Mainly for testing (including manual tests) - allows to switch between different prompt variants for evaluation purposes.
     """
 
     def __init__(
