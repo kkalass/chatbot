@@ -113,6 +113,18 @@ class ToolCitationEvent:
     result: JsonObject
 
 
+@dataclass(frozen=True)
+class RawAssistantText:
+    """Complete raw assistant text from the model before inline-quote transformation.
+
+    Emitted by wrapper chat models that transform inline quote markers into
+    structured items. Consumers use this payload for conversation-history
+    persistence, while user-facing streaming still uses transformed text/events.
+    """
+
+    text: str
+
+
 class SearchResultQuote(BaseModel):
     """Quote emitted for claims grounded in ``search_documents`` output."""
 
@@ -160,7 +172,7 @@ type ToolEvent = SourceCitationEvent | ToolCitationEvent
 type ProcessEvent = str | ToolEvent | QuoteReferenceEvent
 
 
-type ChatStreamItem = str | list[ToolCallInfo] | Quote
+type ChatStreamItem = str | list[ToolCallInfo] | Quote | RawAssistantText
 
 
 @dataclass(frozen=True)
@@ -218,7 +230,8 @@ class ChatModel(Protocol):
     requests tool calls instead of a text response, a single
     ``list[ToolCallInfo]`` is yielded as the final item; otherwise the stream
     ends after the text chunks. Quote items may also be yielded when a model
-    wrapper extracts structured quote payloads from inline markers.
+    wrapper extracts structured quote payloads from inline markers. Wrappers may
+    additionally emit :class:`RawAssistantText` for history persistence.
     """
 
     def stream(
@@ -236,7 +249,8 @@ class ChatModel(Protocol):
             ``str`` chunks while the model generates a text response, followed
             by a single ``list[ToolCallInfo]`` if the model chose to invoke
             tools rather than reply with text. ``Quote`` items may appear when
-            inline quote extraction is enabled.
+            inline quote extraction is enabled. ``RawAssistantText`` may appear
+            as an auxiliary payload for persistence.
         """
         ...
 

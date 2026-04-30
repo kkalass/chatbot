@@ -5,7 +5,7 @@ This module provides the default identity implementation used by models that
 require no prompt-level tuning.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from src.chatbot.app.prompts import Prompts
@@ -43,6 +43,35 @@ never as JSON-encoded strings and never as schema metadata.
 Inline citation JSON rules (when emitting quote markers):
 - The JSON inside markers must be a single strict object with no extra fields.
 - Copy tool_call_id, source, and chunk_id values exactly as they
-  appear in tool results — do not paraphrase or abbreviate them."""
+    appear in tool results — do not paraphrase or abbreviate them.
 
-        return Prompts(system_prompt=_system_prompt)
+Tool call rules:
+- NEVER write a tool call as a code block or as JSON in your response text.
+- NEVER describe what you intend to do with a tool instead of doing it.
+- Tool calls must be submitted via the tool-calling API, not written as prose."""
+
+        return replace(prompts, system_prompt=_system_prompt)
+
+
+@dataclass(frozen=True)
+class QwenCoderPromptProfile(SmallModelPromptProfile):
+    """Prompt profile for qwen-coder variants that leak tool-call JSON into text.
+
+    These models often serialise only the arguments object or an incomplete JSON
+    fragment instead of using the native tool-calling channel. The prompt must
+    make the required call shape explicit.
+    """
+
+    def adjust_prompts(self, prompts: Prompts) -> Prompts:
+        base_prompts = super().adjust_prompts(prompts)
+
+        def _system_prompt(now: datetime) -> str:
+            return f"""{base_prompts.system_prompt(now)}
+
+Qwen-coder specific tool-call rules:
+- NEVER output a bare arguments object such as {{"citations": [...]}}.
+- NEVER omit the tool name when calling a tool.
+- If you accidentally express a tool call as JSON text, it must be a single object of the form {{"name": "tool_name", "arguments": {{...}}}}.
+- For the cite_sources tool specifically, the tool name must be exactly "cite_sources" and citations must appear inside the arguments object."""
+
+        return replace(base_prompts, system_prompt=_system_prompt)

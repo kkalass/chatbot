@@ -27,7 +27,8 @@ def build_canonical_key(quote: Quote) -> str:
     """
     match quote:
         case SearchResultQuote():
-            return f"search:{quote.tool_call_id}:{quote.source}:{quote.chunk_id}"
+            normalized_source = _normalize_source_path(quote.source)
+            return f"search:{quote.tool_call_id}:{normalized_source}:{quote.chunk_id}"
         case ToolCallQuote():
             # ToolCallQuote — keyed only on call_id so all quotes for the same call deduplicate
             return f"tool:{quote.tool_call_id}"
@@ -45,7 +46,26 @@ def validate_search_quote(
     ``search_documents`` tool-result message in ``history``.
     """
     chunks = collect_search_chunks(history)
-    return chunks.get((quote.source, quote.chunk_id))
+    exact = chunks.get((quote.source, quote.chunk_id))
+    if exact is not None:
+        return exact
+
+    normalized_source = _normalize_source_path(quote.source)
+    for (source, chunk_id), chunk in chunks.items():
+        if chunk_id != quote.chunk_id:
+            continue
+        if _normalize_source_path(source) == normalized_source:
+            return chunk
+
+    # Last-resort fallback: chunk IDs are content hashes in this project and
+    # therefore globally unique across sources. Accept only a unique match.
+    candidates = [
+        chunk for (_source, chunk_id), chunk in chunks.items() if chunk_id == quote.chunk_id
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return None
 
 
 def validate_tool_call_quote(
@@ -209,6 +229,13 @@ def _json_to_source_chunk(data: dict[str, object]) -> SourceChunk:
         source_url=_opt_str("source_url"),
         page=_opt_str("page"),
     )
+
+
+def _normalize_source_path(source: str) -> str:
+    normalized = source.strip().replace("\\", "/")
+    normalized = normalized.removeprefix("./")
+    normalized = normalized.lstrip("/")
+    return normalized
 
 
 def _truncate_text(text: str, *, max_chars: int) -> str:

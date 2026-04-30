@@ -6,7 +6,12 @@ from src.chatbot.app.protocols import (
     SourceCitationEvent,
     ToolCitationEvent,
 )
-from src.chatbot.ui.app import collect_unique_citation_chunks, collect_unique_tool_citations
+from src.chatbot.ui.app import (
+    collect_unique_citation_chunks,
+    collect_unique_tool_citations,
+    consume_quote_reference_event,
+    consume_text_chunk,
+)
 from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
@@ -238,6 +243,39 @@ class TestQuoteReferenceEventToken:
             for n in range(1, 5)
         ]
         assert tokens == ["[1]", "[2]", "[3]", "[4]"]
+
+
+class TestInlineReferenceRenderingOrder:
+    def test_text_chunk_buffers_trailing_whitespace(self) -> None:
+        tokens, pending = consume_text_chunk("Statement.\n\n", "")
+
+        assert tokens == ["Statement."]
+        assert pending == "\n\n"
+
+    def test_text_chunk_flushes_existing_pending_whitespace_before_new_text(self) -> None:
+        tokens, pending = consume_text_chunk("Next sentence.", "\n")
+
+        assert tokens == ["\n", "Next sentence."]
+        assert pending == ""
+
+    def test_quote_reference_is_emitted_before_pending_whitespace(self) -> None:
+        event = QuoteReferenceEvent(reference_number=3, canonical_key="search:id:src:cid")
+
+        tokens, pending = consume_quote_reference_event(event, "\n\n")
+
+        assert tokens == ["[3]", "\n\n"]
+        assert pending == ""
+
+    def test_whitespace_only_chunks_do_not_flush_before_quote_reference(self) -> None:
+        tokens_1, pending_1 = consume_text_chunk("Statement.\n", "")
+        tokens_2, pending_2 = consume_text_chunk("\n", pending_1)
+        event = QuoteReferenceEvent(reference_number=1, canonical_key="search:id:src:cid")
+        tokens_3, pending_3 = consume_quote_reference_event(event, pending_2)
+
+        assert tokens_1 == ["Statement."]
+        assert tokens_2 == []
+        assert tokens_3 == ["[1]", "\n\n"]
+        assert pending_3 == ""
 
 
 class TestCollectUniqueCitationChunks:

@@ -13,6 +13,7 @@ from src.chatbot.app.protocols import (
     ChatModel,
     ChatStreamItem,
     Quote,
+    RawAssistantText,
     SearchResultQuote,
     ToolCallQuote,
     ToolSchema,
@@ -185,10 +186,12 @@ class InlineQuoteParsingChatModel:
     ) -> AsyncIterator[ChatStreamItem]:
         parser = _InlineQuoteStreamParser(max_quote_block_chars=self._max_quote_block_chars)
         upstream_stream = self._upstream.stream(messages, tools)
+        raw_text_parts: list[str] = []
 
         async def _gen() -> AsyncGenerator[ChatStreamItem, None]:
             async for item in upstream_stream:
                 if isinstance(item, str):
+                    raw_text_parts.append(item)
                     for parsed_item in parser.feed(item):
                         yield parsed_item
                     continue
@@ -199,6 +202,8 @@ class InlineQuoteParsingChatModel:
 
             for parsed_item in parser.finish():
                 yield parsed_item
+
+            yield RawAssistantText(text="".join(raw_text_parts))
 
             span = trace.get_current_span()
             span.set_attribute("quote.parsed.count", parser.parsed_count)

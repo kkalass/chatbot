@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from src.chatbot.app.protocols import (
     ChatMessage,
     ChatStreamItem,
+    RawAssistantText,
     SearchResultQuote,
     ToolCallInfo,
     ToolCallQuote,
@@ -64,6 +65,8 @@ class TestInlineQuoteParsingChatModel:
         assert events[1].kind == "search_result"
         assert events[1].tool_call_id == "search-1"
         assert events[2] == " outro"
+        assert isinstance(events[3], RawAssistantText)
+        assert events[3].text == f"Intro <°_quote_°>{_SEARCH_QUOTE_JSON}</°_quote_°> outro"
 
     async def test_parses_markers_split_across_chunk_boundaries(self) -> None:
         model = InlineQuoteParsingChatModel(
@@ -83,6 +86,7 @@ class TestInlineQuoteParsingChatModel:
         assert events[1].kind == "search_result"
         assert events[1].chunk_id == "chunk-7"
         assert events[2] == " tail"
+        assert isinstance(events[3], RawAssistantText)
 
     async def test_falls_back_to_raw_text_on_malformed_json(self) -> None:
         raw = "Intro <°_quote_°>{not json}</°_quote_°> outro"
@@ -91,7 +95,8 @@ class TestInlineQuoteParsingChatModel:
         events = await _collect(model.stream(messages=[]))
 
         assert "".join(item for item in events if isinstance(item, str)) == raw
-        assert all(isinstance(item, str) for item in events)
+        assert isinstance(events[-1], RawAssistantText)
+        assert events[-1].text == raw
 
     async def test_drops_unclosed_quote_block_at_stream_end(self) -> None:
         raw = f"Intro <°_quote_°>{_SEARCH_QUOTE_JSON}"
@@ -100,7 +105,8 @@ class TestInlineQuoteParsingChatModel:
         events = await _collect(model.stream(messages=[]))
 
         assert "".join(item for item in events if isinstance(item, str)) == "Intro "
-        assert all(isinstance(item, str) for item in events)
+        assert isinstance(events[-1], RawAssistantText)
+        assert events[-1].text == raw
 
     async def test_falls_back_to_raw_text_when_quote_buffer_limit_is_exceeded(self) -> None:
         raw = f"<°_quote_°>{_SEARCH_QUOTE_JSON}</°_quote_°>"
@@ -111,7 +117,7 @@ class TestInlineQuoteParsingChatModel:
 
         events = await _collect(model.stream(messages=[]))
 
-        assert events == [raw]
+        assert events == [raw, RawAssistantText(text=raw)]
 
     async def test_passes_through_tool_calls_after_flushing_pending_text(self) -> None:
         tool_calls = [ToolCallInfo(name="search_documents", arguments={"query": "x"})]
@@ -119,7 +125,7 @@ class TestInlineQuoteParsingChatModel:
 
         events = await _collect(model.stream(messages=[]))
 
-        assert events == ["Hello", tool_calls]
+        assert events == ["Hello", tool_calls, RawAssistantText(text="Hello")]
 
     async def test_parses_tool_call_quote_without_tool_name(self) -> None:
         model = InlineQuoteParsingChatModel(
@@ -136,6 +142,16 @@ class TestInlineQuoteParsingChatModel:
         assert isinstance(events[1], ToolCallQuote)
         assert events[1].tool_call_id == "get_vacation_days"
         assert events[2] == " end"
+        assert isinstance(events[3], RawAssistantText)
+
+    async def test_emits_raw_text_payload_even_without_quote_markers(self) -> None:
+        model = InlineQuoteParsingChatModel(_FakeChatModel(["Plain response."]))
+
+        events = await _collect(model.stream(messages=[]))
+
+        assert "".join(item for item in events if isinstance(item, str)) == "Plain response."
+        assert isinstance(events[-1], RawAssistantText)
+        assert events[-1].text == "Plain response."
 
 
 class TestInlineQuoteStreamParserCounts:

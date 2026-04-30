@@ -11,7 +11,11 @@ from src.chatbot.app.protocols import ChatModel, PromptProfile
 
 from ._inline_quotes import build_inline_quote_parsing_chat_model
 from ._ollama import build_ollama_chat_model
-from ._prompt_profile import DefaultChatPromptProfile, SmallModelPromptProfile
+from ._prompt_profile import (
+    DefaultChatPromptProfile,
+    QwenCoderPromptProfile,
+    SmallModelPromptProfile,
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,8 @@ def build_chat_prompt_profile(config: ChatModelConfig) -> PromptProfile:
     match model_name:
         case name if "llama" in name:
             return SmallModelPromptProfile()
+        case name if "qwen" in name and "coder" in name:
+            return QwenCoderPromptProfile()
         case name if "qwen" in name:
             return SmallModelPromptProfile()
         case _:
@@ -74,6 +80,7 @@ __all__ = [
     "ChatModelConfig",
     "DefaultChatPromptProfile",
     "PromptProfile",
+    "QwenCoderPromptProfile",
     "SmallModelPromptProfile",
     "build_chat_model",
     "build_chat_prompt_profile",

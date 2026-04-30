@@ -10,6 +10,7 @@ from src.chatbot.app.prompts import (
 from src.chatbot.infrastructure.chat import (
     ChatModelConfig,
     DefaultChatPromptProfile,
+    QwenCoderPromptProfile,
     SmallModelPromptProfile,
     build_chat_prompt_profile,
 )
@@ -74,7 +75,7 @@ class TestDefaultPrompts:
     def test_default_user_message_reminder_encourages_single_marker_per_tool_call(self) -> None:
         user_text = DEFAULT_PROMPTS.user_message("How many vacation days do I have?")
 
-        assert "at most one marker per tool call" in user_text
+        assert "one marker\nper sentence, not one per paragraph" in user_text
 
 
 class TestChatPromptProfiles:
@@ -91,6 +92,15 @@ class TestChatPromptProfiles:
         profile = build_chat_prompt_profile(config)
 
         assert isinstance(profile, SmallModelPromptProfile)
+
+    def test_build_chat_prompt_profile_returns_qwen_coder_profile_for_qwen_coder(
+        self,
+    ) -> None:
+        config = ChatModelConfig(base_url="http://localhost:11434", model="qwen2.5-coder:14b")
+
+        profile = build_chat_prompt_profile(config)
+
+        assert isinstance(profile, QwenCoderPromptProfile)
 
     def test_build_chat_prompt_profile_returns_default_for_unknown_model(
         self,
@@ -145,3 +155,16 @@ class TestChatPromptProfiles:
         adjusted = profile.adjust_parameter_schema("search_documents", schema)
 
         assert adjusted == schema
+
+    def test_qwen_coder_profile_requires_explicit_tool_name(self) -> None:
+        profile = QwenCoderPromptProfile()
+
+        adjusted = profile.adjust_prompts(DEFAULT_PROMPTS)
+        system_text = adjusted.system_prompt(datetime(2026, 4, 30))
+
+        assert 'NEVER output a bare arguments object such as {"citations": [...]}' in system_text
+        assert (
+            'must be a single object of the form {"name": "tool_name", "arguments": {...}}'
+            in system_text
+        )
+        assert 'tool name must be exactly "cite_sources"' in system_text

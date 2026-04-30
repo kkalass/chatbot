@@ -14,6 +14,9 @@ plain-text response. Grounding provenance is produced inline from parsed quote
 items and emitted as :class:`~src.chatbot.app.protocols.SourceCitationEvent`.
 """
 
+import html
+import json
+import re
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
 from typing import assert_never
@@ -37,6 +40,7 @@ from src.chatbot.app.protocols import (
     PromptProfile,
     Quote,
     QuoteReferenceEvent,
+    RawAssistantText,
     SearchResultQuote,
     SourceChunk,
     SourceCitationEvent,
@@ -66,6 +70,94 @@ tracer = trace.get_tracer(__name__)
 _MAX_TOOL_STEPS = 10  # safety limit to prevent infinite agentic loops
 
 
+def _tool_call_sequence_signature(tool_calls: list[ToolCallInfo]) -> tuple[tuple[str, str], ...]:
+    """Return a stable signature for a tool-call sequence, excluding backend call IDs.
+
+    We intentionally compare only ``(name, arguments)`` so repeated calls are
+    detected even when the backend emits fresh correlation IDs each step.
+    """
+
+    return tuple(
+        (tc.name, json.dumps(tc.arguments, sort_keys=True, separators=(",", ":")))
+        for tc in tool_calls
+    )
+
+
+def _format_search_chunks_as_markdown(content: JsonObject) -> str:
+    """Render search result chunks as structured XML for model consumption.
+
+    Placing ``chunk_id`` immediately adjacent to its content makes it
+    significantly easier for smaller models to correctly attribute claims to
+    the right chunk rather than picking the first chunk in the list.
+    """
+    from typing import cast
+
+    chunks_raw: object = content.get("chunks")
+    if not isinstance(chunks_raw, list) or not chunks_raw:
+        message: object = content.get("message", "No relevant documents found.")
+        return str(message)
+
+    grouped_by_source: dict[str, list[dict[str, object]]] = {}
+    for raw_chunk in cast(list[object], chunks_raw):
+        if not isinstance(raw_chunk, dict):
+            continue
+        chunk_data = cast(dict[str, object], raw_chunk)
+        source = str(chunk_data.get("source", "unknown"))
+        grouped_by_source.setdefault(source, []).append(chunk_data)
+
+    parts: list[str] = ["<search_results>\n"]
+    for source, source_chunks in grouped_by_source.items():
+        title = source
+        author: str | None = None
+        year: str | None = None
+
+        for chunk_data in source_chunks:
+            raw_title = chunk_data.get("title")
+            if raw_title is not None and str(raw_title).strip():
+                title = str(raw_title).strip()
+                break
+
+        for chunk_data in source_chunks:
+            raw_author = chunk_data.get("author")
+            if raw_author is not None and str(raw_author).strip():
+                author = str(raw_author).strip()
+                break
+
+        for chunk_data in source_chunks:
+            raw_publication_date = chunk_data.get("publication_date")
+            if raw_publication_date is None:
+                continue
+            match = re.search(r"(?:19|20)\d{2}", str(raw_publication_date))
+            if match is not None:
+                year = match.group(0)
+                break
+
+        title_attr = html.escape(title, quote=True)
+        source_attr = html.escape(source, quote=True)
+        year_attr = html.escape(year or "unknown", quote=True)
+        author_attr = html.escape(author or "unknown", quote=True)
+        parts.append(
+            f'  <source title="{title_attr}" source_path="{source_attr}" year="{year_attr}" author="{author_attr}">\n'
+        )
+
+        for chunk_data in source_chunks:
+            chunk_id = str(chunk_data.get("chunk_id", ""))
+            page: object = chunk_data.get("page")
+            content_text = str(chunk_data.get("content", ""))
+            chunk_id_attr = html.escape(chunk_id, quote=True)
+            page_attr = html.escape(str(page), quote=True) if page is not None else "unknown"
+            content_escaped = html.escape(content_text)
+
+            parts.append(f'    <chunk chunk_id="{chunk_id_attr}" page="{page_attr}">\n')
+            parts.append(f"      {content_escaped}\n")
+            parts.append("    </chunk>\n")
+
+        parts.append("  </source>\n")
+
+    parts.append("</search_results>")
+    return "".join(parts)
+
+
 def _build_step_messages(
     *,
     system_text: str,
@@ -74,9 +166,12 @@ def _build_step_messages(
 ) -> list[ChatMessage]:
     """Build one step's model input without mutating persisted history.
 
-    We want the last user message to be enriched with a prompt reminder about quote formatting,
-    but we don't want this to be stored in history because it would be duplicated over and over again,
-    needlessly consume tokens and potentially confuse the model.
+    Two transformations are applied:
+    - The last user message is enriched with a prompt reminder about quote
+      formatting (never stored in history to avoid token bloat).
+        - ``role="tool"`` messages containing search result chunks are rendered as
+            structured XML so that ``chunk_id`` appears directly adjacent to its
+      content, improving citation accuracy for smaller models.
     """
     latest_user_index = next(
         (index for index in range(len(history) - 1, -1, -1) if history[index].role == "user"),
@@ -87,6 +182,19 @@ def _build_step_messages(
         if index == latest_user_index and isinstance(message.content, str):
             step_history.append(
                 ChatMessage(role=message.role, content=prompts.user_message(message.content))
+            )
+            continue
+        if (
+            message.role == "tool"
+            and isinstance(message.content, dict)
+            and "chunks" in message.content
+        ):
+            step_history.append(
+                ChatMessage(
+                    role=message.role,
+                    content=_format_search_chunks_as_markdown(message.content),  # type: ignore[arg-type]
+                    tool_call_id=message.tool_call_id,
+                )
             )
             continue
         step_history.append(message)
@@ -290,6 +398,8 @@ class ChatOrchestrator:
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             emitted_citation_events: list[SourceCitationEvent] = []
             emitted_tool_citation_events: list[ToolCitationEvent] = []
+            fallback_without_tools = False
+            previous_tool_call_signature: tuple[tuple[str, str], ...] | None = None
 
             # Inline-quote tracking.
             quote_dedup: dict[str, int] = {}  # canonical_key -> reference_number
@@ -316,6 +426,7 @@ class ChatOrchestrator:
                     )
                     collected: list[str] = []
                     tool_calls: list[ToolCallInfo] = []
+                    raw_assistant_text: str | None = None
 
                     async for item in model.stream(messages, tools=tool_schemas):
                         if isinstance(item, str):
@@ -323,13 +434,17 @@ class ChatOrchestrator:
                             yield item
                         elif isinstance(item, list):
                             tool_calls.extend(item)
+                        elif isinstance(item, RawAssistantText):
+                            raw_assistant_text = item.text
                         else:
                             quote_detected += 1
                             canonical_key = build_canonical_key(item)
                             if canonical_key in quote_dedup:
                                 quote_duplicate += 1
+                                reference_number = quote_dedup[canonical_key]
+                                collected.append(f"[{reference_number}]")
                                 yield QuoteReferenceEvent(
-                                    reference_number=quote_dedup[canonical_key],
+                                    reference_number=reference_number,
                                     canonical_key=canonical_key,
                                 )
                             else:
@@ -338,6 +453,7 @@ class ChatOrchestrator:
                                     quote_validated += 1
                                     quote_ref_counter += 1
                                     quote_dedup[canonical_key] = quote_ref_counter
+                                    collected.append(f"[{quote_ref_counter}]")
                                     if isinstance(chunk, SourceChunk):
                                         validated_search_chunks.append(chunk)
                                     elif isinstance(item, ToolCallQuote):
@@ -366,7 +482,7 @@ class ChatOrchestrator:
 
                     # If this is the final, text message (e.g. no tool calls)
                     if not tool_calls:
-                        assistant_text = "".join(collected)
+                        assistant_text = raw_assistant_text or "".join(collected)
                         _trace_step_response(
                             span=step_span,
                             collected=collected,
@@ -383,15 +499,27 @@ class ChatOrchestrator:
                         tool_calls=tool_calls,
                     )
 
+                    current_signature = _tool_call_sequence_signature(tool_calls)
+                    if previous_tool_call_signature == current_signature:
+                        logger.warning(
+                            "orchestrator.repeated_tool_calls_detected",
+                            step=step_num,
+                            calls=[tc.name for tc in tool_calls],
+                        )
+                        fallback_without_tools = True
+                        break
+                    previous_tool_call_signature = current_signature
+
                     logger.info(
                         "orchestrator.tool_step",
                         step=step_num,
                         calls=[tc.name for tc in tool_calls],
                     )
+                    assistant_tool_step_text = raw_assistant_text or "".join(collected)
                     history.append(
                         ChatMessage(
                             role="assistant",
-                            content="".join(collected),
+                            content=assistant_tool_step_text,
                             tool_calls=tuple(tool_calls),
                         )
                     )
@@ -408,15 +536,24 @@ class ChatOrchestrator:
             else:
                 # Safety: exceeded max steps — one final response without tools.
                 logger.warning("orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS)
+
+                fallback_without_tools = True
+
+            if fallback_without_tools:
                 system_text = prompts.system_prompt(datetime.now(tz=UTC))
                 messages = [ChatMessage(role="system", content=system_text), *history]
                 final: list[str] = []
+                raw_final_text: str | None = None
                 async for item in model.stream(messages, tools=None):
                     if isinstance(item, str):
                         final.append(item)
                         yield item
+                    elif isinstance(item, RawAssistantText):
+                        raw_final_text = item.text
 
-                history.append(ChatMessage(role="assistant", content="".join(final)))
+                history.append(
+                    ChatMessage(role="assistant", content=raw_final_text or "".join(final))
+                )
 
             # Emit a SourceCitationEvent from validated inline search quotes.
             if validated_search_chunks:

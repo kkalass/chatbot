@@ -10,10 +10,12 @@ from src.chatbot.app.orchestrator import ChatOrchestrator
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
     ChatMessage,
+    ChatStreamItem,
     JsonObject,
     ProcessEvent,
     PromptProfile,
     QuoteReferenceEvent,
+    RawAssistantText,
     SearchResultQuote,
     SourceCitationEvent,
     ToolCallInfo,
@@ -90,6 +92,44 @@ class _FakeTool:
         self.calls.append(dict(args))
         self.contexts.append(context)
         return self.result, list(self.events)
+
+
+class _FakeRawTextChatModel:
+    def __init__(
+        self,
+        turns: list[tuple[list[ChatStreamItem], list[ToolCallInfo]]] | None = None,
+    ) -> None:
+        self.turns = turns or [
+            (["default response", RawAssistantText(text="default response")], [])
+        ]
+        self._turn_idx = 0
+        self.stream_calls: list[list[ChatMessage]] = []
+        self.stream_tools: list[list[ToolSchema] | None] = []
+
+    def stream(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolSchema] | None = None,
+    ) -> AsyncIterator[ChatStreamItem]:
+        self.stream_calls.append(list(messages))
+        self.stream_tools.append(list(tools) if tools is not None else None)
+        idx = min(self._turn_idx, len(self.turns) - 1)
+        self._turn_idx += 1
+        chunks, tool_calls = self.turns[idx]
+        return self._gen(chunks, tool_calls)
+
+    def _gen(
+        self,
+        chunks: list[ChatStreamItem],
+        tool_calls: list[ToolCallInfo],
+    ) -> AsyncIterator[ChatStreamItem]:
+        async def _inner() -> AsyncGenerator[ChatStreamItem, None]:
+            for chunk in chunks:
+                yield chunk
+            if tool_calls:
+                yield tool_calls
+
+        return _inner()
 
 
 class _IdentityPromptProfile(PromptProfile):
@@ -231,6 +271,30 @@ class TestAgenticLoop:
         assert len(user_messages) == 1
         assert user_messages[0].content == "do thing\n\nCite tool-backed claims inline."
 
+    @pytest.mark.asyncio
+    async def test_breaks_to_no_tools_fallback_on_repeated_equivalent_tool_calls(self) -> None:
+        tool = _FakeTool("echo", result={"value": "from_tool"})
+        first = ToolCallInfo(name="echo", arguments={"x": 1}, call_id="c1")
+        repeated = ToolCallInfo(name="echo", arguments={"x": 1}, call_id="c2")
+        model = _FakeChatModel(
+            turns=[
+                ([], [first]),
+                ([], [repeated]),
+                (["Fallback answer."], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        text = await _collect(orchestrator.process_message("do thing"))
+
+        assert text == "Fallback answer."
+        assert tool.calls == [{"x": 1}]
+        assert model.stream_tools[2] is None
+
 
 class TestInlineQuotePipeline:
     def _search_result(self) -> dict[str, object]:
@@ -241,6 +305,9 @@ class TestInlineQuotePipeline:
                     "chunk_id": "c1",
                     "content": "body",
                     "score": 0.9,
+                    "title": "Doc Title",
+                    "author": "A",
+                    "publication_date": "2023-03-10",
                 }
             ]
         }
@@ -310,6 +377,32 @@ class TestInlineQuotePipeline:
         assert not any(isinstance(e, SourceCitationEvent) for e in events)
 
     @pytest.mark.asyncio
+    async def test_search_quote_with_leading_slash_source_is_accepted(self) -> None:
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        quote = SearchResultQuote(
+            claim="claim",
+            tool_call_id="get_search_results",
+            source="/doc.txt",
+            chunk_id="c1",
+        )
+        search_tool = _FakeTool("search_documents", result=self._search_result())
+        model = _FakeChatModel(turns=[([], [search_tc]), (["Answer. ", quote, " end."], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        text, events = await _collect_all(orchestrator.process_message("ask"))
+
+        assert text == "Answer.  end."
+        ref_events = [e for e in events if isinstance(e, QuoteReferenceEvent)]
+        assert len(ref_events) == 1
+        citation_events = [e for e in events if isinstance(e, SourceCitationEvent)]
+        assert len(citation_events) == 1
+        assert citation_events[0].validated[0].source == "doc.txt"
+
+    @pytest.mark.asyncio
     async def test_tool_call_quote_emits_reference_and_tool_citation(self) -> None:
         vacation_tc = ToolCallInfo(name="get_vacation_days", arguments={}, call_id="v1")
         quote = ToolCallQuote(
@@ -352,3 +445,107 @@ class TestInlineQuotePipeline:
         expected_ref = QuoteReferenceEvent(reference_number=1, canonical_key="search:s1:doc.txt:c1")
         inline_events = [e for e in all_events if isinstance(e, (str, QuoteReferenceEvent))]
         assert inline_events == ["before", expected_ref, "after"]
+
+    @pytest.mark.asyncio
+    async def test_follow_up_turn_receives_assistant_history_with_rendered_reference_tokens(
+        self,
+    ) -> None:
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
+        search_tool = _FakeTool("search_documents", result=self._search_result())
+        model = _FakeChatModel(
+            turns=[
+                ([], [search_tc]),
+                (["Answer.", quote], []),
+                (["Follow-up reply."], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        await _collect(orchestrator.process_message("ask"))
+        await _collect(orchestrator.process_message("next"))
+
+        follow_up_messages = model.stream_calls[2]
+        assistant_messages = [
+            message.content
+            for message in follow_up_messages
+            if message.role == "assistant" and isinstance(message.content, str)
+        ]
+        assert "Answer.[1]" in assistant_messages
+
+    @pytest.mark.asyncio
+    async def test_follow_up_turn_prefers_raw_assistant_text_with_quote_markers_in_history(
+        self,
+    ) -> None:
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
+        raw_answer = (
+            "Answer."
+            '<°_quote_°>{"kind":"search_result","tool_call_id":"s1",'
+            '"source":"doc.txt","chunk_id":"c1"}</°_quote_°>'
+        )
+        search_tool = _FakeTool("search_documents", result=self._search_result())
+        model = _FakeRawTextChatModel(
+            turns=[
+                ([], [search_tc]),
+                (["Answer.", quote, RawAssistantText(text=raw_answer)], []),
+                (["Follow-up reply.", RawAssistantText(text="Follow-up reply.")], []),
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        await _collect(orchestrator.process_message("ask"))
+        await _collect(orchestrator.process_message("next"))
+
+        follow_up_messages = model.stream_calls[2]
+        assistant_messages = [
+            message.content
+            for message in follow_up_messages
+            if message.role == "assistant" and isinstance(message.content, str)
+        ]
+        assert raw_answer in assistant_messages
+
+    @pytest.mark.asyncio
+    async def test_search_chunks_are_rendered_as_markdown_for_model(self) -> None:
+        """History keeps original JSON; model sees markdown with chunk_id adjacent to content."""
+        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
+        search_tool = _FakeTool("search_documents", result=self._search_result())
+        model = _FakeChatModel(turns=[([], [search_tc]), (["Reply."], [])])
+        orchestrator = ChatOrchestrator(
+            model,
+            tools=[search_tool],
+            prompt_profile=_IdentityPromptProfile(),
+        )
+
+        await _collect(orchestrator.process_message("ask"))
+
+        # Step 2 messages — model sees markdown, not raw JSON.
+        step2_messages = model.stream_calls[1]
+        tool_msgs = [m for m in step2_messages if m.role == "tool"]
+        assert len(tool_msgs) == 1
+        tool_content = tool_msgs[0].content
+        assert isinstance(tool_content, str), "model should receive str, not dict"
+        assert "<search_results>" in tool_content
+        assert (
+            '<source title="Doc Title" source_path="doc.txt" year="2023" author="A">'
+            in tool_content
+        )
+        assert '<chunk chunk_id="c1" page="unknown">' in tool_content
+        assert "body" in tool_content
+        assert "</search_results>" in tool_content
+        # Original JSON dict must NOT be in the message sent to the model.
+        assert "{" not in tool_content or "chunk_id" in tool_content  # no raw JSON keys
+
+        # History must still carry the original JSON for citation_support.
+        history_tool_msgs = [m for m in orchestrator._history if m.role == "tool"]  # pyright: ignore[reportPrivateUsage]
+        assert len(history_tool_msgs) == 1
+        assert isinstance(history_tool_msgs[0].content, dict)
+        assert "chunks" in history_tool_msgs[0].content

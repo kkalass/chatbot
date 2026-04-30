@@ -48,6 +48,7 @@ from src.chatbot.observability.openinference import (
     using_session_attributes,
 )
 from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
+from src.chatbot.tools.citation.tool import CitationTool
 from src.chatbot.tools.retrieval.tool import RetrievalTool
 from src.chatbot.tools.vacation_days import (
     InteractiveVacationDaysAuthSession,
@@ -132,6 +133,41 @@ def collect_unique_tool_citations(
     return unique_tool_citations
 
 
+def consume_text_chunk(
+    chunk: str,
+    pending_whitespace: str,
+) -> tuple[list[str], str]:
+    """Return stream tokens for a text chunk while buffering trailing whitespace.
+
+    Trailing whitespace is held back so a following ``QuoteReferenceEvent`` can be
+    rendered directly after the preceding sentence without an inserted newline.
+    """
+    stripped = chunk.rstrip(" \t\r\n")
+    if not stripped:
+        # Keep accumulating whitespace until we see either real text or a quote reference.
+        return [], f"{pending_whitespace}{chunk}"
+
+    tokens: list[str] = []
+    if pending_whitespace:
+        tokens.append(pending_whitespace)
+
+    trailing_whitespace = chunk[len(stripped) :]
+    tokens.append(stripped)
+
+    return tokens, trailing_whitespace
+
+
+def consume_quote_reference_event(
+    event: QuoteReferenceEvent,
+    pending_whitespace: str,
+) -> tuple[list[str], str]:
+    """Return stream tokens that place ``[n]`` before pending trailing whitespace."""
+    tokens = [f"[{event.reference_number}]"]
+    if pending_whitespace:
+        tokens.append(pending_whitespace)
+    return tokens, ""
+
+
 def _build_source_elements(unique_chunks: list[SourceChunk]) -> list[cl.Text]:
     """Build sidebar source elements with stable duplicate disambiguation."""
     base_names = [build_citation_name(chunk) for chunk in unique_chunks]
@@ -197,7 +233,8 @@ def _build_orchestrator() -> ChatOrchestrator:
     chat_model = build_chat_model(chat_model_config)
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
-    tools: list[Tool] = [vacation_days_tool, retrieval_tool]
+    citation_tool = CitationTool()
+    tools: list[Tool] = [vacation_days_tool, retrieval_tool, citation_tool]
     return ChatOrchestrator(
         model=chat_model,
         tools=tools,
@@ -311,6 +348,7 @@ async def on_message(message: cl.Message) -> None:
     tool_citation_events: list[ToolCitationEvent] = []
     emitted_chars = 0
     emitted_chunks: list[str] = []
+    pending_whitespace = ""
 
     with (
         using_session_attributes(trace_session),
@@ -323,30 +361,46 @@ async def on_message(message: cl.Message) -> None:
         )
 
         event: ProcessEvent
+
+        async def _stream_response_token(token: str) -> None:
+            nonlocal response, emitted_chars
+            if not token:
+                return
+            emitted_chars += len(token)
+            emitted_chunks.append(token)
+            if response is None:
+                response = cl.Message(content="")
+                await response.send()
+            await response.stream_token(token)
+
         async for event in orchestrator.process_message(user_text):
             match event:
                 case str():
-                    emitted_chars += len(event)
-                    emitted_chunks.append(event)
-                    if response is None:
-                        response = cl.Message(content="")
-                        await response.send()
-                    await response.stream_token(event)
+                    tokens, pending_whitespace = consume_text_chunk(event, pending_whitespace)
+                    for token in tokens:
+                        await _stream_response_token(token)
                 case SourceCitationEvent():
                     citation_events.append(event)
                 case ToolCitationEvent():
                     tool_citation_events.append(event)
                 case QuoteReferenceEvent():
-                    # The model may emit quote markers in a separate paragraph block,
-                    # which would render detached "[n]" lines in the streamed text.
-                    # Keep references in the sources section/sidebar only.
+                    tokens, pending_whitespace = consume_quote_reference_event(
+                        event,
+                        pending_whitespace,
+                    )
+                    for token in tokens:
+                        await _stream_response_token(token)
                     logger.debug(
-                        "session.quote_reference_suppressed",
+                        "session.quote_reference_rendered",
                         reference_number=event.reference_number,
                         canonical_key=event.canonical_key,
                     )
                 case _:
                     assert_never(event)
+
+        if pending_whitespace:
+            await _stream_response_token(pending_whitespace)
+            pending_whitespace = ""
 
         unique_chunks = collect_unique_citation_chunks(citation_events)
         unique_tool_citations = collect_unique_tool_citations(tool_citation_events)
