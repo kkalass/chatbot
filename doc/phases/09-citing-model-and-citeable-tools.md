@@ -53,13 +53,15 @@ form of the citation). This violates SRP in multiple ways. Proposal:
     in which its result is fed back to the model (e.g. as structured XML of
     search result chunks). This moves `_format_search_chunks_as_markdown` from
     the orchestrator into the tool itself.
-  - **Validation + enrichment**: the tool receives a `RawCitation` and the
-    history (i.e. `list[CitationLayerMessage]` as maintained by the `Orchestrator`;
-    each entry carries both the citation-layer metadata and the pre-computed
-    `llm_content`) and returns either `None` (invalid) or a `Citation` with all
-    tool-specific metadata (author, title, year, page, quote text, …). Both
-    decisions are tool-specific — even the structural check "does `chunk_id` X
-    exist in my last result?" requires knowledge of the output schema.
+  - **Validation + enrichment**: the tool receives a `RawCitation` and a
+    narrow read-only `CitationContext` (see §1.4a) and returns either `None`
+    (invalid) or a `Citation` with all tool-specific metadata (author, title,
+    year, page, quote text, …). Both decisions are tool-specific — even the
+    structural check "does `chunk_id` X exist in my last result?" requires
+    knowledge of the output schema. Tools never see the `CitationLayer`'s
+    internal history representation; the `CitationContext` Protocol is the only
+    coupling point and lives in `app/` so `tools/` does not import
+    citation-layer internals.
 - The `CitationLayer` defines the citation format vocabulary as paired typed
   subtypes: a `RawCitation` subtype (produced by the parser from the marker
   JSON, e.g. `DocumentRawCitation`) and a corresponding `Citation` subtype
@@ -102,9 +104,48 @@ The orchestrator holds exclusively a reference to a `CitationLayer` and sees in
 its stream only `text`, `tool_calls`, `Citation`, and `HallucinatedCitation` —
 no raw markers or `RawCitation` objects.
 
-- **`PromptProfile` construction in the model** (decided, see §1.5 and §2.2.d):
-  `make_system_message` internalizes both the `PromptProfile` adjustment and the
-  citation instruction injection; the orchestrator is decoupled from both.
+**Composition (decided).** `CitationLayer` is constructed at composition time
+with an explicit `list[CiteableTool]` plus the inner `ChatModel`. The same
+`CiteableTool` instances are also registered with the `Orchestrator` as regular
+`Tool`s for dispatch — there is one source of truth (the composition root
+builds both lists from the same instances). The `CitationLayer` never inspects
+the orchestrator's tool registry, and the orchestrator never inspects the
+citation registry.
+
+**`PromptProfile` placement (decided).** The `PromptProfile` stays with the
+`Orchestrator` as today — it adjusts both prompts and tool schemas, neither of
+which is a citation concern. Per turn, the orchestrator computes the
+profile-adjusted base system prompt and hands it to
+`citation_layer.make_system_message(adjusted_base_prompt)`. The `CitationLayer`
+appends only citation instructions and is unaware of `PromptProfile`.
+
+### 1.4a `CitationContext`: the only coupling between tools and the citation layer
+
+```python
+@runtime_checkable
+class CitationContext(Protocol):
+    """Read-only, narrow view passed to ``CiteableTool.validate_and_enrich``.
+
+    Defined in ``app/`` so ``tools/`` need not import any citation-layer
+    internals. The default implementation is a thin adapter over the
+    orchestrator's ``list[CitationLayerMessage]``; tests can supply trivial
+    fakes.
+    """
+
+    def tool_result_for(self, tool_call_id: str) -> JsonObject | None:
+        """Return the raw JSON result for a specific prior tool call."""
+        ...
+
+    def tool_results_for(self, tool_name: str) -> Sequence[JsonObject]:
+        """Return all prior tool-result JSON objects emitted by *tool_name*,
+        in chronological (oldest-first) order. Used for fallbacks such as
+        "is this chunk_id globally unique across all my prior results?"."""
+        ...
+```
+
+The `CitationLayer` constructs the context once per validation call from its
+internal history and passes it to the resolved `CiteableTool`. Tools never see
+`CitationLayerMessage` directly.
 
 ### 1.5 Logical history and LLM-side representation
 
@@ -115,24 +156,37 @@ and optional citation-layer metadata alongside it:
 ```python
 @dataclass(frozen=True)
 class CitationLayerAssistantMessage:
-    parts: list[str | Citation | HallucinatedCitation]  # CitationLayer layer: stream order preserved
-    llm_content: str                 # pre-computed: text + raw_marker_text spliced in
+    # Stream-order log of the assistant turn; preserved so raw_marker_text can
+    # be spliced back into ``llm_content`` at the correct positions.
+    parts: list[str | Citation | HallucinatedCitation]
+    # Pre-computed at message creation: plain text with each Citation /
+    # HallucinatedCitation replaced by its original ``raw_marker_text``.
+    # Rationale: feeding the model its own ``[N]`` reference numbers in
+    # subsequent turns proved to confuse it (observed during Phase 7); the raw
+    # marker block is the form the model itself produced and works reliably.
+    llm_content: str
 
 @dataclass(frozen=True)
 class CitationLayerToolMessage:
     tool_call_id: str
-    tool_name: str                   # CitationLayer layer: stored by make_tool_message for routing
-    result: JsonObject               # CitationLayer layer: raw JSON for validate_and_enrich
-    llm_content: str                 # pre-computed: CiteableTool.format_for_history(result)
-                                     #   or default JSON serialisation for non-CiteableTools
+    tool_name: str                   # stored by make_tool_message for later routing
+    result: JsonObject               # raw JSON for validate_and_enrich
+    # Pre-computed: ``CiteableTool.format_for_history(result)`` if the tool is
+    # a ``CiteableTool``, else default JSON serialisation.
+    llm_content: str
 
 @dataclass(frozen=True)
 class CitationLayerUserMessage:
-    llm_content: str                 # pre-computed: citation reminder injected + Prompts.user_message(user_text)
+    # Pre-computed: citation reminder + ``Prompts.user_message(user_text)``,
+    # in the same order and form as today's combined output (see §1.5a).
+    llm_content: str
 
 @dataclass(frozen=True)
 class CitationLayerSystemMessage:
-    llm_content: str                 # pre-computed: base_prompt + PromptProfile adjustment + citation instructions injected
+    # Pre-computed: the *already profile-adjusted* base prompt supplied by the
+    # orchestrator, with citation instructions appended. The CitationLayer is
+    # unaware of ``PromptProfile``.
+    llm_content: str
 
 CitationLayerMessage = (
     CitationLayerAssistantMessage
@@ -145,44 +199,71 @@ CitationLayerMessage = (
 `CitationLayerAssistantMessage.parts` preserves the exact order in which text
 chunks, `Citation`s, and `HallucinatedCitation`s arrived in the stream — only this allows
 `raw_marker_text` to be spliced back in at the correct positions when computing
-`llm_content`.
+`llm_content`. **`HallucinatedCitation.raw_marker_text` is also spliced back into
+`llm_content`** (decided): keeping the assistant's own marker text in subsequent
+turns is consistent with how validated `Citation`s are handled and matches
+today's behavior. If this turns out to reinforce hallucinations in practice, it
+can be revisited — explicitly out of scope for this refactor.
 
 The `CitationLayer` acts as the **factory** for these messages, exposing four
 creation methods the orchestrator calls directly:
 
-- `make_tool_message(tool: Tool, result: JsonObject) -> CitationLayerToolMessage`:
-  stores `tool.name` in the message for later routing, checks internally whether
-  `tool` is a `CiteableTool` and calls `tool.format_for_history(result)` to
-  compute `llm_content`; falls back to default JSON serialisation for
-  non-`CiteableTool`s. The orchestrator never checks tool type itself.
+- `make_tool_message(tool_call_id: str, tool_name: str, result: JsonObject) -> CitationLayerToolMessage`:
+  looks up `tool_name` in the `CitationLayer`'s `CiteableTool` registry; if
+  found, calls `format_for_history(result)` to compute `llm_content`,
+  otherwise falls back to default JSON serialisation. The orchestrator passes
+  primitives only and never holds a `CiteableTool` reference for this purpose.
 - `make_assistant_message(parts: list[str | Citation | HallucinatedCitation]) -> CitationLayerAssistantMessage`:
-  splices `raw_marker_text` from each `Citation` or `HallucinatedCitation` back into the text at the
-  correct position to compute `llm_content`.
-- `make_system_message(base_prompt: str) -> CitationLayerSystemMessage`:
-  internally applies the `PromptProfile` adjustment, then injects citation
-  instructions (marker directives + per-tool cite fragments) to produce
-  `llm_content`. The orchestrator supplies the raw base prompt; the `CitationLayer`
-  owns the entire augmentation chain.
-- `make_user_message(user_text: str) -> CitationLayerUserMessage`:
-  injects the citation reminder (marker tokens, per-sentence rules, `!UNBELEGT!`
-  obligation) and then delegates to `Prompts.user_message(user_text)` for any
-  application-level framing. `Prompts.user_message` is a pure pass-through by
-  default; model-specific configurations may add further wrapping without
-  touching citation concerns.
+  splices `raw_marker_text` from each `Citation` or `HallucinatedCitation` back
+  into the text at the correct position to compute `llm_content`.
+- `make_system_message(adjusted_base_prompt: str) -> CitationLayerSystemMessage`:
+  receives an *already profile-adjusted* base prompt from the orchestrator and
+  appends citation instructions (marker directives + per-tool cite fragments)
+  to produce `llm_content`. The `CitationLayer` is unaware of `PromptProfile`;
+  the orchestrator continues to own profile adjustment for prompts and tool
+  schemas alike.
+- `make_user_message(user_text: str) -> CitationLayerUserMessage`: see §1.5a.
 
 When delegating to the inner `ChatModel`, the `CitationLayer` builds the
 `list[ChatMessage]` trivially from `[msg.llm_content for msg in history]` — no
 separate transformation pass or cache needed, since `llm_content` is
 pre-computed at message creation time.
 
+### 1.5a `make_user_message`: behavior-preserving ordering
+
+Goal of this refactor is **clean separation of concerns, not a behavior
+change**. Today's `Prompts.user_message` produces `<reminder text> + user_text`
+in a single string. After the refactor:
+
+- `Prompts.user_message` becomes a pure pass-through by default (returns
+  `user_text` unchanged); it remains a hook for application-level framing only.
+- `CitationLayer.make_user_message(user_text)` produces
+  `<reminder text> + Prompts.user_message(user_text)` — the reminder block is
+  identical in content and position to today's, and `Prompts.user_message` no
+  longer carries citation concerns. End-to-end the wire format equals today's.
+
+Any model-specific framing later added to `Prompts.user_message` will wrap the
+user text *without* duplicating the citation reminder.
+
+### 1.5b Validation runs per `RawCitation`, dedup happens in the orchestrator
+
+Decided: the `CitationLayer` calls `validate_and_enrich` for every parsed
+`RawCitation`, even when the model emits the same marker repeatedly. The
+orchestrator deduplicates `Citation`s by canonical key when assigning
+`ref_number`. Trade-off: a small amount of redundant validation work in
+exchange for keeping the citation layer simple (no canonical-key knowledge,
+no cross-tool dedup policy). Currently `validate_and_enrich` is
+local/in-memory work; if a future `CiteableTool` performs expensive
+validation (e.g. network calls), it should cache internally.
+
 ### 1.6 Data flow sketch (one turn iteration)
 
 ```
 Orchestrator (history: list[CitationLayerMessage])
   CitationLayerAssistantMessage(parts=[str, Citation, ...], llm_content=...)
-  CitationLayerToolMessage(tool_call_id, result=json, llm_content=formatted)
-  CitationLayerSystemMessage(llm_content=...)  # via citation_layer.make_system_message(base)
-  CitationLayerUserMessage(llm_content=...)    # via citation_layer.make_user_message(prompts.user_message(user_text))
+  CitationLayerToolMessage(tool_call_id, tool_name, result, llm_content)
+  CitationLayerSystemMessage(llm_content)  # citation_layer.make_system_message(profile_adjusted_base_prompt)
+  CitationLayerUserMessage(llm_content)    # citation_layer.make_user_message(user_text)
      │
      │ stream(history, ...)
      ▼
@@ -196,8 +277,9 @@ CitationLayer
   CitationLayer stream processing:
   ├─ text (markers stripped)   → yield to Orchestrator  (UI sees no markers)
   ├─ tool_calls                → yield to Orchestrator
-  └─ parsed RawCitation        → CiteableTool.validate_and_enrich(raw, history)
-       (raw_marker_text kept)    → Citation: yield Citation to Orchestrator
+  └─ parsed RawCitation        → CiteableTool.validate_and_enrich(raw, ctx)
+       (raw_marker_text kept)    where ctx is a CitationContext built from history
+                                 → Citation: yield Citation to Orchestrator
                                  → None:    yield HallucinatedCitation(raw, reason) to Orchestrator
      ▼
 Orchestrator
@@ -206,7 +288,7 @@ Orchestrator
   │                         → yield NumberedCitation to UI; accumulate in parts
   ├─ HallucinatedCitation → yield to UI as-is; accumulate in parts
   └─ tool_calls    → execute tool
-                     → citation_layer.make_tool_message(tool, result)
+                     → citation_layer.make_tool_message(tc.call_id, tc.name, result)
                      → append CitationLayerToolMessage to history
   end of turn → citation_layer.make_assistant_message(accumulated_parts)
               → append CitationLayerAssistantMessage to history
@@ -217,135 +299,101 @@ UI (app.py)
   └─ build citation list / side-panel from NumberedCitation events
 ```
 
----
+## 2. Test Migration Plan
 
-## 2. Assessment & Recommendations
+Goal: preserve current behavior coverage while moving each test to the layer
+that now owns the responsibility under test. No coverage regression.
 
-### 2.1 Clear wins
+### 2.1 Files to delete
 
-1. **Cleanup of `cite_sources` and the `ToolEvent` list**: straightforwardly
-   the right call. Neither has proven its worth; YAGNI applies. This simplifies
-   `Tool.execute` to return `JsonObject` and removes the entire `ToolEvent`
-   union along with its routing code in the orchestrator.
+- `tests/unit/test_citation_tool.py` — the `cite_sources` tool is removed (§1.1).
+  Any still-relevant assertions (e.g. "validation rejects unknown chunk_id")
+  migrate to `test_citeable_retrieval_tool.py` (§2.3).
 
-2. **Extracting quote logic from `Prompts` into a `CitationLayer`**: yes. The
-   marker tokens, quote schema, streaming parser, and related prompt fragments
-   form a cohesive concern. They belong behind an interface that encapsulates
-   them. `Prompts` becomes a lean application-level configuration object.
+### 2.2 Files to rename / refocus
 
-3. **Extracting search-result formatting (`_format_search_chunks_as_markdown`)
-   from the orchestrator**: yes. This is clearly `search_documents`-specific
-   and has no business in the orchestrator.
+- `tests/unit/test_inline_quote_parser.py` →
+  `tests/unit/test_citation_layer_parser.py`. Same parser cases (marker
+  detection, partial chunks across feeds, malformed JSON, oversized blocks);
+  the parser is now an internal of the `CitationLayer` rather than a standalone
+  chat-model wrapper. Tests target the streaming parse function, not the
+  wrapper class.
+- `tests/unit/test_quote_models.py` →
+  `tests/unit/test_raw_citation_models.py`. `SearchResultQuote`/`ToolCallQuote`
+  become `DocumentRawCitation`/`ToolRawCitation`. Field-validation tests carry
+  over 1:1 with the renamed classes.
+- `tests/unit/test_orchestrator.py` — keep the file, narrow its scope to:
+  tool-call dispatch loop, repeat-call detection, max-step fallback, and
+  `Citation → NumberedCitation` numbering (new vs. reuse). Move all
+  validation-of-quotes-against-history assertions out (see §2.3, §2.4).
+- `tests/unit/test_ui_citation_view.py` — update to consume
+  `NumberedCitation` and `HallucinatedCitation` instead of
+  `QuoteReferenceEvent` + `SourceCitationEvent`/`ToolCitationEvent`. Add cases
+  for the UI's `HallucinatedCitation` rendering decision (default: hide; assert
+  no placeholder unless explicitly enabled).
+- `tests/unit/test_chat_prompt_profiles.py` — unchanged. `PromptProfile`
+  remains an orchestrator concern (§1.4).
 
-### 2.2 Points of friction / recommendations
+### 2.3 New test files (per-tool citation behavior)
 
-#### a) Numbering ownership — decided
+One file per `CiteableTool`, exercising its three citation responsibilities in
+isolation against a fake `CitationContext`:
 
-**Decided.** The `Orchestrator` owns the numbering: it converts each incoming
-`Citation` to a `NumberedCitation`, assigning a new `ref_number` on first
-occurrence and reusing the existing one for duplicates (same `Citation`
-identity/equality). It yields `NumberedCitation` events in stream order — no
-placeholder tokens or position indices needed. The UI (app.py) renders `[N]`
-inline at each `NumberedCitation` position in the stream and builds the citation
-list and side panel from the `NumberedCitation` events.
+- `tests/unit/test_citeable_retrieval_tool.py`
+  - `cite_instructions()` returns the expected `RawCitation` subtype and field
+    mapping; the rendered prompt fragment matches a golden string.
+  - `format_for_history()` produces the same XML output as today's
+    `_format_search_chunks_as_markdown` (golden file from current behavior).
+  - `validate_and_enrich()`: positive cases (exact match,
+    normalized-source match, globally-unique chunk_id fallback) and negative
+    cases (unknown source, unknown chunk_id, ambiguous chunk_id), all driven
+    by a `FakeCitationContext`.
+- `tests/unit/test_citeable_vacation_days_tool.py`
+  - Same three responsibilities; the validation reduces to "matching
+    `tool_call_id` exists".
 
-#### b) Validation **and** enrichment in `CiteableTool` (revised)
+### 2.4 New test files (citation-layer end-to-end)
 
-An earlier version proposed placing validation in a generic `CitationValidator`
-alongside the `CitationLayer`. The argument does not hold: even the structural
-question "does `chunk_id` X exist in the result of `tool_call_id` Y?" requires
-knowledge of the tool output schema. A generic validator would have to either
-guess the schema or have the tool declare it — both are roundabouts for something
-trivial inside the tool. There is also no reusable validation core in the
-current code that would be DRY across tool boundaries.
+- `tests/unit/test_citation_layer.py` — drives `CitationLayer` against a fake
+  `ChatModel` and a small set of `CiteableTool`s:
+  - System-prompt augmentation: assemble fragments from registered tools and
+    inject after the orchestrator-supplied (already profile-adjusted) base.
+  - Streaming: text chunks pass through marker-free; `RawCitation` is parsed
+    and routed to the correct `CiteableTool` by `tool_name` resolved from the
+    `CitationLayerToolMessage` matching `tool_call_id`.
+  - Validation outcomes: success → `Citation` event; failure → `HallucinatedCitation`
+    with rejection reason; **duplicate raw markers re-trigger validation**
+    (documenting §1.5b).
+  - Factory methods: `make_tool_message` falls back to JSON serialization for
+    non-`CiteableTool` names; `make_assistant_message` splices
+    `raw_marker_text` for both `Citation` and `HallucinatedCitation`;
+    `make_user_message` reproduces today's reminder ordering byte-for-byte
+    against a golden string (§1.5a).
+- `tests/unit/test_citation_context.py` — the default `CitationContext`
+  adapter over `list[CitationLayerMessage]`:
+  - `tool_result_for(call_id)` returns the matching tool message's `result`
+    or `None`.
+  - `tool_results_for(tool_name)` returns chronological order across multiple
+    turns.
 
-**Design**:
-- `CiteableTool.validate_and_enrich(raw_citation, history) -> Citation | None`
-  is **the** citation method of the tool. It decides both validity and the shape
-  of the enriched citation.
-- The `CitationLayer` handles routing: it looks up the `CitationLayerToolMessage`
-  with matching `tool_call_id` in the history, reads `tool_name`, resolves the
-  `CiteableTool` from the tool registry by name, calls the method; forwards a `Citation` on success or a
-  `HallucinatedCitation` (carrying the `RawCitation` and rejection reason) on
-  failure.
-- If a shared implementation base emerges later (e.g. multiple search tools with
-  an identical chunk schema), a `BaseChunkCiteableTool` can be introduced as a
-  pure implementation-reuse vehicle — without changing the interface.
+### 2.5 Integration test
 
-#### c) `CitationLayer` must **not** mutate the history passed to the inner model
+- `tests/integration/test_rag.py` — keep as the behavioral baseline. Add one
+  assertion that a deliberately fabricated `chunk_id` in the model output
+  surfaces as a `HallucinatedCitation` event (instead of being silently
+  dropped, as today). The happy path's wire-format output to the UI must
+  remain identical to current behavior.
 
-This is a hard line. Since the `CiteableTool` renders its own result in the
-desired format, there is no reason for the `CitationLayer` to alter history
-entries after the fact. History is a single source of truth; post-hoc mutation
-has proven to be a source of subtle bugs in this codebase.
-**Recommendation**: record this explicitly as a design invariant.
+### 2.6 Coverage diff (informal checklist)
 
-#### d) `PromptProfile` construction in the model
-
-**Decided.** The reasoning:
-- `PromptProfile` is a *model-specific* strategy; instantiating it at the same
-  site as the model is consistent (the model knows best what it needs).
-- With `make_system_message` the `CitationLayer` internalizes both the
-  `PromptProfile` adjustment and citation instruction injection — the orchestrator
-  no longer holds any explicit profile reference.
-- **Recommendation**: move `PromptProfile` construction into the model. With
-  `make_system_message` and `make_user_message` internalizing all citation
-  injection, the orchestrator calls only
-  `model.make_system_message(prompts.system_prompt(now))` and
-  `model.make_user_message(prompts.user_message(user_text))` — no external
-  `adjust_prompts` call needed.
-
-#### e) Slimming down `ChatStreamItem` union
-
-Today the stream carries `str | list[ToolCallInfo] | Quote | RawAssistantText`.
-With the new design:
-- `RawAssistantText` exists only because the orchestrator needs the raw text to
-  reconstruct the history entry. With the `CitationLayer` providing
-  `make_assistant_message(parts)`, the orchestrator simply passes the accumulated
-  `list[str | Citation | HallucinatedCitation]` parts at end of turn — `RawAssistantText` can be
-  removed from the stream contract entirely.
-- `Quote` (now `RawCitation`) remains — it is the central new item type.
-
-#### f) Naming
-
-- `QuotingModel` vs. `CitationLayer`: **`CitationLayer`** is clearer (quote = verbatim
-  excerpt; citation = attributed reference — we are doing the latter).
-- `Quote` → `RawCitation`, `validated chunk` → `Citation`,
-  `validated chunk with ref number` → `NumberedCitation`. Unifies vocabulary
-  across the entire codebase.
-
-#### g) Suggested implementation order
-
-1. Remove `cite_sources` tool; clean up tests and references.
-2. Reduce `Tool.execute` return type to `JsonObject`; remove the `ToolEvent`
-   union and all related code.
-3. Introduce `CiteableTool` protocol (`cite_instructions`, `format_for_history`,
-   `validate_and_enrich`); migrate `search_documents`; move
-   `_format_search_chunks_as_markdown` into the tool.
-4. Introduce `CitationLayer`; move quote markers, parser, and quote prompt fragments
-   there; remove citation content from `Prompts`.
-5. `CitationLayer`: routing `RawCitation` → responsible `CiteableTool` via
-   `tool_call_id`/history; call `validate_and_enrich` and yield `Citation`.
-6. Introduce `CitationLayerMessage` types and `CitationLayer` factory methods
-   (`make_tool_message`, `make_assistant_message`, `make_system_message`,
-   `make_user_message`); internalize `PromptProfile` and citation reminder into
-   the model; migrate orchestrator to build history from these; remove
-   `RawAssistantText` from the stream.
-7. Orchestrator converts `Citation` → `NumberedCitation` (assign/reuse
-   `ref_number`); UI (app.py) renders `[N]` inline and builds citation list.
-Each step is independently testable and does not change observable behaviour.
-
-### 2.3 Risks / points that need discussion before implementation
-
-1. **Who owns the tool map?** Since the `CitationLayer` performs Raw→`Citation`
-   transformation, it needs read access to the tool map and history. This is a
-   deliberate coupling of the `CitationLayer` to the tool space and should be
-   modelled as an explicit contract (e.g. via a slim `CiteResolutionPort`, not a
-   direct orchestrator dependency).
-### 2.4 Recommended design in one sentence
-
-> `CiteableTool` renders, describes, validates, and enriches its own citations;
-> `CitationLayer` encapsulates quote markers, parsing, prompts, and the
-> Raw→`Citation` transformation via `CiteableTool`; the `Orchestrator`
-> orchestrates tool execution, manages history, and converts `Citation` →
-> `NumberedCitation`; the UI renders `[N]` markers and the citation list.
+| Behavior under test                          | Today                          | After refactor                         |
+|---------------------------------------------|--------------------------------|----------------------------------------|
+| Marker stream parsing                        | `test_inline_quote_parser.py`  | `test_citation_layer_parser.py`        |
+| Quote payload schema validation              | `test_quote_models.py`         | `test_raw_citation_models.py`          |
+| Search-quote validation against history      | `test_orchestrator.py` (mixed) | `test_citeable_retrieval_tool.py`      |
+| Tool-quote validation against history        | `test_orchestrator.py` (mixed) | `test_citeable_vacation_days_tool.py`  |
+| Numbering / dedup of validated citations     | `test_orchestrator.py`         | `test_orchestrator.py` (kept, narrowed)|
+| Tool-output formatting for model history     | implicit in orchestrator tests | `test_citeable_retrieval_tool.py`      |
+| System-prompt assembly                        | `test_chat_prompt_profiles.py` | unchanged + `test_citation_layer.py`   |
+| Hallucinated citations surfaced              | (none — silently dropped)      | `test_citation_layer.py` + integration |
+| UI rendering of references and side panel    | `test_ui_citation_view.py`     | `test_ui_citation_view.py` (updated)   |
