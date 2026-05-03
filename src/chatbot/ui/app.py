@@ -146,11 +146,12 @@ def _format_citation_marker(
     nc: NumberedCitation,
     pending_whitespace: str,
 ) -> tuple[list[str], str]:
-    """Return stream tokens that place ``[n]`` before pending trailing whitespace."""
-    tokens = [f"[{nc.reference_number}]"]
-    if pending_whitespace:
-        tokens.append(pending_whitespace)
-    return tokens, ""
+    """Return a ``[n]`` token while keeping trailing whitespace buffered.
+
+    This avoids inserting blank lines between consecutive citation references
+    when the model emits multiple marker blocks separated by newlines.
+    """
+    return [f"[{nc.reference_number}]"], pending_whitespace
 
 
 def _build_side_elements(unique: list[NumberedCitation]) -> list[cl.Text]:
