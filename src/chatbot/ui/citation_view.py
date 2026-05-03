@@ -20,8 +20,9 @@ from src.chatbot.app.citation import (
 # -- Display labels ------------------------------------------------------
 
 
-def build_citation_name(citation: Citation) -> str:
-    """Compact element label."""
+def build_citation_name(numbered: NumberedCitation) -> str:
+    """Compact side-panel label."""
+    citation = numbered.citation
     match citation:
         case DocumentCitation():
             name = _document_display_title(citation)
@@ -32,8 +33,9 @@ def build_citation_name(citation: Citation) -> str:
             return f"Tool: {citation.tool_name}"
 
 
-def build_citation_content(citation: Citation) -> str:
+def build_citation_content(numbered: NumberedCitation) -> str:
     """Structured Markdown for a side-panel element."""
+    citation = numbered.citation
     match citation:
         case DocumentCitation():
             return _build_document_content(citation)

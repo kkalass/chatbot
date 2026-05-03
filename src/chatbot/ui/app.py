@@ -151,7 +151,7 @@ def consume_numbered_citation(
 
 def _build_side_elements(unique: list[NumberedCitation]) -> list[cl.Text]:
     """Build sidebar elements with stable duplicate-label disambiguation."""
-    base_names = [build_citation_name(nc.citation) for nc in unique]
+    base_names = [build_citation_name(nc) for nc in unique]
     total_counts = Counter(base_names)
     seen_counts: defaultdict[str, int] = defaultdict(int)
     elements: list[cl.Text] = []
@@ -163,7 +163,7 @@ def _build_side_elements(unique: list[NumberedCitation]) -> list[cl.Text]:
         elements.append(
             cl.Text(
                 name=display_name,
-                content=build_citation_content(nc.citation),
+                content=build_citation_content(nc),
                 display="side",
             )
         )

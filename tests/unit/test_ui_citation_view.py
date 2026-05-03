@@ -39,14 +39,22 @@ def _doc(
 
 class TestBuildCitationName:
     def test_uses_title_when_present(self) -> None:
-        assert build_citation_name(_doc(title="My Doc")) == "My Doc"
+        citation = NumberedCitation(reference_number=3, citation=_doc(title="My Doc"))
+        assert build_citation_name(citation) == "My Doc"
 
     def test_appends_page_when_present(self) -> None:
-        assert build_citation_name(_doc(title="T", page="42")) == "T (p. 42)"
+        citation = NumberedCitation(reference_number=3, citation=_doc(title="T", page="42"))
+        assert build_citation_name(citation) == "T (p. 42)"
 
     def test_falls_back_to_author_date_then_source(self) -> None:
-        assert build_citation_name(_doc(author="A", publication_date="2024")) == "A - 2024"
-        assert build_citation_name(_doc(source="x.md")) == "x.md"
+        citation = NumberedCitation(
+            reference_number=3,
+            citation=_doc(author="A", publication_date="2024"),
+        )
+        assert build_citation_name(citation) == "A - 2024"
+
+        citation = NumberedCitation(reference_number=4, citation=_doc(source="x.md"))
+        assert build_citation_name(citation) == "x.md"
 
     def test_tool_citation_uses_tool_name(self) -> None:
         cit = ToolCitation(
@@ -55,19 +63,27 @@ class TestBuildCitationName:
             tool_name="get_vacation_days",
             result={"days": 30},
         )
-        assert build_citation_name(cit) == "Tool: get_vacation_days"
+        numbered = NumberedCitation(reference_number=2, citation=cit)
+        assert build_citation_name(numbered) == "Tool: get_vacation_days"
 
 
 class TestBuildCitationContent:
     def test_document_includes_excerpt(self) -> None:
-        rendered = build_citation_content(_doc(title="T", content="hello world"))
+        rendered = build_citation_content(
+            NumberedCitation(reference_number=3, citation=_doc(title="T", content="hello world"))
+        )
         assert "### T" in rendered
         assert "hello world" in rendered
         assert "**Excerpt**" in rendered
 
     def test_document_with_url_renders_markdown_link(self) -> None:
-        rendered = build_citation_content(_doc(title="T", source_url="https://e.com/d"))
-        assert "[T](https://e.com/d)" in rendered
+        rendered = build_citation_content(
+            NumberedCitation(
+                reference_number=3,
+                citation=_doc(title="T", source_url="https://e.com/d"),
+            )
+        )
+        assert "### [T](https://e.com/d)" in rendered
 
     def test_tool_citation_renders_property_list(self) -> None:
         cit = ToolCitation(
@@ -76,7 +92,7 @@ class TestBuildCitationContent:
             tool_name="get_vacation_days",
             result={"total_days": 30, "remaining_days": 20},
         )
-        rendered = build_citation_content(cit)
+        rendered = build_citation_content(NumberedCitation(reference_number=2, citation=cit))
         assert "### get_vacation_days" in rendered
         assert "**total_days:** 30" in rendered
         assert "**remaining_days:** 20" in rendered
