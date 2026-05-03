@@ -183,6 +183,7 @@ class _CitationNumberer:
         self._ref_counter: int = 0
         self.validated: int = 0
         self.duplicate: int = 0
+        self.hallucinated: int = 0
 
     def assign(self, item: Citation) -> NumberedCitation:
         key = canonical_key(item)
@@ -292,13 +293,17 @@ class ChatOrchestrator:
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             previous_tool_call_signature: tuple[tuple[str, str], ...] | None = None
-            fallback_without_tools = False
-
+            last_step = False
             numberer = _CitationNumberer()
-            hallucinated_count = 0
 
-            for step_num in range(_MAX_TOOL_STEPS):
+            for step_num in range(_MAX_TOOL_STEPS + 1):
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:
+                    # Force a final no-tools step once the safety limit is reached.
+                    if not last_step and step_num == _MAX_TOOL_STEPS:
+                        logger.warning("orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS)
+                        last_step = True
+
+                    effective_tools = None if last_step else tool_schemas
                     system_msg = citation_layer.make_system_message(
                         prompts.system_prompt(datetime.now(tz=UTC))
                     )
@@ -306,7 +311,7 @@ class ChatOrchestrator:
                         span=step_span,
                         step_num=step_num,
                         history_size=1 + len(history),
-                        tool_schemas=tool_schemas,
+                        tool_schemas=effective_tools,
                     )
 
                     parts: list[str | Citation | HallucinatedCitation | UnsubstantiatedClaim] = []
@@ -314,7 +319,7 @@ class ChatOrchestrator:
                     text_chars = 0
 
                     async for item in citation_layer.stream(
-                        [system_msg, *history], tools=tool_schemas
+                        [system_msg, *history], tools=effective_tools
                     ):
                         match item:
                             case str():
@@ -322,9 +327,11 @@ class ChatOrchestrator:
                                 parts.append(item)
                                 yield item
                             case list():
-                                tool_calls.extend(item)
+                                if not last_step:
+                                    tool_calls.extend(item)
+                                # else: no tools advertised — defensively ignore any spurious calls.
                             case HallucinatedCitation():
-                                hallucinated_count += 1
+                                numberer.hallucinated += 1
                                 parts.append(item)
                                 yield item
                             case UnsubstantiatedClaim():
@@ -338,23 +345,21 @@ class ChatOrchestrator:
                                 assert_never(item)
 
                     assistant_message = citation_layer.make_assistant_message(
-                        parts, tool_calls=tool_calls
+                        parts, tool_calls=None if last_step else tool_calls
                     )
-
                     _trace_step_response(
                         span=step_span,
                         text_chars=text_chars,
                         tool_calls=tool_calls,
                         assistant_text=assistant_message.llm_content,
                     )
-
-                    # Persist the assistant turn in any case so the model can see it,
                     history.append(assistant_message)
 
-                    if not tool_calls:
+                    # A text-only response or the forced final step terminates the loop.
+                    if not tool_calls or last_step:
                         break
 
-                    # Detect if the model is stuck in a loop and bail out.
+                    # Detect if the model is stuck in a loop and trigger a final no-tools step.
                     current_signature = _tool_call_sequence_signature(tool_calls)
                     if previous_tool_call_signature == current_signature:
                         logger.warning(
@@ -362,60 +367,26 @@ class ChatOrchestrator:
                             step=step_num,
                             calls=[tc.name for tc in tool_calls],
                         )
-                        fallback_without_tools = True
-                        break
+                        last_step = True
+                        continue
                     previous_tool_call_signature = current_signature
 
-                    # All good - we can call the tools and continue to the next step.
+                    # All good — dispatch tools and continue to the next step.
                     logger.info(
                         "orchestrator.tool_step",
                         step=step_num,
                         calls=[tc.name for tc in tool_calls],
                     )
-
                     for tc in tool_calls:
                         result = await _dispatch(tc, tool_map)
                         history.append(
                             citation_layer.make_tool_message(tc.call_id, tc.name, result)
                         )
-            else:
-                # Safety: exceeded max steps — one final response without tools.
-                logger.warning("orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS)
-                fallback_without_tools = True
-
-            if fallback_without_tools:
-                # This ensures that the LLM will respond with some plain text eventually.
-                system_msg = citation_layer.make_system_message(
-                    prompts.system_prompt(datetime.now(tz=UTC))
-                )
-                parts = []
-                async for item in citation_layer.stream([system_msg, *history], tools=None):
-                    match item:
-                        case str():
-                            parts.append(item)
-                            yield item
-                        case list():
-                            # No tools advertised — defensively ignore any spurious calls.
-                            pass
-                        case HallucinatedCitation():
-                            hallucinated_count += 1
-                            parts.append(item)
-                            yield item
-                        case UnsubstantiatedClaim():
-                            parts.append(item)
-                            yield item
-                        case DocumentCitation() | ToolCitation():
-                            numbered = numberer.assign(item)
-                            parts.append(item)
-                            yield numbered
-                        case _:
-                            assert_never(item)
-                history.append(citation_layer.make_assistant_message(parts, tool_calls=None))
 
             _trace_citation_counts(
                 validated=numberer.validated,
                 duplicate=numberer.duplicate,
-                hallucinated=hallucinated_count,
+                hallucinated=numberer.hallucinated,
             )
 
         return _gen()
