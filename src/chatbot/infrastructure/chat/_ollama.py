@@ -300,6 +300,8 @@ class OllamaChatModel:
                 tool_calls: list[ToolCallInfo] = []
                 # Buffer used when the first content chunk starts with '{' — the model
                 # may be emitting a text-encoded tool call instead of using tool_calls.
+                # Only active when parse_text_tool_calls=True (opt-in, model-specific).
+                parse_text_tool_calls = self._parse_text_tool_calls
                 text_tool_call_buffer: list[str] | None = None
                 try:
                     async for chunk in response_stream:
@@ -309,8 +311,10 @@ class OllamaChatModel:
                             if text_tool_call_buffer is not None:
                                 # Already in buffering mode — keep collecting.
                                 text_tool_call_buffer.append(content)
-                            elif not trace_response_text_parts and _looks_like_text_tool_call_start(
-                                content
+                            elif (
+                                parse_text_tool_calls
+                                and not trace_response_text_parts
+                                and _looks_like_text_tool_call_start(content)
                             ):
                                 # First content chunk looks like JSON — enter buffering mode.
                                 text_tool_call_buffer = [content]
