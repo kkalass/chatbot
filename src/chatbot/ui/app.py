@@ -22,7 +22,6 @@ from opentelemetry.trace import StatusCode
 from src.chatbot.app.citation import (
     Citation,
     CitationLayer,
-    CiteableTool,
     DocumentCitation,
     HallucinatedCitation,
     NumberedCitation,
@@ -208,9 +207,9 @@ def _build_orchestrator() -> ChatOrchestrator:
     chat_model = build_chat_model(chat_model_config)
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
-    citeable_tools: list[CiteableTool] = [vacation_days_tool, retrieval_tool]
+    citeable_tools = [retrieval_tool]
     citation_layer = CitationLayer(chat_model, citeable_tools=citeable_tools)
-    tools: list[Tool] = list(citeable_tools)
+    tools: list[Tool] = [vacation_days_tool, retrieval_tool]
     return ChatOrchestrator(
         citation_layer=citation_layer,
         tools=tools,

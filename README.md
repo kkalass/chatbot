@@ -293,11 +293,11 @@ src/
   settings/     Shared pydantic-settings configuration (Settings + get_settings)
   chatbot/      Chatbot application
     app/          Orchestrator, protocols, prompts
-      citation/   CitationLayer, CiteableTool protocol, models, parser, context
+      citation/   CitationLayer, default tool citation, CiteableTool extension for custom validation
     ui/           Chainlit UI layer and session lifecycle
     tools/        Typed tool schemas and external-service adapters
       retrieval/  Document retrieval tool (CiteableTool)
-      vacation_days/  Vacation-days lookup tool (CiteableTool)
+      vacation_days/  Vacation-days lookup tool
     infrastructure/
       chat/       Ollama chat model adapter
       embeddings_text/  Query-time text embedder

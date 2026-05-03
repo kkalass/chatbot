@@ -2,11 +2,11 @@
 
 Three responsibilities:
 1. Augment the system prompt with citation instructions assembled from the
-   registered ``CiteableTool``s.
+    default tool-call contract plus registered ``CiteableTool`` specializations.
 2. Parse marker blocks from the inner model's text stream into typed
    :class:`RawCitation`\\ s.
-3. Validate each parsed ``RawCitation`` against the responsible
-   ``CiteableTool`` and yield :class:`Citation` (success) or
+3. Validate each parsed ``RawCitation`` via default tool-call handling or
+    specialized ``CiteableTool`` logic and yield :class:`Citation` (success) or
    :class:`HallucinatedCitation` (failure) to the caller.
 
 The orchestrator depends on ``CitationLayer`` (not on the underlying
@@ -26,7 +26,7 @@ from src.chatbot.app.citation._parser import (
     CitationStreamParser,
 )
 from src.chatbot.app.citation.citeable_tool import CiteableTool
-from src.chatbot.app.citation.context import build_citation_context
+from src.chatbot.app.citation.context import CitationContext, build_citation_context
 from src.chatbot.app.citation.messages import (
     CitationLayerAssistantMessage,
     CitationLayerMessage,
@@ -41,6 +41,7 @@ from src.chatbot.app.citation.models import (
     DocumentRawCitation,
     HallucinatedCitation,
     RawCitation,
+    ToolCitation,
     ToolRawCitation,
 )
 from src.chatbot.app.protocols import (
@@ -57,7 +58,8 @@ type CitationLayerStreamItem = str | list[ToolCallInfo] | Citation | Hallucinate
 
 
 _REASON_NO_TOOL_CALL = "no prior tool call with that tool_call_id"
-_REASON_TOOL_NOT_CITEABLE = "tool is not registered as a CiteableTool"
+_REASON_NO_TOOL_RESULT = "no prior tool result with that tool_call_id"
+_REASON_DOCUMENT_TOOL_NOT_CITEABLE = "document citations require a registered CiteableTool"
 _REASON_TOOL_REJECTED = "validate_and_enrich returned None"
 
 
@@ -77,6 +79,22 @@ prior tool result supports the immediately preceding sentence.
 
 Per-tool citation formats:
 """
+
+_DEFAULT_TOOL_CALL_FRAGMENT = f"""### Generic tool result citation
+
+When a sentence is grounded in the result of any tool call, emit
+immediately after that sentence a marker block of the form:
+
+    {QUOTE_START_MARKER}{{"kind":"tool_call","tool_call_id":"<id>"}}{QUOTE_END_MARKER}
+
+Required fields (all strings, copied **verbatim** from the conversation
+context):
+    - kind: must be the literal string "tool_call"
+    - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
+        that produced the supporting tool result
+
+Do not invent IDs. If the exact `tool_call_id` is not visible in the
+conversation context, do not emit a marker for that sentence."""
 
 _CITATION_GENERAL_RULES = """
 
@@ -163,15 +181,13 @@ class CitationLayer:
     """Citation decorator around a :class:`~src.chatbot.app.protocols.ChatModel`.
 
     Composition: instantiate once per session with the inner ``ChatModel`` and
-    the explicit list of ``CiteableTool``s. The same ``CiteableTool`` instances
-    are also passed to the orchestrator's tool registry so that tool dispatch
-    and citation validation share a single source of truth.
+    the explicit list of ``CiteableTool``s that need custom behavior.
 
     Args:
         model: Inner chat model that produces text and tool calls; must not
             interpret marker tokens itself.
-        citeable_tools: All ``CiteableTool``s whose results may be cited by
-            the model. Names must be unique.
+        citeable_tools: ``CiteableTool``s requiring custom citation behavior.
+            Names must be unique.
         max_quote_block_chars: Safety limit on a single marker block so a
             runaway model cannot exhaust memory.
     """
@@ -198,11 +214,10 @@ class CitationLayer:
 
     def make_system_message(self, adjusted_base_prompt: str) -> CitationLayerSystemMessage:
         """Append citation instructions to the orchestrator-supplied base prompt."""
-        fragments = [
+        fragments = [_DEFAULT_TOOL_CALL_FRAGMENT]
+        fragments.extend(
             tool.cite_instructions().prompt_fragment for tool in self._tools_by_name.values()
-        ]
-        if not fragments:
-            return CitationLayerSystemMessage(llm_content=adjusted_base_prompt)
+        )
         joined_fragments = "\n\n".join(fragments)
         citation_section = f"{_CITATION_HEADER}\n{joined_fragments}{_CITATION_GENERAL_RULES}"
         return CitationLayerSystemMessage(
@@ -318,19 +333,31 @@ def _validate(
     raw: RawCitation,
     tool_call_lookup: dict[str, str],
     tools_by_name: dict[str, CiteableTool],
-    ctx: object,
+    ctx: CitationContext,
 ) -> Citation | HallucinatedCitation:
-    """Resolve the responsible CiteableTool and run its validation."""
+    """Resolve the responsible tool and validate by specialized or default rules."""
     tool_call_id = _tool_call_id_of(raw)
     tool_name = tool_call_lookup.get(tool_call_id)
     if tool_name is None:
         return HallucinatedCitation(raw=raw, reason=_REASON_NO_TOOL_CALL)
+
+    # Generic tool-call citations are handled centrally by the layer.
+    if isinstance(raw, ToolRawCitation):
+        result = _tool_result_for(ctx, tool_call_id)
+        if result is None:
+            return HallucinatedCitation(raw=raw, reason=_REASON_NO_TOOL_RESULT)
+        return ToolCitation(
+            raw_marker_text=raw.raw_marker_text,
+            tool_call_id=raw.tool_call_id,
+            tool_name=tool_name,
+            result=result,
+        )
+
+    assert isinstance(raw, DocumentRawCitation)
     tool = tools_by_name.get(tool_name)
     if tool is None:
-        return HallucinatedCitation(raw=raw, reason=_REASON_TOOL_NOT_CITEABLE)
-    # ctx typed as object to keep import boundary minimal here; CiteableTool
-    # accepts any structural CitationContext.
-    citation = tool.validate_and_enrich(raw, ctx)  # type: ignore[arg-type]
+        return HallucinatedCitation(raw=raw, reason=_REASON_DOCUMENT_TOOL_NOT_CITEABLE)
+    citation = tool.validate_and_enrich(raw, ctx)
     if citation is None:
         return HallucinatedCitation(raw=raw, reason=_REASON_TOOL_REJECTED)
     return citation
@@ -344,3 +371,8 @@ def _tool_call_id_of(raw: RawCitation) -> str:
             return raw.tool_call_id
         case _:
             assert_never(raw)
+
+
+def _tool_result_for(ctx: CitationContext, tool_call_id: str) -> JsonObject | None:
+    """Return the prior tool result for *tool_call_id*."""
+    return ctx.tool_result_for(tool_call_id)

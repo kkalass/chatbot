@@ -1,9 +1,9 @@
-"""``CiteableTool`` Protocol — extends ``Tool`` with citation responsibilities.
+"""``CiteableTool`` Protocol — extends ``Tool`` with custom citation behavior.
 
-Tools that may be cited by the model implement this Protocol. The
-:class:`CitationLayer` calls these methods to assemble the citation prompt
-section, format tool results for the model history, and validate model-emitted
-:class:`~src.chatbot.app.citation.models.RawCitation` payloads.
+The :class:`CitationLayer` already supports default ``tool_call`` citations for
+all tools. Implement this Protocol only when a tool needs specialized prompt
+instructions, history rendering, or validation/enrichment logic (for example
+document-level citations with ``source``/``chunk_id``).
 """
 
 from dataclasses import dataclass

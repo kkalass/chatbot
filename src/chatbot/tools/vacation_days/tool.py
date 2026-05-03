@@ -1,27 +1,12 @@
 """VacationDaysTool: bridges the LLM tool-calling contract and the HR adapter.
 
-Implements :class:`~src.chatbot.app.citation.CiteableTool` so that vacation-day
-balances returned by this tool can be cited inline by the model.
-
 Nothing in this module imports ``chainlit`` or any UI module.  All
 session-specific dependencies are injected at construction time.
 """
 
-import json
-
 import structlog
 from pydantic import ValidationError
 
-from src.chatbot.app.citation import (
-    QUOTE_END_MARKER,
-    QUOTE_START_MARKER,
-    CitationContext,
-    CiteInstructions,
-    RawCitation,
-    ToolCitation,
-    ToolRawCitation,
-)
-from src.chatbot.app.citation.models import Citation
 from src.chatbot.app.protocols import JsonObject, ToolSchema
 from src.chatbot.tools.vacation_days.auth import VacationDaysAuth
 from src.chatbot.tools.vacation_days.service import (
@@ -33,23 +18,6 @@ from src.chatbot.tools.vacation_days.service import (
 logger = structlog.get_logger(__name__)
 
 _TOOL_NAME = "get_vacation_days"
-
-
-_CITE_FRAGMENT = f"""### {_TOOL_NAME}
-
-When a sentence is grounded in the result of a `{_TOOL_NAME}` call, emit
-immediately after that sentence a marker block of the form:
-
-  {QUOTE_START_MARKER}{{"kind":"tool_call","tool_call_id":"<id>"}}{QUOTE_END_MARKER}
-
-Required fields (all strings, copied **verbatim** from the conversation
-context):
-  - kind: must be the literal string "tool_call"
-  - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
-    that produced the supporting `{_TOOL_NAME}` result
-
-Do not invent IDs. If the exact `tool_call_id` is not visible in the
-conversation context, do not emit a marker for that sentence."""
 
 
 class VacationDaysTool:
@@ -116,28 +84,3 @@ Returns: total_days (annual entitlement), used_days, remaining_days.""",
 
         logger.info("tool.success", username=credentials.username, year=tool_input.year)
         return result.model_dump()
-
-    # --- CiteableTool ------------------------------------------------
-
-    def cite_instructions(self) -> CiteInstructions:
-        return CiteInstructions(prompt_fragment=_CITE_FRAGMENT)
-
-    def format_for_history(self, result: JsonObject) -> str:
-        return json.dumps(result, ensure_ascii=False)
-
-    def validate_and_enrich(
-        self,
-        raw: RawCitation,
-        context: CitationContext,
-    ) -> Citation | None:
-        if not isinstance(raw, ToolRawCitation):
-            return None
-        result = context.tool_result_for(raw.tool_call_id)
-        if result is None:
-            return None
-        return ToolCitation(
-            raw_marker_text=raw.raw_marker_text,
-            tool_call_id=raw.tool_call_id,
-            tool_name=_TOOL_NAME,
-            result=result,
-        )

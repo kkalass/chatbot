@@ -138,10 +138,12 @@ class TestMakeSystemMessage:
         assert "Inline Citations" in msg.llm_content
         assert "General rules" in msg.llm_content
 
-    def test_no_tools_returns_only_base_prompt(self) -> None:
+    def test_no_tools_still_includes_default_tool_call_fragment(self) -> None:
         layer = CitationLayer(_StubChatModel([]), citeable_tools=[])
         msg = layer.make_system_message("BASE")
-        assert msg.llm_content == "BASE"
+        assert msg.llm_content.startswith("BASE")
+        assert '"kind":"tool_call"' in msg.llm_content
+        assert "Inline Citations" in msg.llm_content
 
 
 class TestMakeUserMessage:
@@ -241,31 +243,34 @@ class TestStream:
         )
 
     @pytest.mark.asyncio
-    async def test_tool_not_citeable_yields_hallucination(self) -> None:
+    async def test_tool_call_citation_uses_default_validation(self) -> None:
         marker = (
             f'{QUOTE_START_MARKER}{{"kind":"tool_call","tool_call_id":"tc1"}}{QUOTE_END_MARKER}'
         )
         layer = CitationLayer(_StubChatModel([marker]), citeable_tools=[])
         history = (
             CitationLayerToolMessage(
-                tool_call_id="tc1", tool_name="not_citeable", result={}, llm_content=""
+                tool_call_id="tc1", tool_name="not_citeable", result={"x": 1}, llm_content=""
             ),
         )
         items = [item async for item in layer.stream(history)]
-        assert any(
-            isinstance(i, HallucinatedCitation) and "not registered" in i.reason for i in items
-        )
+        citations = [item for item in items if isinstance(item, ToolCitation)]
+        assert len(citations) == 1
+        assert citations[0].tool_call_id == "tc1"
+        assert citations[0].tool_name == "not_citeable"
+        assert citations[0].result == {"x": 1}
 
     @pytest.mark.asyncio
-    async def test_tool_rejection_yields_hallucination(self) -> None:
+    async def test_document_citation_rejection_yields_hallucination(self) -> None:
         marker = (
-            f'{QUOTE_START_MARKER}{{"kind":"tool_call","tool_call_id":"tc1"}}{QUOTE_END_MARKER}'
+            f'{QUOTE_START_MARKER}{{"kind":"document","tool_call_id":"tc1",'
+            f'"source":"s","chunk_id":"c"}}{QUOTE_END_MARKER}'
         )
-        rejector = _RejectingCiteableTool("vac", fragment="F", accepts=ToolRawCitation)
+        rejector = _RejectingCiteableTool("search", fragment="F", accepts=DocumentRawCitation)
         layer = CitationLayer(_StubChatModel([marker]), citeable_tools=[rejector])
         history = (
             CitationLayerToolMessage(
-                tool_call_id="tc1", tool_name="vac", result={"x": 1}, llm_content=""
+                tool_call_id="tc1", tool_name="search", result={"x": 1}, llm_content=""
             ),
         )
         items = [item async for item in layer.stream(history)]

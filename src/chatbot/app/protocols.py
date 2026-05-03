@@ -90,10 +90,10 @@ class Tool(Protocol):
     ``tool_calls`` by name. Tools never import the orchestrator or any UI
     module.
 
-    Tools that may be cited by the model implement the
-    :class:`~src.chatbot.app.citation.citeable_tool.CiteableTool` extension of
-    this Protocol; non-citeable tools (e.g. side-effecting actions) implement
-    only ``Tool``.
+    All tools can be cited through the citation layer's default
+    ``tool_call`` handling. Tools that need custom citation instructions,
+    model-history formatting, or domain-specific validation implement the
+    :class:`~src.chatbot.app.citation.citeable_tool.CiteableTool` extension.
     """
 
     schema: ToolSchema
