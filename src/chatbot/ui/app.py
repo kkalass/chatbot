@@ -114,7 +114,7 @@ def _collect_unique_numbered_citations(
     return unique
 
 
-def consume_text_chunk(
+def _format_text_chunk(
     chunk: str,
     pending_whitespace: str,
 ) -> tuple[list[str], str]:
@@ -137,7 +137,7 @@ def consume_text_chunk(
     return tokens, trailing_whitespace
 
 
-def consume_numbered_citation(
+def _format_citation_marker(
     nc: NumberedCitation,
     pending_whitespace: str,
 ) -> tuple[list[str], str]:
@@ -343,14 +343,12 @@ async def on_message(message: cl.Message) -> None:
         async for event in orchestrator.process_message(user_text):
             match event:
                 case str():
-                    tokens, pending_whitespace = consume_text_chunk(event, pending_whitespace)
+                    tokens, pending_whitespace = _format_text_chunk(event, pending_whitespace)
                     for token in tokens:
                         await _stream_response_token(token)
                 case NumberedCitation():
                     numbered.append(event)
-                    tokens, pending_whitespace = consume_numbered_citation(
-                        event, pending_whitespace
-                    )
+                    tokens, pending_whitespace = _format_citation_marker(event, pending_whitespace)
                     for token in tokens:
                         await _stream_response_token(token)
                     logger.debug(
