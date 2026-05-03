@@ -49,6 +49,12 @@ class TestProfileSelection:
         assert isinstance(build_chat_prompt_profile(config), DefaultChatPromptProfile)
 
 
+class TestChatModelConfigDefaults:
+    def test_parse_text_tool_calls_defaults_to_false(self) -> None:
+        config = ChatModelConfig(base_url="http://localhost:11434", model="llama3.1:8b")
+        assert config.parse_text_tool_calls is False
+
+
 class TestDefaultChatPromptProfile:
     def test_adjust_prompts_is_identity(self) -> None:
         profile = DefaultChatPromptProfile()

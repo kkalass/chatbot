@@ -27,6 +27,9 @@ class ChatModelConfig:
         temperature: Optional temperature override passed to the provider.
         seed: Optional deterministic seed passed to the provider.
         provider: Chat provider backend identifier.
+        parse_text_tool_calls: Enable text-encoded tool call detection.
+            Set to ``True`` only for models that serialise tool calls as JSON
+            in their response text (e.g. qwen2.5-coder). Off by default.
     """
 
     base_url: str
@@ -34,6 +37,7 @@ class ChatModelConfig:
     temperature: float | None = None
     seed: int | None = None
     provider: Literal["ollama"] = "ollama"
+    parse_text_tool_calls: bool = False
 
 
 def build_chat_prompt_profile(config: ChatModelConfig) -> PromptProfile:
@@ -69,6 +73,7 @@ def build_chat_model(
                 model=config.model,
                 temperature=config.temperature,
                 seed=config.seed,
+                parse_text_tool_calls=config.parse_text_tool_calls,
             )
         case _:
             assert_never(config.provider)

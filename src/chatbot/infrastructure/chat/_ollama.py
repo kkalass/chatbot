@@ -247,11 +247,13 @@ class OllamaChatModel:
         model: str,
         temperature: float | None = None,
         seed: int | None = None,
+        parse_text_tool_calls: bool = False,
     ) -> None:
         self._client = client
         self._model = model
         self._temperature = temperature
         self._seed = seed
+        self._parse_text_tool_calls = parse_text_tool_calls
         self._ollama_options: dict[str, object] = {
             **({"temperature": temperature} if temperature is not None else {}),
             **({"seed": seed} if seed is not None else {}),
@@ -369,12 +371,23 @@ def build_ollama_chat_model(
     model: str,
     temperature: float | None = None,
     seed: int | None = None,
+    parse_text_tool_calls: bool = False,
 ) -> ChatModel:
-    """Build an Ollama-backed chat model."""
+    """Build an Ollama-backed chat model.
+
+    Args:
+        parse_text_tool_calls: Enable detection of text-encoded tool calls
+            (JSON in response text) for models that don't use the native
+            tool_calls field (e.g. qwen2.5-coder). Off by default — enabling
+            it buffers the entire first response chunk when it starts with
+            ``{`` or a fenced code block, which degrades streaming UX for
+            normal text models.
+    """
     client = AsyncClient(host=base_url)
     return OllamaChatModel(
         client=client,
         model=model,
         temperature=temperature,
         seed=seed,
+        parse_text_tool_calls=parse_text_tool_calls,
     )

@@ -33,10 +33,13 @@ def build_retriever_config(settings: Settings) -> RetrieverConfig:
 
 def build_chat_model_config(settings: Settings) -> ChatModelConfig:
     """Map settings to :class:`~src.chatbot.infrastructure.chat.ChatModelConfig`."""
+    model_lower = settings.chat_model.lower()
+    parse_text_tool_calls = "qwen" in model_lower and "coder" in model_lower
     return ChatModelConfig(
         base_url=settings.ollama_base_url,
         model=settings.chat_model,
         temperature=settings.model_temperature,
         seed=settings.model_seed,
         provider="ollama",
+        parse_text_tool_calls=parse_text_tool_calls,
     )
