@@ -30,12 +30,14 @@ from src.chatbot.app.citation import (
     Citation,
     CitationLayer,
     CitationLayerMessage,
+    CiteableTool,
     HallucinatedCitation,
     NumberedCitation,
     canonical_key,
 )
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
+    ChatModel,
     JsonObject,
     ModelProfile,
     Tool,
@@ -172,14 +174,17 @@ class ChatOrchestrator:
     All dependencies are injected at construction time; no infrastructure is
     instantiated internally.
 
+    Prefer the :meth:`create` factory for production use — it filters
+    ``CiteableTool``\\s automatically and builds the ``CitationLayer``.
+    The ``__init__`` constructor is intentionally kept injectable for unit
+    tests that supply a ``CitationLayer`` stub.
+
     Args:
         citation_layer: Citation-aware decorator over the underlying chat
             model. Owns marker parsing, prompt fragment assembly, and citation
             validation. The orchestrator never talks to the raw ``ChatModel``.
         tools: Tool implementations registered for dispatch and advertised to
-            the model. The same ``CiteableTool`` instances must also be passed
-            into the citation layer at construction so that dispatch and
-            citation validation share a single source of truth.
+            the model.
         prompt_profile: Model-specific prompt profile. Used once at
             construction time to derive adjusted prompts and adjusted tool
             schemas.
@@ -204,6 +209,34 @@ class ChatOrchestrator:
         ]
         self._tool_schemas: list[ToolSchema] | None = adjusted_schemas if adjusted_schemas else None
         self._history: list[CitationLayerMessage] = []
+
+    @classmethod
+    def create(
+        cls,
+        model: ChatModel,
+        *,
+        tools: list[Tool] | None = None,
+        prompt_profile: ModelProfile,
+        prompts: Prompts = DEFAULT_PROMPTS,
+    ) -> "ChatOrchestrator":
+        """Construct a :class:`ChatOrchestrator` from a raw ``ChatModel`` and tools.
+
+        Filters ``CiteableTool``\\s from *tools* and wires them into a
+        :class:`~src.chatbot.app.citation.CitationLayer` internally, so
+        callers do not need to split the tool list manually.
+
+        Args:
+            model: Inner chat model supplying text and tool-call streams.
+            tools: All tools to register. ``CiteableTool`` instances are
+                automatically forwarded to the citation layer.
+            prompt_profile: Model-specific prompt adjustments.
+            prompts: Base prompt configuration; defaults to
+                :data:`~src.chatbot.app.prompts.DEFAULT_PROMPTS`.
+        """
+        _tools = tools or []
+        citeable = [t for t in _tools if isinstance(t, CiteableTool)]
+        citation_layer = CitationLayer(model, citeable_tools=citeable)
+        return cls(citation_layer, tools=_tools, prompt_profile=prompt_profile, prompts=prompts)
 
     def process_message(self, user_text: str) -> AsyncIterator[ProcessEvent]:
         """Process *user_text* and return an async iterator of :data:`ProcessEvent` items.

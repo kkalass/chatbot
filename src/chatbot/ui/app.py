@@ -1,8 +1,14 @@
-"""Chainlit entry point and session lifecycle hooks.
+"""Chainlit entry point: session lifecycle, streaming renderer, and observability.
 
-This module is the composition root for the application: it wires together
-all infrastructure adapters, the citation layer, and the orchestrator, then
-stores the assembled graph in session-scoped state.
+This module is the composition root for the application. Responsibilities:
+
+- **Composition** — wires all infrastructure adapters, tools, and the
+  orchestrator into a session-scoped object graph via :func:`on_chat_start`.
+- **Streaming renderer** — the :func:`on_message` handler drives the
+  orchestrator's event stream, formats text chunks and citation markers into
+  Chainlit tokens, and assembles sidebar elements and source-list markdown.
+- **Observability** — attaches OpenTelemetry spans and structured log events
+  to every request/response cycle.
 
 Session state keys
 ------------------
@@ -21,7 +27,6 @@ from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.citation import (
     Citation,
-    CitationLayer,
     DocumentCitation,
     HallucinatedCitation,
     NumberedCitation,
@@ -206,11 +211,9 @@ def _build_orchestrator() -> ChatOrchestrator:
     chat_model = build_chat_model(chat_model_config, prompt_profile.parse_text_tool_calls)
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
-    citeable_tools = [retrieval_tool]
-    citation_layer = CitationLayer(chat_model, citeable_tools=citeable_tools)
     tools: list[Tool] = [vacation_days_tool, retrieval_tool]
-    return ChatOrchestrator(
-        citation_layer=citation_layer,
+    return ChatOrchestrator.create(
+        chat_model,
         tools=tools,
         prompt_profile=prompt_profile,
         prompts=DEFAULT_PROMPTS,
