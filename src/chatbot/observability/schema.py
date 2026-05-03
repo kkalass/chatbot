@@ -19,14 +19,12 @@ SPAN_CHAT_UI_ON_MESSAGE = "chat.ui.on_message"
 # Orchestration spans
 SPAN_CHAT_ORCHESTRATOR_STEP = "chat.orchestrator.step"
 SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH = "chat.orchestrator.tool_dispatch"
-SPAN_CHAT_ORCHESTRATOR_CITATION_PASS = "chat.orchestrator.citation_pass"
 
 # Model adapter spans
 SPAN_CHAT_MODEL_OLLAMA_STREAM = "chat.model.ollama.stream"
 
 # Tool spans
 SPAN_CHAT_TOOL_SEARCH_DOCUMENTS = "chat.tool.search_documents"
-SPAN_CHAT_TOOL_CITE_SOURCES = "chat.tool.cite_sources"
 
 # Retrieval infrastructure spans
 SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE = "chat.retriever.qdrant.retrieve"

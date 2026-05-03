@@ -108,7 +108,7 @@ Opens a chat interface at `http://localhost:8000` by default.
 
 ## Local Tracing (OpenTelemetry + Arize Phoenix + Jaeger)
 
-This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, orchestrator rounds, model call, retrieval tool, citation tool, and Qdrant retrieval).
+This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, orchestrator rounds, model call, retrieval tool, and Qdrant retrieval).
 
 ### 1. Start local Phoenix
 
@@ -190,7 +190,7 @@ You can inspect the same traces in Phoenix (<http://localhost:6006>) and Jaeger 
 - Root UI span for each message (`chat.ui.on_message`)
 - Orchestrator spans (`chat.orchestrator.process_message`, `chat.orchestrator.round`)
 - Model call span (`chat.model.ollama.stream`) with request/response previews
-- Tool spans (`chat.tool.search_documents`, `chat.tool.cite_sources`)
+- Tool spans (`chat.tool.search_documents`)
 - Retriever span (`chat.retriever.qdrant.retrieve`) with top-k result preview
 
 ### 5.1 Tracing Schema (Ownership Rules)
