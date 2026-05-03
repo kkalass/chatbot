@@ -21,7 +21,7 @@ _TOOL_NAME = "get_vacation_days"
 
 
 class VacationDaysTool:
-    """LLM-callable, citeable tool wrapping a vacation-days service boundary.
+    """LLM-callable tool wrapping a vacation-days service boundary.
 
     Vacation-days credentials are managed by an injected auth collaborator;
     they never appear in LLM-visible arguments or results.
