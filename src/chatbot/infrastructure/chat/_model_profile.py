@@ -5,7 +5,7 @@ This module provides the concrete profiles used for model-specific adaptation
 of prompts, tool schemas, and adapter-level capabilities.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from src.chatbot.app.prompts import Prompts
@@ -19,9 +19,14 @@ class DefaultChatModelProfile(ModelProfile):
     Used as the baseline for models that do not require any tuning.
     """
 
+    _parse_text_tool_calls: bool = field(default=False, repr=False)
+
+    def __init__(self, parse_text_tool_calls: bool = False) -> None:
+        object.__setattr__(self, "_parse_text_tool_calls", parse_text_tool_calls)
+
     @property
     def parse_text_tool_calls(self) -> bool:
-        return False
+        return self._parse_text_tool_calls
 
     def adjust_prompts(self, prompts: Prompts) -> Prompts:
         return prompts
@@ -36,6 +41,9 @@ class DefaultChatModelProfile(ModelProfile):
 @dataclass(frozen=True)
 class SmallModelProfile(DefaultChatModelProfile):
     """Model profile with stricter tool-calling guidance for weaker tool-call models."""
+
+    def __init__(self, parse_text_tool_calls: bool = False) -> None:
+        super().__init__(parse_text_tool_calls=parse_text_tool_calls)
 
     def adjust_prompts(self, prompts: Prompts) -> Prompts:
         def _system_prompt(now: datetime) -> str:
@@ -62,9 +70,8 @@ class QwenCoderModelProfile(SmallModelProfile):
     tool calls from the response stream.
     """
 
-    @property
-    def parse_text_tool_calls(self) -> bool:
-        return True
+    def __init__(self) -> None:
+        super().__init__(parse_text_tool_calls=True)
 
     def adjust_prompts(self, prompts: Prompts) -> Prompts:
         base_prompts = super().adjust_prompts(prompts)

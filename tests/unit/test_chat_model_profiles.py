@@ -53,8 +53,14 @@ class TestParseTextToolCallsFlag:
     def test_default_profile_returns_false(self) -> None:
         assert DefaultChatModelProfile().parse_text_tool_calls is False
 
+    def test_default_profile_allows_constructor_override(self) -> None:
+        assert DefaultChatModelProfile(parse_text_tool_calls=True).parse_text_tool_calls is True
+
     def test_small_model_profile_returns_false(self) -> None:
         assert SmallModelProfile().parse_text_tool_calls is False
+
+    def test_small_model_profile_allows_constructor_override(self) -> None:
+        assert SmallModelProfile(parse_text_tool_calls=True).parse_text_tool_calls is True
 
     def test_qwen_coder_profile_returns_true(self) -> None:
         assert QwenCoderModelProfile().parse_text_tool_calls is True
