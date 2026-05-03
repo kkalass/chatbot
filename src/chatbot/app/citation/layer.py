@@ -11,11 +11,11 @@ Three responsibilities:
 
 The orchestrator depends on ``CitationLayer`` (not on the underlying
 ``ChatModel``) and consumes a stream of
-``str | list[ToolCallInfo] | Citation | HallucinatedCitation``.
+``str | list[ToolCallInfo] | Citation | HallucinatedCitation | UnsubstantiatedClaim``.
 """
 
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Sequence
 from typing import assert_never
 
 import structlog
@@ -302,34 +302,39 @@ The actual user message is:
 
             async for item in upstream:
                 if isinstance(item, str):
-                    for parsed in parser.feed(item):
-                        if isinstance(parsed, str):
-                            if parsed:
-                                yield parsed
-                        else:
-                            yield _validate(parsed, tool_call_lookup, tools_by_name, ctx)
+                    for event in _emit_parsed(
+                        parser.feed(item), tool_call_lookup, tools_by_name, ctx
+                    ):
+                        yield event
                     continue
                 # tool_calls list — flush parser first to preserve order
-                for parsed in parser.finish():
-                    if isinstance(parsed, str):
-                        if parsed:
-                            yield parsed
-                    else:
-                        yield _validate(parsed, tool_call_lookup, tools_by_name, ctx)
+                for event in _emit_parsed(parser.finish(), tool_call_lookup, tools_by_name, ctx):
+                    yield event
                 yield item
 
-            for parsed in parser.finish():
-                if isinstance(parsed, str):
-                    if parsed:
-                        yield parsed
-                else:
-                    yield _validate(parsed, tool_call_lookup, tools_by_name, ctx)
+            for event in _emit_parsed(parser.finish(), tool_call_lookup, tools_by_name, ctx):
+                yield event
 
             span = trace.get_current_span()
             span.set_attribute("citation.parsed.count", parser.stats.parsed_count)
             span.set_attribute("citation.parse_failed.count", parser.stats.parse_failed_count)
 
         return _gen()
+
+
+def _emit_parsed(
+    parsed_items: Iterable[str | RawCitation],
+    tool_call_lookup: dict[str, str],
+    tools_by_name: dict[str, CiteableTool],
+    ctx: CitationContext,
+) -> Iterator[CitationLayerStreamItem]:
+    """Validate and yield each item produced by the stream parser."""
+    for parsed in parsed_items:
+        if isinstance(parsed, str):
+            if parsed:
+                yield parsed
+        else:
+            yield _validate(parsed, tool_call_lookup, tools_by_name, ctx)
 
 
 def _build_tool_call_lookup(
