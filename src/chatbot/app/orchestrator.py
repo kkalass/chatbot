@@ -20,6 +20,7 @@ to validated citations and surfaces hallucinated ones.
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
+from typing import assert_never
 
 import structlog
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
@@ -31,8 +32,10 @@ from src.chatbot.app.citation import (
     CitationLayer,
     CitationLayerMessage,
     CiteableTool,
+    DocumentCitation,
     HallucinatedCitation,
     NumberedCitation,
+    ToolCitation,
     UnsubstantiatedClaim,
     canonical_key,
 )
@@ -168,6 +171,31 @@ def _trace_citation_counts(
     span.set_attribute("citation.hallucinated.count", hallucinated)
 
 
+class _CitationNumberer:
+    """Assigns stable per-turn reference numbers to validated citations, deduplicating by canonical key.
+
+    Shared across the main and fallback streaming loops so numbers remain
+    consistent within a single turn regardless of which path produced the citation.
+    """
+
+    def __init__(self) -> None:
+        self._ref_by_key: dict[str, int] = {}
+        self._ref_counter: int = 0
+        self.validated: int = 0
+        self.duplicate: int = 0
+
+    def assign(self, item: Citation) -> NumberedCitation:
+        key = canonical_key(item)
+        existing = self._ref_by_key.get(key)
+        if existing is not None:
+            self.duplicate += 1
+            return NumberedCitation(reference_number=existing, citation=item)
+        self.validated += 1
+        self._ref_counter += 1
+        self._ref_by_key[key] = self._ref_counter
+        return NumberedCitation(reference_number=self._ref_counter, citation=item)
+
+
 class ChatOrchestrator:
     """Manages per-session conversation history and the agentic tool-call loop.
 
@@ -250,11 +278,11 @@ class ChatOrchestrator:
 
         Returns:
             Async iterator yielding ``str`` for streaming text and
-            :class:`NumberedCitation` / :class:`HallucinatedCitation` for
+            :class:`NumberedCitation` / :class:`HallucinatedCitation` / :class:`UnsubstantiatedClaim` for
             citation events.
         """
-        wrapped_user_text = self._prompts.user_message(user_text)
-        self._history.append(self._citation_layer.make_user_message(wrapped_user_text))
+        user_msg = self._citation_layer.make_user_message(self._prompts.user_message(user_text))
+        self._history.append(user_msg)
 
         history = self._history
         citation_layer = self._citation_layer
@@ -266,10 +294,7 @@ class ChatOrchestrator:
             previous_tool_call_signature: tuple[tuple[str, str], ...] | None = None
             fallback_without_tools = False
 
-            ref_by_key: dict[str, int] = {}
-            ref_counter = 0
-            validated_count = 0
-            duplicate_count = 0
+            numberer = _CitationNumberer()
             hallucinated_count = 0
 
             for step_num in range(_MAX_TOOL_STEPS):
@@ -277,11 +302,10 @@ class ChatOrchestrator:
                     system_msg = citation_layer.make_system_message(
                         prompts.system_prompt(datetime.now(tz=UTC))
                     )
-                    step_messages: list[CitationLayerMessage] = [system_msg, *history]
                     _trace_step_request(
                         span=step_span,
                         step_num=step_num,
-                        history_size=len(step_messages),
+                        history_size=1 + len(history),
                         tool_schemas=tool_schemas,
                     )
 
@@ -289,37 +313,29 @@ class ChatOrchestrator:
                     tool_calls: list[ToolCallInfo] = []
                     text_chars = 0
 
-                    async for item in citation_layer.stream(step_messages, tools=tool_schemas):
-                        if isinstance(item, str):
-                            text_chars += len(item)
-                            parts.append(item)
-                            yield item
-                            continue
-                        if isinstance(item, list):
-                            tool_calls.extend(item)
-                            continue
-                        if isinstance(item, HallucinatedCitation):
-                            hallucinated_count += 1
-                            parts.append(item)
-                            yield item
-                            continue
-                        if isinstance(item, UnsubstantiatedClaim):
-                            parts.append(item)
-                            yield item
-                            continue
-                        # Validated Citation -> numbered + dedup.
-                        key = canonical_key(item)
-                        existing_ref = ref_by_key.get(key)
-                        if existing_ref is not None:
-                            duplicate_count += 1
-                            ref_number = existing_ref
-                        else:
-                            validated_count += 1
-                            ref_counter += 1
-                            ref_by_key[key] = ref_counter
-                            ref_number = ref_counter
-                        parts.append(item)
-                        yield NumberedCitation(reference_number=ref_number, citation=item)
+                    async for item in citation_layer.stream(
+                        [system_msg, *history], tools=tool_schemas
+                    ):
+                        match item:
+                            case str():
+                                text_chars += len(item)
+                                parts.append(item)
+                                yield item
+                            case list():
+                                tool_calls.extend(item)
+                            case HallucinatedCitation():
+                                hallucinated_count += 1
+                                parts.append(item)
+                                yield item
+                            case UnsubstantiatedClaim():
+                                parts.append(item)
+                                yield item
+                            case DocumentCitation() | ToolCitation():
+                                numbered = numberer.assign(item)
+                                parts.append(item)
+                                yield numbered
+                            case _:
+                                assert_never(item)
 
                     assistant_text = "".join(p for p in parts if isinstance(p, str))
 
@@ -381,40 +397,33 @@ class ChatOrchestrator:
                 system_msg = citation_layer.make_system_message(
                     prompts.system_prompt(datetime.now(tz=UTC))
                 )
-                step_messages = [system_msg, *history]
                 parts = []
-                async for item in citation_layer.stream(step_messages, tools=None):
-                    if isinstance(item, str):
-                        parts.append(item)
-                        yield item
-                    elif isinstance(item, list):
-                        # No tools advertised — defensively ignore any spurious calls.
-                        continue
-                    elif isinstance(item, HallucinatedCitation):
-                        hallucinated_count += 1
-                        parts.append(item)
-                        yield item
-                    elif isinstance(item, UnsubstantiatedClaim):
-                        parts.append(item)
-                        yield item
-                    else:
-                        key = canonical_key(item)
-                        existing_ref = ref_by_key.get(key)
-                        if existing_ref is not None:
-                            duplicate_count += 1
-                            ref_number = existing_ref
-                        else:
-                            validated_count += 1
-                            ref_counter += 1
-                            ref_by_key[key] = ref_counter
-                            ref_number = ref_counter
-                        parts.append(item)
-                        yield NumberedCitation(reference_number=ref_number, citation=item)
+                async for item in citation_layer.stream([system_msg, *history], tools=None):
+                    match item:
+                        case str():
+                            parts.append(item)
+                            yield item
+                        case list():
+                            # No tools advertised — defensively ignore any spurious calls.
+                            pass
+                        case HallucinatedCitation():
+                            hallucinated_count += 1
+                            parts.append(item)
+                            yield item
+                        case UnsubstantiatedClaim():
+                            parts.append(item)
+                            yield item
+                        case DocumentCitation() | ToolCitation():
+                            numbered = numberer.assign(item)
+                            parts.append(item)
+                            yield numbered
+                        case _:
+                            assert_never(item)
                 history.append(citation_layer.make_assistant_message(parts, tool_calls=None))
 
             _trace_citation_counts(
-                validated=validated_count,
-                duplicate=duplicate_count,
+                validated=numberer.validated,
+                duplicate=numberer.duplicate,
                 hallucinated=hallucinated_count,
             )
 
