@@ -300,7 +300,9 @@ class ChatOrchestrator:
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:
                     # Force a final no-tools step once the safety limit is reached.
                     if not last_step and step_num == _MAX_TOOL_STEPS:
-                        logger.warning("orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS)
+                        logger.warning(
+                            "orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS
+                        )
                         last_step = True
 
                     effective_tools = None if last_step else tool_schemas
