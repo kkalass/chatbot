@@ -7,8 +7,7 @@ import pytest
 
 from src.chatbot.app.citation import (
     DocumentCitation,
-    DocumentRawCitation,
-    ToolRawCitation,
+    RawCitation,
 )
 from src.chatbot.app.protocols import JsonObject, SourceChunk
 from src.chatbot.tools.retrieval.tool import RetrievalTool
@@ -110,9 +109,7 @@ class TestCiteInstructions:
 
         assert "search_documents" in fragment
         assert "tool_call_id" in fragment
-        assert "source" in fragment
         assert "chunk_id" in fragment
-        assert '"document"' in fragment
 
 
 class TestFormatForHistory:
@@ -139,9 +136,9 @@ class TestValidateAndEnrich:
     def _tool(self) -> RetrievalTool:
         return RetrievalTool(_StubRetriever([]))
 
-    def test_returns_none_for_wrong_raw_kind(self) -> None:
+    def test_returns_none_when_chunk_id_missing(self) -> None:
         tool = self._tool()
-        raw = ToolRawCitation(tool_call_id="tc1", raw_marker_text="m")
+        raw = RawCitation(tool_call_id="tc1", raw_marker_text="m")
         ctx = _StaticContext(results=())
 
         assert tool.validate_and_enrich(raw, ctx) is None
@@ -153,9 +150,8 @@ class TestValidateAndEnrich:
                 _result_with(_chunk(source="docs/a.md", chunk_id="c1", content="X", score=0.7)),
             )
         )
-        raw = DocumentRawCitation(
+        raw = RawCitation(
             tool_call_id="tc1",
-            source="docs/a.md",
             chunk_id="c1",
             raw_marker_text="m",
         )
@@ -169,15 +165,15 @@ class TestValidateAndEnrich:
         assert result.score == 0.7
         assert result.raw_marker_text == "m"
 
-    def test_normalized_source_path_matches(self) -> None:
+    def test_chunk_id_resolves_regardless_of_source(self) -> None:
+        """chunk_id is a content hash — authoritative source is resolved from stored results."""
         tool = self._tool()
         ctx = _StaticContext(
-            results=(_result_with(_chunk(source="docs/a.md", chunk_id="c1")),),
+            results=(_result_with(_chunk(source="docs/a.md", chunk_id="unique-hash")),),
         )
-        raw = DocumentRawCitation(
+        raw = RawCitation(
             tool_call_id="tc1",
-            source="./docs/a.md",
-            chunk_id="c1",
+            chunk_id="unique-hash",
             raw_marker_text="m",
         )
 
@@ -185,43 +181,18 @@ class TestValidateAndEnrich:
         assert isinstance(result, DocumentCitation)
         assert result.source == "docs/a.md"
 
-    def test_globally_unique_chunk_id_fallback(self) -> None:
+    def test_unknown_chunk_id_returns_none(self) -> None:
         tool = self._tool()
         ctx = _StaticContext(
-            results=(_result_with(_chunk(source="docs/a.md", chunk_id="unique-hash")),),
+            results=(_result_with(_chunk(source="docs/a.md", chunk_id="known")),),
         )
-        raw = DocumentRawCitation(
-            tool_call_id="tc1",
-            source="totally-wrong.md",
-            chunk_id="unique-hash",
-            raw_marker_text="m",
-        )
-
-        result = tool.validate_and_enrich(raw, ctx)
-        assert isinstance(result, DocumentCitation)
-
-    def test_unique_fallback_rejects_ambiguous_match(self) -> None:
-        tool = self._tool()
-        ctx = _StaticContext(
-            results=(
-                _result_with(
-                    _chunk(source="docs/a.md", chunk_id="dup"),
-                    _chunk(source="docs/b.md", chunk_id="dup"),
-                ),
-            )
-        )
-        raw = DocumentRawCitation(
-            tool_call_id="tc1",
-            source="elsewhere.md",
-            chunk_id="dup",
-            raw_marker_text="m",
-        )
+        raw = RawCitation(tool_call_id="tc1", chunk_id="unknown", raw_marker_text="m")
         assert tool.validate_and_enrich(raw, ctx) is None
 
     def test_no_search_results_returns_none(self) -> None:
         tool = self._tool()
         ctx = _StaticContext(results=())
-        raw = DocumentRawCitation(tool_call_id="tc1", source="x", chunk_id="y", raw_marker_text="m")
+        raw = RawCitation(tool_call_id="tc1", chunk_id="y", raw_marker_text="m")
         assert tool.validate_and_enrich(raw, ctx) is None
 
     def test_higher_scoring_duplicate_wins(self) -> None:
@@ -232,7 +203,7 @@ class TestValidateAndEnrich:
                 _result_with(_chunk(source="s", chunk_id="c", content="high", score=0.9)),
             )
         )
-        raw = DocumentRawCitation(tool_call_id="tc1", source="s", chunk_id="c", raw_marker_text="m")
+        raw = RawCitation(tool_call_id="tc1", chunk_id="c", raw_marker_text="m")
         result = tool.validate_and_enrich(raw, ctx)
         assert isinstance(result, DocumentCitation)
         assert result.content == "high"

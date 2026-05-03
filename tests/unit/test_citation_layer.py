@@ -11,11 +11,9 @@ from src.chatbot.app.citation import (
     CitationLayer,
     CiteInstructions,
     DocumentCitation,
-    DocumentRawCitation,
     HallucinatedCitation,
     RawCitation,
     ToolCitation,
-    ToolRawCitation,
 )
 from src.chatbot.app.citation.messages import (
     CitationLayerAssistantMessage,
@@ -41,12 +39,10 @@ class _StubCiteableTool:
         name: str,
         *,
         fragment: str,
-        accepts: type[RawCitation],
         history_format: str = "RENDERED",
     ) -> None:
         self.schema = ToolSchema(name=name, description="d", parameters_schema={"type": "object"})
         self._fragment = fragment
-        self._accepts = accepts
         self._history_format = history_format
         self.format_calls: list[JsonObject] = []
         self.validate_calls: list[RawCitation] = []
@@ -63,22 +59,15 @@ class _StubCiteableTool:
 
     def validate_and_enrich(self, raw: RawCitation, context: CitationContext) -> Citation | None:
         self.validate_calls.append(raw)
-        if not isinstance(raw, self._accepts):
+        if raw.chunk_id is None:
             return None
-        if isinstance(raw, DocumentRawCitation):
-            return DocumentCitation(
-                raw_marker_text=raw.raw_marker_text,
-                tool_call_id=raw.tool_call_id,
-                source=raw.source,
-                chunk_id=raw.chunk_id,
-                content="content",
-                score=1.0,
-            )
-        return ToolCitation(
+        return DocumentCitation(
             raw_marker_text=raw.raw_marker_text,
             tool_call_id=raw.tool_call_id,
-            tool_name=self.schema.name,
-            result={"ok": True},
+            source="resolved-source",
+            chunk_id=raw.chunk_id,
+            content="content",
+            score=1.0,
         )
 
 
@@ -116,8 +105,8 @@ class _StubChatModel:
 
 class TestConstruction:
     def test_rejects_duplicate_tool_names(self) -> None:
-        a = _StubCiteableTool("dup", fragment="A", accepts=DocumentRawCitation)
-        b = _StubCiteableTool("dup", fragment="B", accepts=ToolRawCitation)
+        a = _StubCiteableTool("dup", fragment="A")
+        b = _StubCiteableTool("dup", fragment="B")
 
         with pytest.raises(ValueError, match="Duplicate"):
             CitationLayer(_StubChatModel([]), citeable_tools=[a, b])
@@ -125,8 +114,8 @@ class TestConstruction:
 
 class TestMakeSystemMessage:
     def test_appends_fragments_and_general_rules(self) -> None:
-        a = _StubCiteableTool("ta", fragment="FRAG-A", accepts=DocumentRawCitation)
-        b = _StubCiteableTool("tb", fragment="FRAG-B", accepts=ToolRawCitation)
+        a = _StubCiteableTool("ta", fragment="FRAG-A")
+        b = _StubCiteableTool("tb", fragment="FRAG-B")
         layer = CitationLayer(_StubChatModel([]), citeable_tools=[a, b])
 
         msg = layer.make_system_message("BASE-PROMPT")
@@ -142,7 +131,7 @@ class TestMakeSystemMessage:
         layer = CitationLayer(_StubChatModel([]), citeable_tools=[])
         msg = layer.make_system_message("BASE")
         assert msg.llm_content.startswith("BASE")
-        assert '"kind":"tool_call"' in msg.llm_content
+        assert '"tool_call_id"' in msg.llm_content
         assert "Inline Citations" in msg.llm_content
 
 
@@ -185,9 +174,7 @@ class TestMakeAssistantMessage:
 
 class TestMakeToolMessage:
     def test_uses_format_for_history_when_tool_registered(self) -> None:
-        tool = _StubCiteableTool(
-            "vac", fragment="F", accepts=ToolRawCitation, history_format="VAC-RENDERED"
-        )
+        tool = _StubCiteableTool("vac", fragment="F", history_format="VAC-RENDERED")
         layer = CitationLayer(_StubChatModel([]), citeable_tools=[tool])
 
         msg = layer.make_tool_message("tc1", "vac", {"x": 1})
@@ -205,11 +192,8 @@ class TestMakeToolMessage:
 class TestStream:
     @pytest.mark.asyncio
     async def test_validated_document_citation_is_yielded(self) -> None:
-        marker = (
-            f'{QUOTE_START_MARKER}{{"kind":"document","tool_call_id":"tc1",'
-            f'"source":"s","chunk_id":"c"}}{QUOTE_END_MARKER}'
-        )
-        tool = _StubCiteableTool("search", fragment="F", accepts=DocumentRawCitation)
+        marker = f'{QUOTE_START_MARKER}{{"tool_call_id":"tc1","chunk_id":"c"}}{QUOTE_END_MARKER}'
+        tool = _StubCiteableTool("search", fragment="F")
         layer = CitationLayer(_StubChatModel([f"prefix {marker} suffix"]), citeable_tools=[tool])
         history = (
             CitationLayerToolMessage(
@@ -221,19 +205,18 @@ class TestStream:
 
         # Order: "prefix ", DocumentCitation, " suffix"
         assert isinstance(items[1], DocumentCitation)
-        assert items[1].source == "s"
+        assert items[1].source == "resolved-source"
         assert items[1].raw_marker_text == marker
         assert tool.validate_calls
         # Validation receives the parsed RawCitation; documented invariant.
         first = tool.validate_calls[0]
-        assert isinstance(first, DocumentRawCitation)
+        assert isinstance(first, RawCitation)
+        assert first.chunk_id == "c"
 
     @pytest.mark.asyncio
     async def test_unknown_tool_call_id_yields_hallucination(self) -> None:
-        marker = (
-            f'{QUOTE_START_MARKER}{{"kind":"tool_call","tool_call_id":"missing"}}{QUOTE_END_MARKER}'
-        )
-        tool = _StubCiteableTool("vac", fragment="F", accepts=ToolRawCitation)
+        marker = f'{QUOTE_START_MARKER}{{"tool_call_id":"missing"}}{QUOTE_END_MARKER}'
+        tool = _StubCiteableTool("vac", fragment="F")
         layer = CitationLayer(_StubChatModel([marker]), citeable_tools=[tool])
 
         items = [item async for item in layer.stream(())]
@@ -244,9 +227,7 @@ class TestStream:
 
     @pytest.mark.asyncio
     async def test_tool_call_citation_uses_default_validation(self) -> None:
-        marker = (
-            f'{QUOTE_START_MARKER}{{"kind":"tool_call","tool_call_id":"tc1"}}{QUOTE_END_MARKER}'
-        )
+        marker = f'{QUOTE_START_MARKER}{{"tool_call_id":"tc1"}}{QUOTE_END_MARKER}'
         layer = CitationLayer(_StubChatModel([marker]), citeable_tools=[])
         history = (
             CitationLayerToolMessage(
@@ -262,11 +243,8 @@ class TestStream:
 
     @pytest.mark.asyncio
     async def test_document_citation_rejection_yields_hallucination(self) -> None:
-        marker = (
-            f'{QUOTE_START_MARKER}{{"kind":"document","tool_call_id":"tc1",'
-            f'"source":"s","chunk_id":"c"}}{QUOTE_END_MARKER}'
-        )
-        rejector = _RejectingCiteableTool("search", fragment="F", accepts=DocumentRawCitation)
+        marker = f'{QUOTE_START_MARKER}{{"tool_call_id":"tc1","chunk_id":"c"}}{QUOTE_END_MARKER}'
+        rejector = _RejectingCiteableTool("search", fragment="F")
         layer = CitationLayer(_StubChatModel([marker]), citeable_tools=[rejector])
         history = (
             CitationLayerToolMessage(

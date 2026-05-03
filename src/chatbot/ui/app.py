@@ -367,7 +367,7 @@ async def on_message(message: cl.Message) -> None:
                     logger.info(
                         "session.hallucinated_citation",
                         reason=event.reason,
-                        kind=event.raw.kind,
+                        tool_call_id=event.raw.tool_call_id,
                     )
                 case _:
                     assert_never(event)

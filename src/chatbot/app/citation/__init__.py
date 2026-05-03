@@ -9,7 +9,7 @@ Public API:
     - :class:`CitationLayer`
     - :class:`CiteableTool`, :class:`CiteInstructions`
     - :class:`CitationContext`
-    - :data:`RawCitation`, :class:`DocumentRawCitation`, :class:`ToolRawCitation`
+    - :class:`RawCitation`
     - :data:`Citation`, :class:`DocumentCitation`, :class:`ToolCitation`
     - :class:`NumberedCitation`, :class:`HallucinatedCitation`
     - :data:`CitationLayerMessage` and its variants
@@ -30,12 +30,10 @@ from src.chatbot.app.citation.models import (
     QUOTE_START_MARKER,
     Citation,
     DocumentCitation,
-    DocumentRawCitation,
     HallucinatedCitation,
     NumberedCitation,
     RawCitation,
     ToolCitation,
-    ToolRawCitation,
     canonical_key,
 )
 
@@ -53,12 +51,10 @@ __all__ = [
     "CiteInstructions",
     "CiteableTool",
     "DocumentCitation",
-    "DocumentRawCitation",
     "HallucinatedCitation",
     "NumberedCitation",
     "RawCitation",
     "ToolCitation",
-    "ToolRawCitation",
     "build_citation_context",
     "canonical_key",
 ]

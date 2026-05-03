@@ -11,7 +11,7 @@ from src.chatbot.app.citation import (
     DocumentCitation,
     HallucinatedCitation,
     NumberedCitation,
-    ToolRawCitation,
+    RawCitation,
 )
 from src.chatbot.app.citation.layer import CitationLayerStreamItem
 from src.chatbot.app.citation.messages import (
@@ -165,7 +165,7 @@ class TestSingleTurn:
     @pytest.mark.asyncio
     async def test_passes_through_hallucinated_citation(self) -> None:
         h = HallucinatedCitation(
-            raw=ToolRawCitation(tool_call_id="missing", raw_marker_text="<m>"),
+            raw=RawCitation(tool_call_id="missing", raw_marker_text="<m>"),
             reason="x",
         )
         layer = _StubCitationLayer([["a", h, "b"]])

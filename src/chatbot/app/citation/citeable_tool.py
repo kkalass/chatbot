@@ -3,7 +3,7 @@
 The :class:`CitationLayer` already supports default ``tool_call`` citations for
 all tools. Implement this Protocol only when a tool needs specialized prompt
 instructions, history rendering, or validation/enrichment logic (for example
-document-level citations with ``source``/``chunk_id``).
+document-level citations with ``chunk_id``).
 """
 
 from dataclasses import dataclass

@@ -18,9 +18,7 @@ from pydantic import ValidationError
 from src.chatbot.app.citation.models import (
     QUOTE_END_MARKER,
     QUOTE_START_MARKER,
-    DocumentRawCitation,
     RawCitation,
-    ToolRawCitation,
 )
 
 logger = structlog.get_logger(__name__)
@@ -38,8 +36,8 @@ def _preview_text(text: str) -> str:
 def _parse_quote_block(raw_block: str) -> RawCitation | None:
     """Parse one complete marker block (incl. tokens) into a typed RawCitation.
 
-    Returns ``None`` on malformed JSON, unknown ``kind``, or schema mismatch.
-    The caller decides how to surface the parse failure to its consumers.
+    Returns ``None`` on malformed JSON, missing ``tool_call_id``, or schema
+    mismatch. Unknown fields (e.g. legacy ``kind``) are silently ignored.
     """
     json_payload = raw_block[len(QUOTE_START_MARKER) : -len(QUOTE_END_MARKER)]
     try:
@@ -58,17 +56,7 @@ def _parse_quote_block(raw_block: str) -> RawCitation | None:
         parsed_payload.pop("raw_marker_text", None)
         parsed_payload["raw_marker_text"] = raw_block
 
-        kind_value = parsed_payload.get("kind")
-        if not isinstance(kind_value, str):
-            raise ValueError("Quote payload kind must be a string.")
-
-        match kind_value:
-            case "document":
-                return DocumentRawCitation.model_validate(parsed_payload)
-            case "tool_call":
-                return ToolRawCitation.model_validate(parsed_payload)
-            case _:
-                raise ValueError(f"Unsupported citation kind: {kind_value!r}")
+        return RawCitation.model_validate(parsed_payload)
     except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
         logger.warning(
             "citation_layer.parse_failed",

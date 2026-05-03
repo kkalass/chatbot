@@ -5,19 +5,18 @@ import json
 from src.chatbot.app.citation import (
     QUOTE_END_MARKER,
     QUOTE_START_MARKER,
-    DocumentRawCitation,
-    ToolRawCitation,
+    RawCitation,
 )
 from src.chatbot.app.citation._parser import CitationStreamParser
 
 
 def _doc_marker(**fields: object) -> str:
-    payload = {"kind": "document", **fields}
+    payload = {**fields}
     return f"{QUOTE_START_MARKER}{json.dumps(payload)}{QUOTE_END_MARKER}"
 
 
 def _tool_marker(tool_call_id: str) -> str:
-    payload = {"kind": "tool_call", "tool_call_id": tool_call_id}
+    payload = {"tool_call_id": tool_call_id}
     return f"{QUOTE_START_MARKER}{json.dumps(payload)}{QUOTE_END_MARKER}"
 
 
@@ -30,16 +29,15 @@ class TestCitationStreamParser:
 
     def test_parses_complete_document_marker(self) -> None:
         parser = CitationStreamParser()
-        marker = _doc_marker(tool_call_id="tc1", source="s.md", chunk_id="c1")
+        marker = _doc_marker(tool_call_id="tc1", chunk_id="c1")
 
         out = parser.feed(f"prefix {marker} suffix") + parser.finish()
 
         citations = [item for item in out if not isinstance(item, str)]
         assert len(citations) == 1
         cit = citations[0]
-        assert isinstance(cit, DocumentRawCitation)
+        assert isinstance(cit, RawCitation)
         assert cit.tool_call_id == "tc1"
-        assert cit.source == "s.md"
         assert cit.chunk_id == "c1"
         assert cit.raw_marker_text == marker
 
@@ -51,19 +49,22 @@ class TestCitationStreamParser:
 
         citations = [item for item in out if not isinstance(item, str)]
         assert len(citations) == 1
-        assert isinstance(citations[0], ToolRawCitation)
-        assert citations[0].tool_call_id == "tc-xyz"
+        cit = citations[0]
+        assert isinstance(cit, RawCitation)
+        assert cit.tool_call_id == "tc-xyz"
+        assert cit.chunk_id is None
 
     def test_handles_marker_split_across_chunks(self) -> None:
         parser = CitationStreamParser()
-        marker = _doc_marker(tool_call_id="tc1", source="s", chunk_id="c")
+        marker = _doc_marker(tool_call_id="tc1", chunk_id="c")
         midpoint = len(marker) // 2
 
         out = parser.feed(marker[:midpoint]) + parser.feed(marker[midpoint:]) + parser.finish()
 
         citations = [item for item in out if not isinstance(item, str)]
         assert len(citations) == 1
-        assert isinstance(citations[0], DocumentRawCitation)
+        assert isinstance(citations[0], RawCitation)
+        assert citations[0].chunk_id == "c"
 
     def test_handles_start_token_split_across_chunks(self) -> None:
         parser = CitationStreamParser()
@@ -76,9 +77,9 @@ class TestCitationStreamParser:
         assert len(citations) == 1
         assert "text " in "".join(item for item in out if isinstance(item, str))
 
-    def test_unknown_kind_emits_raw_text_and_increments_failure(self) -> None:
+    def test_missing_tool_call_id_emits_raw_text_and_increments_failure(self) -> None:
         parser = CitationStreamParser()
-        bad = f'{QUOTE_START_MARKER}{{"kind":"weird","tool_call_id":"tc"}}{QUOTE_END_MARKER}'
+        bad = f'{QUOTE_START_MARKER}{{"chunk_id":"c1"}}{QUOTE_END_MARKER}'
         out = parser.feed(bad) + parser.finish()
 
         # No typed citation produced; raw block surfaces as a string.
@@ -97,7 +98,7 @@ class TestCitationStreamParser:
 
     def test_unclosed_block_is_dropped_with_failure_stat(self) -> None:
         parser = CitationStreamParser()
-        out = parser.feed(f'{QUOTE_START_MARKER}{{"kind":"tool_call"') + parser.finish()
+        out = parser.feed(f'{QUOTE_START_MARKER}{{"tool_call_id":"tc1"') + parser.finish()
 
         # The unclosed buffer must not surface as plain text.
         assert all(isinstance(item, str) for item in out)
@@ -116,9 +117,7 @@ class TestCitationStreamParser:
     def test_model_supplied_raw_marker_text_is_overridden(self) -> None:
         parser = CitationStreamParser()
         payload = {
-            "kind": "document",
             "tool_call_id": "tc1",
-            "source": "s",
             "chunk_id": "c",
             "raw_marker_text": "MODEL-INJECTED",
         }
@@ -128,3 +127,16 @@ class TestCitationStreamParser:
         citations = [item for item in out if not isinstance(item, str)]
         assert len(citations) == 1
         assert citations[0].raw_marker_text == marker
+
+    def test_legacy_kind_field_ignored(self) -> None:
+        """Markers with legacy 'kind' and 'source' fields must still parse cleanly."""
+        parser = CitationStreamParser()
+        payload = {"kind": "document", "tool_call_id": "tc1", "source": "s.md", "chunk_id": "c1"}
+        marker = f"{QUOTE_START_MARKER}{json.dumps(payload)}{QUOTE_END_MARKER}"
+        out = parser.feed(marker) + parser.finish()
+
+        citations = [item for item in out if not isinstance(item, str)]
+        assert len(citations) == 1
+        assert isinstance(citations[0], RawCitation)
+        assert citations[0].tool_call_id == "tc1"
+        assert citations[0].chunk_id == "c1"

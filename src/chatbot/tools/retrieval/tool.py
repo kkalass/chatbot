@@ -7,8 +7,8 @@ pre-retrieval.
 
 This tool implements :class:`~src.chatbot.app.citation.CiteableTool`: it owns
 the LLM-side rendering of search results, contributes its own citation prompt
-fragment, and validates :class:`DocumentRawCitation` payloads emitted by the
-model against its own past tool outputs.
+fragment, and validates :class:`~src.chatbot.app.citation.RawCitation` payloads
+emitted by the model against its own past tool outputs.
 """
 
 import html
@@ -28,7 +28,6 @@ from src.chatbot.app.citation import (
     CitationContext,
     CiteInstructions,
     DocumentCitation,
-    DocumentRawCitation,
     RawCitation,
 )
 from src.chatbot.app.citation.models import Citation
@@ -62,25 +61,17 @@ _CITE_FRAGMENT = f"""### {_TOOL_NAME}
 When a sentence is grounded in a chunk returned by `{_TOOL_NAME}`, emit
 immediately after that sentence a marker block of the form:
 
-  {QUOTE_START_MARKER}{{"kind":"document","tool_call_id":"<id>","source":"<source>","chunk_id":"<chunk_id>"}}{QUOTE_END_MARKER}
+  {QUOTE_START_MARKER}{{"tool_call_id":"<id>","chunk_id":"<chunk_id>"}}{QUOTE_END_MARKER}
 
 Required fields (all strings, all copied **verbatim** from the conversation
 context — no re-formatting):
-  - kind: must be the literal string "document"
   - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
     that produced the supporting `{_TOOL_NAME}` result
-  - source: the `source_path` attribute of the enclosing `<source>` XML
-    element from that tool result
   - chunk_id: the `chunk_id` attribute of the specific `<chunk>` element
     whose content supports the sentence
 
-Optional fields (omit when unsure):
-  - quote_text: a literal verbatim span from the cited chunk (≤ 200 chars)
-  - claim: the supported claim restated in your own words
-
-Do not invent IDs. If the exact `tool_call_id`, `source`, or `chunk_id`
-is not visible in the conversation context, do not emit a marker for that
-sentence."""
+Do not invent IDs. If the exact `tool_call_id` or `chunk_id` is not visible
+in the conversation context, do not emit a marker for that sentence."""
 
 
 def _trace_request(*, span: trace.Span, args: JsonObject) -> None:
@@ -111,13 +102,6 @@ def _trace_response(*, span: trace.Span, validated_args: JsonObject, result: Jso
         build_tool_execution_attributes(tool_name=_TOOL_NAME, parameters=validated_args)
     )
     span.set_attributes(build_output_attributes(result, mime_type=OpenInferenceMimeTypeValues.JSON))
-
-
-def _normalize_source_path(source: str) -> str:
-    normalized = source.strip().replace("\\", "/")
-    normalized = normalized.removeprefix("./")
-    normalized = normalized.lstrip("/")
-    return normalized
 
 
 def _format_chunks_as_xml(content: JsonObject) -> str:
@@ -217,10 +201,10 @@ def _json_to_source_chunk(data: dict[str, object]) -> SourceChunk:
 
 def _collect_chunks(
     tool_results: Sequence[JsonObject],
-) -> dict[tuple[str, str], SourceChunk]:
-    """Build ``(source, chunk_id) -> SourceChunk`` from prior search results,
+) -> dict[str, SourceChunk]:
+    """Build ``chunk_id -> SourceChunk`` from prior search results,
     keeping the highest-scoring chunk on duplicates."""
-    chunks: dict[tuple[str, str], SourceChunk] = {}
+    chunks: dict[str, SourceChunk] = {}
     for result in tool_results:
         raw_chunks: object = result.get("chunks")
         if not isinstance(raw_chunks, list):
@@ -229,40 +213,21 @@ def _collect_chunks(
             if not isinstance(item, dict):
                 continue
             item_dict = cast(dict[str, object], item)
-            source = item_dict.get("source")
-            if not isinstance(source, str):
-                continue
             chunk = _json_to_source_chunk(item_dict)
-            key = (source, chunk.chunk_id)
-            if key not in chunks or chunk.score > chunks[key].score:
-                chunks[key] = chunk
+            if not chunk.chunk_id:
+                continue
+            if chunk.chunk_id not in chunks or chunk.score > chunks[chunk.chunk_id].score:
+                chunks[chunk.chunk_id] = chunk
     return chunks
 
 
-def _resolve_document_chunk(
-    raw: DocumentRawCitation,
-    chunks: dict[tuple[str, str], SourceChunk],
+def _resolve_chunk(
+    raw: RawCitation,
+    chunks: dict[str, SourceChunk],
 ) -> SourceChunk | None:
-    exact = chunks.get((raw.source, raw.chunk_id))
-    if exact is not None:
-        return exact
-
-    normalized_source = _normalize_source_path(raw.source)
-    for (source, chunk_id), chunk in chunks.items():
-        if chunk_id != raw.chunk_id:
-            continue
-        if _normalize_source_path(source) == normalized_source:
-            return chunk
-
-    # Last-resort fallback: chunk IDs are content hashes in this project and
-    # therefore globally unique across sources. Accept only a unique match.
-    candidates = [
-        chunk for (_source, chunk_id), chunk in chunks.items() if chunk_id == raw.chunk_id
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-
-    return None
+    if raw.chunk_id is None:
+        return None
+    return chunks.get(raw.chunk_id)
 
 
 class RetrievalTool:
@@ -348,10 +313,10 @@ Note that the search is an embedding based vector search, not a keyword search.
         raw: RawCitation,
         context: CitationContext,
     ) -> Citation | None:
-        if not isinstance(raw, DocumentRawCitation):
+        if raw.chunk_id is None:
             return None
         chunks = _collect_chunks(context.tool_results_for(_TOOL_NAME))
-        chunk = _resolve_document_chunk(raw, chunks)
+        chunk = _resolve_chunk(raw, chunks)
         if chunk is None:
             return None
         return DocumentCitation(
@@ -366,5 +331,4 @@ Note that the search is an embedding based vector search, not a keyword search.
             publication_date=chunk.publication_date,
             source_url=chunk.source_url,
             page=chunk.page,
-            quote_text=raw.quote_text,
         )

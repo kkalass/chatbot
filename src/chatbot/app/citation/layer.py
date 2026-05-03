@@ -38,11 +38,9 @@ from src.chatbot.app.citation.models import (
     QUOTE_END_MARKER,
     QUOTE_START_MARKER,
     Citation,
-    DocumentRawCitation,
     HallucinatedCitation,
     RawCitation,
     ToolCitation,
-    ToolRawCitation,
 )
 from src.chatbot.app.protocols import (
     ChatMessage,
@@ -59,7 +57,6 @@ type CitationLayerStreamItem = str | list[ToolCallInfo] | Citation | Hallucinate
 
 _REASON_NO_TOOL_CALL = "no prior tool call with that tool_call_id"
 _REASON_NO_TOOL_RESULT = "no prior tool result with that tool_call_id"
-_REASON_DOCUMENT_TOOL_NOT_CITEABLE = "document citations require a registered CiteableTool"
 _REASON_TOOL_REJECTED = "validate_and_enrich returned None"
 
 
@@ -85,11 +82,10 @@ _DEFAULT_TOOL_CALL_FRAGMENT = f"""### Generic tool result citation
 When a sentence is grounded in the result of any tool call, emit
 immediately after that sentence a marker block of the form:
 
-    {QUOTE_START_MARKER}{{"kind":"tool_call","tool_call_id":"<id>"}}{QUOTE_END_MARKER}
+    {QUOTE_START_MARKER}{{"tool_call_id":"<id>"}}{QUOTE_END_MARKER}
 
 Required fields (all strings, copied **verbatim** from the conversation
 context):
-    - kind: must be the literal string "tool_call"
     - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
         that produced the supporting tool result
 
@@ -103,8 +99,8 @@ General rules:
   grounded — do not summarise multiple sentences into a single end-of-paragraph
   marker.
 - Emit exactly one JSON object per marker block.
-- Only use values (tool_call_id, source, chunk_id) that appear verbatim in
-  prior assistant tool calls and tool results in the conversation context.
+- Only use values (tool_call_id, chunk_id where applicable) that appear verbatim
+  in prior assistant tool calls and tool results in the conversation context.
 - Never invent IDs (no timestamps, suffixes, prefixes, or reformatted variants).
 - If an exact tool_call_id is not visible in the conversation context, do not
   emit a marker.
@@ -119,7 +115,7 @@ _USER_REMINDER = f"""Reminder: when your answer uses tool outputs, emit inline
 citation markers immediately after the supported sentence — one marker per
 sentence, not one per paragraph. Use exactly the marker tokens
 {QUOTE_START_MARKER} and {QUOTE_END_MARKER}; do not use any marker variants.
-Copy tool_call_id, source, and chunk_id values exactly from prior tool calls
+Copy tool_call_id and chunk_id values exactly from prior tool calls
 and tool results in the conversation context. Never invent IDs or append
 suffixes. If the exact ID is not visible, emit no marker.
 Never emit a standalone marker list block. A marker is only valid if it appears
@@ -335,14 +331,15 @@ def _validate(
     tools_by_name: dict[str, CiteableTool],
     ctx: CitationContext,
 ) -> Citation | HallucinatedCitation:
-    """Resolve the responsible tool and validate by specialized or default rules."""
-    tool_call_id = _tool_call_id_of(raw)
+    """Route to the registered CiteableTool or fall back to a generic ToolCitation."""
+    tool_call_id = raw.tool_call_id
     tool_name = tool_call_lookup.get(tool_call_id)
     if tool_name is None:
         return HallucinatedCitation(raw=raw, reason=_REASON_NO_TOOL_CALL)
 
-    # Generic tool-call citations are handled centrally by the layer.
-    if isinstance(raw, ToolRawCitation):
+    tool = tools_by_name.get(tool_name)
+    if tool is None:
+        # Generic tool — no custom citation logic registered.
         result = _tool_result_for(ctx, tool_call_id)
         if result is None:
             return HallucinatedCitation(raw=raw, reason=_REASON_NO_TOOL_RESULT)
@@ -353,24 +350,10 @@ def _validate(
             result=result,
         )
 
-    assert isinstance(raw, DocumentRawCitation)
-    tool = tools_by_name.get(tool_name)
-    if tool is None:
-        return HallucinatedCitation(raw=raw, reason=_REASON_DOCUMENT_TOOL_NOT_CITEABLE)
     citation = tool.validate_and_enrich(raw, ctx)
     if citation is None:
         return HallucinatedCitation(raw=raw, reason=_REASON_TOOL_REJECTED)
     return citation
-
-
-def _tool_call_id_of(raw: RawCitation) -> str:
-    match raw:
-        case DocumentRawCitation():
-            return raw.tool_call_id
-        case ToolRawCitation():
-            return raw.tool_call_id
-        case _:
-            assert_never(raw)
 
 
 def _tool_result_for(ctx: CitationContext, tool_call_id: str) -> JsonObject | None:

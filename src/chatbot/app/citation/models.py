@@ -1,12 +1,12 @@
 """Citation vocabulary: marker tokens, raw payloads, validated citations.
 
-The :class:`CitationLayer` defines the citation format vocabulary as paired
-typed subtypes — a ``RawCitation`` produced by the marker parser and a
-corresponding ``Citation`` produced by ``CiteableTool.validate_and_enrich``.
+The :class:`CitationLayer` defines the citation format vocabulary as a single
+:class:`RawCitation` produced by the marker parser and typed
+:class:`Citation` subtypes produced by ``CiteableTool.validate_and_enrich``.
 """
 
 from dataclasses import dataclass
-from typing import Literal, assert_never
+from typing import assert_never
 
 from pydantic import BaseModel, ConfigDict
 
@@ -17,47 +17,33 @@ QUOTE_END_MARKER = "</°_quote_°>"
 
 
 # ---------------------------------------------------------------------------
-# RawCitation hierarchy — model output, parsed from marker JSON.
+# RawCitation — model output, parsed from marker JSON.
 # ``raw_marker_text`` is filled by the parser with the complete marker block
 # (start token + JSON payload + end token) so the orchestrator can splice it
 # back into the LLM-side history exactly as the model emitted it.
 # ---------------------------------------------------------------------------
 
 
-class _RawCitationBase(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class RawCitation(BaseModel):
+    """Marker payload emitted by the model.
 
+    Only ``tool_call_id`` is mandatory for all citations. ``chunk_id`` is
+    required for document-level citations (handled by a
+    :class:`~src.chatbot.app.citation.citeable_tool.CiteableTool`); its
+    presence signals that the tool must resolve the specific chunk.
+
+    The :class:`~src.chatbot.app.citation.layer.CitationLayer` routes
+    validation to the ``CiteableTool`` registered for the cited
+    ``tool_call_id``, falling back to a generic
+    :class:`~src.chatbot.app.citation.models.ToolCitation` for tools without
+    custom citation logic. Unknown marker fields are silently ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    tool_call_id: str
+    chunk_id: str | None = None
     raw_marker_text: str = ""
-
-
-class DocumentRawCitation(_RawCitationBase):
-    """Marker payload for a claim grounded in a document-returning tool.
-
-    Used by :class:`~src.chatbot.tools.retrieval.tool.RetrievalTool` and any
-    other ``CiteableTool`` that returns retrievable chunks identified by
-    ``(source, chunk_id)``.
-    """
-
-    kind: Literal["document"] = "document"
-    tool_call_id: str
-    source: str
-    chunk_id: str
-    quote_text: str | None = None
-    claim: str | None = None
-
-
-class ToolRawCitation(_RawCitationBase):
-    """Marker payload for a claim grounded in a non-document tool result.
-
-    The model is only required to copy ``tool_call_id`` verbatim; the
-    authoritative tool name is resolved from history by the citation layer.
-    """
-
-    kind: Literal["tool_call"] = "tool_call"
-    tool_call_id: str
-
-
-type RawCitation = DocumentRawCitation | ToolRawCitation
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +68,6 @@ class DocumentCitation:
     publication_date: str | None = None
     source_url: str | None = None
     page: str | None = None
-    quote_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,7 +120,7 @@ def canonical_key(citation: Citation) -> str:
     """
     match citation:
         case DocumentCitation():
-            return f"document:{citation.tool_call_id}:{citation.source}:{citation.chunk_id}"
+            return f"document:{citation.tool_call_id}:{citation.chunk_id}"
         case ToolCitation():
             return f"tool:{citation.tool_call_id}"
         case _:

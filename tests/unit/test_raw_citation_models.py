@@ -1,75 +1,43 @@
-"""Tests for the RawCitation Pydantic models."""
+"""Tests for the RawCitation Pydantic model."""
 
 import pytest
 from pydantic import ValidationError
 
-from src.chatbot.app.citation import DocumentRawCitation, ToolRawCitation
+from src.chatbot.app.citation import RawCitation
 
 
-class TestDocumentRawCitation:
-    def test_minimal_valid_payload(self) -> None:
-        cit = DocumentRawCitation.model_validate(
-            {"kind": "document", "tool_call_id": "tc1", "source": "s.md", "chunk_id": "c1"}
-        )
-        assert cit.kind == "document"
+class TestRawCitation:
+    def test_minimal_payload_without_chunk_id(self) -> None:
+        cit = RawCitation.model_validate({"tool_call_id": "tc1"})
         assert cit.tool_call_id == "tc1"
-        assert cit.source == "s.md"
-        assert cit.chunk_id == "c1"
-        assert cit.quote_text is None
-        assert cit.claim is None
+        assert cit.chunk_id is None
         assert cit.raw_marker_text == ""
 
-    def test_optional_quote_text_and_claim_carried(self) -> None:
-        cit = DocumentRawCitation.model_validate(
+    def test_payload_with_chunk_id(self) -> None:
+        cit = RawCitation.model_validate({"tool_call_id": "tc1", "chunk_id": "c1"})
+        assert cit.tool_call_id == "tc1"
+        assert cit.chunk_id == "c1"
+
+    def test_unknown_fields_ignored(self) -> None:
+        # Legacy 'kind', 'source', 'quote_text', 'claim' must not cause failures.
+        cit = RawCitation.model_validate(
             {
-                "kind": "document",
                 "tool_call_id": "tc1",
-                "source": "s.md",
                 "chunk_id": "c1",
+                "kind": "document",
+                "source": "s.md",
                 "quote_text": "verbatim",
                 "claim": "the claim",
             }
         )
-        assert cit.quote_text == "verbatim"
-        assert cit.claim == "the claim"
-
-    def test_extra_fields_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            DocumentRawCitation.model_validate(
-                {
-                    "kind": "document",
-                    "tool_call_id": "tc1",
-                    "source": "s",
-                    "chunk_id": "c",
-                    "unknown": "x",
-                }
-            )
-
-    def test_missing_required_fields_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            DocumentRawCitation.model_validate({"kind": "document", "tool_call_id": "tc1"})
-
-    def test_is_frozen(self) -> None:
-        cit = DocumentRawCitation.model_validate(
-            {"kind": "document", "tool_call_id": "tc1", "source": "s", "chunk_id": "c"}
-        )
-        with pytest.raises(ValidationError):
-            cit.tool_call_id = "other"  # type: ignore[misc]
-
-
-class TestToolRawCitation:
-    def test_minimal_valid_payload(self) -> None:
-        cit = ToolRawCitation.model_validate({"kind": "tool_call", "tool_call_id": "tc-1"})
-        assert cit.kind == "tool_call"
-        assert cit.tool_call_id == "tc-1"
-        assert cit.raw_marker_text == ""
-
-    def test_extra_fields_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            ToolRawCitation.model_validate(
-                {"kind": "tool_call", "tool_call_id": "tc", "tool_name": "x"}
-            )
+        assert cit.tool_call_id == "tc1"
+        assert cit.chunk_id == "c1"
 
     def test_missing_tool_call_id_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            ToolRawCitation.model_validate({"kind": "tool_call"})
+            RawCitation.model_validate({"chunk_id": "c1"})
+
+    def test_is_frozen(self) -> None:
+        cit = RawCitation.model_validate({"tool_call_id": "tc1"})
+        with pytest.raises(ValidationError):
+            cit.tool_call_id = "other"  # type: ignore[misc]
