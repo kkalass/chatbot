@@ -62,9 +62,15 @@ def build_chat_model_profile(config: ChatModelConfig) -> ModelProfile:
 
 def build_chat_model(
     config: ChatModelConfig,
+    parse_text_tool_calls: bool = False,
 ) -> ChatModel:
-    """Construct the chat model prescribed by ``config.provider``."""
-    profile = build_chat_model_profile(config)
+    """Construct the chat model prescribed by ``config.provider``.
+
+    Args:
+        parse_text_tool_calls: Enable detection of text-encoded tool calls
+            for models that don't use the native tool_calls field. Determined
+            by the active ModelProfile at the call site.
+    """
     match config.provider:
         case "ollama":
             model = build_ollama_chat_model(
@@ -75,7 +81,7 @@ def build_chat_model(
             )
         case _:
             assert_never(config.provider)
-    if profile.parse_text_tool_calls:
+    if parse_text_tool_calls:
         return TextToolCallParsingWrapper(model)
     return model
 

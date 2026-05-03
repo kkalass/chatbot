@@ -204,7 +204,7 @@ def _build_orchestrator() -> ChatOrchestrator:
     chat_model_config = build_chat_model_config(_settings)
     prompt_profile = build_chat_model_profile(chat_model_config)
 
-    chat_model = build_chat_model(chat_model_config)
+    chat_model = build_chat_model(chat_model_config, prompt_profile.parse_text_tool_calls)
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
     citeable_tools = [retrieval_tool]
