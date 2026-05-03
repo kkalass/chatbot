@@ -1,12 +1,8 @@
 """Shared value objects and Protocol interfaces for the application layer.
 
 Protocol-based boundaries keep the orchestrator independent of concrete
-infrastructure (Ollama, HTTP clients, Chainlit). All cross-module typed
+infrastructure (Ollama, HTTP clients, Chainlit).  All cross-module typed
 contracts that don't belong to a single subsystem live here.
-
-Citation-specific types and the ``CiteableTool`` extension live in
-:mod:`src.chatbot.app.citation` so that this module is free of citation
-internals.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -16,14 +12,26 @@ from typing import Any, Protocol, runtime_checkable
 from src.chatbot.app.prompts import Prompts
 
 # JSON object — the canonical in-memory representation of structured data at
-# protocol boundaries. ``Any`` is intentional: a recursive type alias caused
-# more trouble than it's worth (e.g. ``.get()`` on dicts).
+# protocol boundaries.  ``Any`` is intentional: I tried to use a recursive
+# type alias but that caused more trouble than it is worth (e.g. .get() calls on dicts were troublesome).
 type JsonObject = dict[str, Any]
 
 
 @dataclass(frozen=True)
 class SourceChunk:
-    """A single retrieved chunk of text with provenance metadata."""
+    """A single retrieved chunk of text with provenance metadata.
+
+    Args:
+        content: The raw text of the chunk.
+        source: Path or identifier of the originating document (displayed in
+            citations and used for deduplication).
+        score: Similarity score returned by the vector store (higher is better).
+        chunk_id: Unique identifier assigned during ingestion (opaque string).
+        title: Human-readable document title from sidecar metadata (optional).
+        author: Author(s) from sidecar metadata (optional).
+        publication_date: Publication date string from sidecar metadata (optional).
+        source_url: Canonical URL of the original document (optional).
+    """
 
     content: str
     source: str
@@ -40,41 +48,43 @@ class SourceChunk:
 class ToolCallInfo:
     """A single tool invocation requested by the model.
 
-    ``call_id`` is a backend-specific correlation token threading from the
-    ``tool_calls`` request to the matching ``role="tool"`` result message.
-    Adapters mint it (e.g. tool name for Ollama, UUID for OpenAI); the
-    orchestrator is purely opaque to its format.
+    ``call_id`` is a backend-specific correlation token that ties this request
+    to its corresponding ``role="tool"`` result message.  Adapters are
+    responsible for minting it (e.g. the tool name for Ollama, a UUID returned
+    by the OpenAI API); the orchestrator threads it through opaquely.
+    Defaults to ``""`` so test doubles that don't exercise correlation can
+    omit it.
     """
 
     name: str
-    arguments: JsonObject
-    call_id: str = ""
+    arguments: JsonObject  # LLM-generated JSON args have no fixed schema
+    call_id: str = ""  # backend-specific; adapter fills, orchestrator threads through
 
 
 @dataclass(frozen=True)
 class ChatMessage:
-    """An immutable wire-level chat message handed to a ``ChatModel``.
-
-    Produced by the citation layer from
-    :data:`~src.chatbot.app.citation.messages.CitationLayerMessage` entries.
-    ``content`` is ``str`` for every role after the citation layer pre-computes
-    ``llm_content``; ``JsonObject`` remains permitted only for backward-compat
-    of the wire encoding inside the Ollama adapter.
-    """
+    """An immutable message in a conversation turn."""
 
     role: str  # "system" | "user" | "assistant" | "tool"
-    content: str | JsonObject
-    tool_calls: tuple[ToolCallInfo, ...] | None = None
-    tool_call_id: str | None = None
+    content: str | JsonObject  # str for all roles except "tool"; JsonObject for tool results
+    tool_calls: tuple[ToolCallInfo, ...] | None = (
+        None  # populated for role="assistant" tool-call requests
+    )
+    tool_call_id: str | None = None  # populated for role="tool" result messages
 
 
 @dataclass(frozen=True)
 class ToolSchema:
-    """Information about a tool exposed to the model."""
+    """Information about a tool exposed to the model.
+
+    This is the minimal contract needed by a model implementation to advertise
+    available tools.  It separates the model's concern ("what can I call?")
+    from the orchestrator's concern ("how do I dispatch and execute?").
+    """
 
     name: str
     description: str
-    parameters_schema: JsonObject
+    parameters_schema: JsonObject  # JSON Schema object describing parameters
 
 
 type ChatStreamItem = str | list[ToolCallInfo]
@@ -87,22 +97,17 @@ class Tool(Protocol):
     All dependencies (user-interaction callbacks, service adapters) are
     injected at construction time — tools are instantiated once per session.
     The orchestrator advertises tool schemas to the model and dispatches
-    ``tool_calls`` by name. Tools never import the orchestrator or any UI
+    ``tool_calls`` by name.  Tools never import the orchestrator or any UI
     module.
-
-    All tools can be cited through the citation layer's default
-    ``tool_call`` handling. Tools that need custom citation instructions,
-    model-history formatting, or domain-specific validation implement the
-    :class:`~src.chatbot.app.citation.citeable_tool.CiteableTool` extension.
     """
 
-    schema: ToolSchema
+    schema: ToolSchema  # All metadata needed by the model (name, description, parameters)
 
     async def execute(self, args: JsonObject) -> JsonObject:
         """Execute the tool with *args* decoded from the LLM's tool_call.
 
         Returns a structured ``JsonObject`` forwarded to the model as the tool
-        result. Values must never contain raw credentials.
+        result.  Values must never contain raw credentials.
         """
         ...
 
@@ -112,15 +117,11 @@ class ChatModel(Protocol):
     """Structural interface for a chat model backend.
 
     A single :meth:`stream` method handles both plain-text and tool-calling
-    turns. It yields text chunks as they arrive from the model. If the model
+    turns.  It yields text chunks as they arrive from the model.  If the model
     requests tool calls instead of a text response, a single
     ``list[ToolCallInfo]`` is yielded as the final item; otherwise the stream
-    ends after the text chunks.
-
-    A base ``ChatModel`` is **citation-agnostic** — it never interprets marker
-    tokens. Marker parsing and citation validation are the job of
-    :class:`~src.chatbot.app.citation.layer.CitationLayer`, which decorates a
-    base ``ChatModel``.
+    ends after the text chunks.  Text and tool calls are mutually exclusive
+    within one turn.
     """
 
     def stream(
@@ -128,7 +129,17 @@ class ChatModel(Protocol):
         messages: Sequence[ChatMessage],
         tools: Sequence[ToolSchema] | None = None,
     ) -> AsyncIterator[ChatStreamItem]:
-        """Stream a chat completion, optionally advertising tool schemas."""
+        """Stream a chat completion, optionally advertising tool schemas.
+
+        Args:
+            messages: Full conversation history including the new user turn.
+            tools: Tool schemas to advertise.  ``None`` means no tools.
+
+        Yields:
+            ``str`` chunks while the model generates a text response, followed
+            by a single ``list[ToolCallInfo]`` if the model chose to invoke
+            tools rather than reply with text.
+        """
         ...
 
 
