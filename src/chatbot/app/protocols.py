@@ -149,9 +149,7 @@ class ModelProfile(Protocol):
     and adapter-level capabilities.
 
     Implementations are selected at composition time based on the target model
-    and applied once when wiring the orchestrator. ``ModelProfile`` is
-    explicitly **not** a citation concern; it adjusts the base system prompt,
-    tool schemas, and infrastructure flags that depend on the model's behaviour.
+    and applied once when wiring the orchestrator.
     """
 
     @property
