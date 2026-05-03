@@ -139,9 +139,9 @@ class TestOrchestratorWithCitationLayer:
 
         settings = get_settings()
         config = ChatModelConfig(base_url=settings.ollama_base_url, model=settings.chat_model)
-        prompt_profile = build_chat_model_profile(config)
+        model_profile = build_chat_model_profile(config)
         chat_model = build_chat_model(
-            config, parse_text_tool_calls=prompt_profile.parse_text_tool_calls
+            config, parse_text_tool_calls=model_profile.parse_text_tool_calls
         )
         retriever = build_retriever(
             config=_RETRIEVER_CONFIG,
@@ -153,7 +153,7 @@ class TestOrchestratorWithCitationLayer:
         orchestrator = ChatOrchestrator(
             citation_layer,
             tools=[retrieval_tool],
-            prompt_profile=prompt_profile,
+            model_profile=model_profile,
         )
 
         response = ""

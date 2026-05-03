@@ -132,7 +132,7 @@ class TestSingleTurn:
     @pytest.mark.asyncio
     async def test_yields_streamed_text_and_appends_history(self) -> None:
         layer = _StubCitationLayer([["hello ", "world"]])
-        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
+        orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
 
@@ -143,7 +143,7 @@ class TestSingleTurn:
         c1 = _doc_citation(chunk_id="c1")
         c2 = _doc_citation(chunk_id="c2")
         layer = _StubCitationLayer([["a", c1, "b", c2]])
-        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
+        orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
         numbered = [e for e in events if isinstance(e, NumberedCitation)]
@@ -155,7 +155,7 @@ class TestSingleTurn:
         c1a = _doc_citation(chunk_id="c1")
         c1b = _doc_citation(chunk_id="c1")  # same canonical key
         layer = _StubCitationLayer([[c1a, " then ", c1b]])
-        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
+        orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
         numbered = [e for e in events if isinstance(e, NumberedCitation)]
@@ -169,7 +169,7 @@ class TestSingleTurn:
             reason="x",
         )
         layer = _StubCitationLayer([["a", h, "b"]])
-        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
+        orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
         assert h in events
@@ -188,7 +188,7 @@ class TestToolDispatchLoop:
         )
         orch = ChatOrchestrator(
             layer,  # type: ignore[arg-type]
-            prompt_profile=_profile(),
+            model_profile=_profile(),
             tools=[tool],
         )
 
@@ -217,7 +217,7 @@ class TestRepeatedToolCallSafety:
         )
         orch = ChatOrchestrator(
             layer,  # type: ignore[arg-type]
-            prompt_profile=_profile(),
+            model_profile=_profile(),
             tools=[tool],
         )
 

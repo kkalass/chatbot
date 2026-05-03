@@ -209,10 +209,10 @@ def _build_retrieval_tool() -> RetrievalTool:
 def _build_orchestrator() -> ChatOrchestrator:
     """Compose one session-scoped chat orchestrator instance."""
     chat_model_config = build_chat_model_config(_settings)
-    prompt_profile = build_chat_model_profile(chat_model_config)
+    model_profile = build_chat_model_profile(chat_model_config)
 
     chat_model = build_chat_model(
-        chat_model_config, parse_text_tool_calls=prompt_profile.parse_text_tool_calls
+        chat_model_config, parse_text_tool_calls=model_profile.parse_text_tool_calls
     )
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = _build_retrieval_tool()
@@ -220,7 +220,7 @@ def _build_orchestrator() -> ChatOrchestrator:
     return ChatOrchestrator.create(
         chat_model,
         tools=tools,
-        prompt_profile=prompt_profile,
+        model_profile=model_profile,
         prompts=DEFAULT_PROMPTS,
     )
 

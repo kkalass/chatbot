@@ -186,7 +186,7 @@ class ChatOrchestrator:
             validation. The orchestrator never talks to the raw ``ChatModel``.
         tools: Tool implementations registered for dispatch and advertised to
             the model.
-        prompt_profile: Model-specific prompt profile. Used once at
+        model_profile: Model-specific prompt profile. Used once at
             construction time to derive adjusted prompts and adjusted tool
             schemas.
         prompts: Custom base prompt configuration. Mainly for testing — allows
@@ -197,16 +197,16 @@ class ChatOrchestrator:
         self,
         citation_layer: CitationLayer,
         *,
-        prompt_profile: ModelProfile,
+        model_profile: ModelProfile,
         tools: list[Tool] | None = None,
         prompts: Prompts = DEFAULT_PROMPTS,
     ) -> None:
         self._citation_layer = citation_layer
-        self._prompts = prompt_profile.adjust_prompts(prompts)
+        self._prompts = model_profile.adjust_prompts(prompts)
         _tools = tools or []
         self._tool_map: dict[str, Tool] = {t.schema.name: t for t in _tools}
         adjusted_schemas = [
-            _adjust_tool_schema(t.schema, prompt_profile=prompt_profile) for t in _tools
+            _adjust_tool_schema(t.schema, model_profile=model_profile) for t in _tools
         ]
         self._tool_schemas: list[ToolSchema] | None = adjusted_schemas if adjusted_schemas else None
         self._history: list[CitationLayerMessage] = []
@@ -217,7 +217,7 @@ class ChatOrchestrator:
         model: ChatModel,
         *,
         tools: list[Tool] | None = None,
-        prompt_profile: ModelProfile,
+        model_profile: ModelProfile,
         prompts: Prompts = DEFAULT_PROMPTS,
     ) -> "ChatOrchestrator":
         """Construct a :class:`ChatOrchestrator` from a raw ``ChatModel`` and tools.
@@ -230,14 +230,14 @@ class ChatOrchestrator:
             model: Inner chat model supplying text and tool-call streams.
             tools: All tools to register. ``CiteableTool`` instances are
                 automatically forwarded to the citation layer.
-            prompt_profile: Model-specific prompt adjustments.
+            model_profile: Model-specific prompt adjustments.
             prompts: Base prompt configuration; defaults to
                 :data:`~src.chatbot.app.prompts.DEFAULT_PROMPTS`.
         """
         _tools = tools or []
         citeable = [t for t in _tools if isinstance(t, CiteableTool)]
         citation_layer = CitationLayer(model, citeable_tools=citeable)
-        return cls(citation_layer, tools=_tools, prompt_profile=prompt_profile, prompts=prompts)
+        return cls(citation_layer, tools=_tools, model_profile=model_profile, prompts=prompts)
 
     def process_message(self, user_text: str) -> AsyncIterator[ProcessEvent]:
         """Process *user_text* and return an async iterator of :data:`ProcessEvent` items.
@@ -421,12 +421,12 @@ class ChatOrchestrator:
         return _gen()
 
 
-def _adjust_tool_schema(schema: ToolSchema, *, prompt_profile: ModelProfile) -> ToolSchema:
+def _adjust_tool_schema(schema: ToolSchema, *, model_profile: ModelProfile) -> ToolSchema:
     """Apply model-specific profile adaptations to a tool schema once."""
     return ToolSchema(
         name=schema.name,
-        description=prompt_profile.adjust_tool_description(schema.name, schema.description),
-        parameters_schema=prompt_profile.adjust_parameter_schema(
+        description=model_profile.adjust_tool_description(schema.name, schema.description),
+        parameters_schema=model_profile.adjust_parameter_schema(
             schema.name, schema.parameters_schema
         ),
     )
