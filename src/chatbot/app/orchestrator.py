@@ -337,27 +337,24 @@ class ChatOrchestrator:
                             case _:
                                 assert_never(item)
 
-                    assistant_text = "".join(p for p in parts if isinstance(p, str))
-
-                    if not tool_calls:
-                        _trace_step_response(
-                            span=step_span,
-                            text_chars=text_chars,
-                            tool_calls=tool_calls,
-                            assistant_text=assistant_text,
-                        )
-                        history.append(
-                            citation_layer.make_assistant_message(parts, tool_calls=None)
-                        )
-                        break
+                    assistant_message = citation_layer.make_assistant_message(
+                        parts, tool_calls=tool_calls
+                    )
 
                     _trace_step_response(
                         span=step_span,
                         text_chars=text_chars,
                         tool_calls=tool_calls,
-                        assistant_text=assistant_text,
+                        assistant_text=assistant_message.llm_content,
                     )
 
+                    # Persist the assistant turn in any case so the model can see it,
+                    history.append(assistant_message)
+
+                    if not tool_calls:
+                        break
+
+                    # Detect if the model is stuck in a loop and bail out.
                     current_signature = _tool_call_sequence_signature(tool_calls)
                     if previous_tool_call_signature == current_signature:
                         logger.warning(
@@ -365,24 +362,17 @@ class ChatOrchestrator:
                             step=step_num,
                             calls=[tc.name for tc in tool_calls],
                         )
-                        # Persist the assistant turn so the model can still see it,
-                        # then break to the no-tools fallback below.
-                        history.append(
-                            citation_layer.make_assistant_message(parts, tool_calls=tool_calls)
-                        )
                         fallback_without_tools = True
                         break
                     previous_tool_call_signature = current_signature
 
+                    # All good - we can call the tools and continue to the next step.
                     logger.info(
                         "orchestrator.tool_step",
                         step=step_num,
                         calls=[tc.name for tc in tool_calls],
                     )
 
-                    history.append(
-                        citation_layer.make_assistant_message(parts, tool_calls=tool_calls)
-                    )
                     for tc in tool_calls:
                         result = await _dispatch(tc, tool_map)
                         history.append(
@@ -394,6 +384,7 @@ class ChatOrchestrator:
                 fallback_without_tools = True
 
             if fallback_without_tools:
+                # This ensures that the LLM will respond with some plain text eventually.
                 system_msg = citation_layer.make_system_message(
                     prompts.system_prompt(datetime.now(tz=UTC))
                 )
