@@ -100,17 +100,16 @@ async def _ask_user(prompt: str) -> str | None:
     return str(value).strip() if value else None
 
 
-def collect_unique_numbered_citations(
+def _collect_unique_numbered_citations(
     numbered: list[NumberedCitation],
 ) -> list[NumberedCitation]:
-    """Deduplicate numbered citations by canonical key, keeping first occurrence."""
-    seen: set[str] = set()
+    """Deduplicate by rendered reference number, keeping first occurrence."""
+    seen: set[int] = set()
     unique: list[NumberedCitation] = []
     for nc in numbered:
-        key = canonical_key(nc.citation)
-        if key in seen:
+        if nc.reference_number in seen:
             continue
-        seen.add(key)
+        seen.add(nc.reference_number)
         unique.append(nc)
     return unique
 
@@ -373,7 +372,7 @@ async def on_message(message: cl.Message) -> None:
             await _stream_response_token(pending_whitespace)
             pending_whitespace = ""
 
-        unique_numbered = collect_unique_numbered_citations(numbered)
+        unique_numbered = _collect_unique_numbered_citations(numbered)
         renderable = [nc for nc in unique_numbered if _has_renderable_side_element(nc.citation)]
 
         if unique_numbered and response is None:
