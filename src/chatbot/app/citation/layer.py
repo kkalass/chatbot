@@ -41,6 +41,7 @@ from src.chatbot.app.citation.models import (
     HallucinatedCitation,
     RawCitation,
     ToolCitation,
+    UnsubstantiatedClaim,
 )
 from src.chatbot.app.protocols import (
     ChatMessage,
@@ -52,89 +53,14 @@ from src.chatbot.app.protocols import (
 
 logger = structlog.get_logger(__name__)
 
-type CitationLayerStreamItem = str | list[ToolCallInfo] | Citation | HallucinatedCitation
+type CitationLayerStreamItem = (
+    str | list[ToolCallInfo] | Citation | HallucinatedCitation | UnsubstantiatedClaim
+)
 
 
 _REASON_NO_TOOL_CALL = "no prior tool call with that tool_call_id"
 _REASON_NO_TOOL_RESULT = "no prior tool result with that tool_call_id"
 _REASON_TOOL_REJECTED = "validate_and_enrich returned None"
-
-
-_CITATION_HEADER = f"""## Inline Citations
-
-Whenever a statement in your answer is supported by a specific tool output,
-emit a structured citation object **immediately after** that statement using
-the exact marker tokens below. The markers must not appear anywhere else in
-your response.
-
-Marker tokens (use exactly):
-- start: {QUOTE_START_MARKER}
-- end:   {QUOTE_END_MARKER}
-
-Each marker block contains exactly one strict JSON object describing which
-prior tool result supports the immediately preceding sentence.
-
-Per-tool citation formats:
-"""
-
-_DEFAULT_TOOL_CALL_FRAGMENT = f"""### Generic tool result citation
-
-When a sentence is grounded in the result of any tool call, emit
-immediately after that sentence a marker block of the form:
-
-    {QUOTE_START_MARKER}{{"tool_call_id":"<id>"}}{QUOTE_END_MARKER}
-
-Required fields (all strings, copied **verbatim** from the conversation
-context):
-    - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
-        that produced the supporting tool result
-
-Do not invent IDs. If the exact `tool_call_id` is not visible in the
-conversation context, do not emit a marker for that sentence."""
-
-_CITATION_GENERAL_RULES = """
-
-General rules:
-- Emit a citation marker **after every individual sentence** whose content is
-  grounded — do not summarise multiple sentences into a single end-of-paragraph
-  marker.
-- Emit exactly one JSON object per marker block.
-- Only use values (tool_call_id, chunk_id where applicable) that appear verbatim
-  in prior assistant tool calls and tool results in the conversation context.
-- Never invent IDs (no timestamps, suffixes, prefixes, or reformatted variants).
-- If an exact tool_call_id is not visible in the conversation context, do not
-  emit a marker.
-- Logical inferences and transitions derived from cited material do not require
-  their own marker — only direct factual claims do.
-- If you make a factual claim that you cannot back with a citation marker,
-  mark it inline with **!UNBELEGT!** immediately after the claim.
-- Keep all normal user-facing answer text outside the markers."""
-
-
-_USER_REMINDER = f"""Reminder: when your answer uses tool outputs, emit inline
-citation markers immediately after the supported sentence — one marker per
-sentence, not one per paragraph. Use exactly the marker tokens
-{QUOTE_START_MARKER} and {QUOTE_END_MARKER}; do not use any marker variants.
-Copy tool_call_id and chunk_id values exactly from prior tool calls
-and tool results in the conversation context. Never invent IDs or append
-suffixes. If the exact ID is not visible, emit no marker.
-Never emit a standalone marker list block. A marker is only valid if it appears
-immediately after the exact sentence it supports.
-
-!!!IMPORTANT!!!
-Every factual claim in your answer must either:
-  (a) be immediately followed by a citation marker referencing the exact tool
-      output whose content supports it, OR
-  (b) be marked **!UNBELEGT!** inline if no tool output contains the
-      information.
-There is no third option: do not state facts without a marker or a !UNBELEGT!
-flag. Logical inferences and transitional sentences derived from cited material
-are exempt. Do not append markers in a separate trailing citation section.
-Place each marker at the point of use, directly after the supported sentence.
-
-The actual user message is:
-
-"""
 
 
 def _to_chat_message(msg: CitationLayerMessage) -> ChatMessage:
@@ -161,7 +87,7 @@ def _to_chat_message(msg: CitationLayerMessage) -> ChatMessage:
 
 
 def _splice_assistant_llm_content(
-    parts: Sequence[str | Citation | HallucinatedCitation],
+    parts: Sequence[str | Citation | HallucinatedCitation | UnsubstantiatedClaim],
 ) -> str:
     """Reconstruct the LLM-side text by replacing each citation by its raw marker."""
     pieces: list[str] = []
@@ -210,28 +136,112 @@ class CitationLayer:
 
     def make_system_message(self, adjusted_base_prompt: str) -> CitationLayerSystemMessage:
         """Append citation instructions to the orchestrator-supplied base prompt."""
-        fragments = [_DEFAULT_TOOL_CALL_FRAGMENT]
-        fragments.extend(
+        joined_fragments = "\n\n".join(
             tool.cite_instructions().prompt_fragment for tool in self._tools_by_name.values()
         )
-        joined_fragments = "\n\n".join(fragments)
-        citation_section = f"{_CITATION_HEADER}\n{joined_fragments}{_CITATION_GENERAL_RULES}"
-        return CitationLayerSystemMessage(
-            llm_content=f"{adjusted_base_prompt}\n\n{citation_section}"
-        )
+        if joined_fragments:
+            joined_fragments = "\n" + joined_fragments
+
+        prompt = f"""{adjusted_base_prompt}
+
+## Inline Citations
+
+Whenever a statement in your answer is supported by a specific tool output,
+emit a structured citation object **immediately after** that statement using
+the exact marker tokens below. The markers must not appear anywhere else in
+your response.
+
+Marker tokens (use exactly):
+- start: {QUOTE_START_MARKER}
+- end:   {QUOTE_END_MARKER}
+
+Each marker block contains exactly one strict JSON object describing which
+prior tool result supports the immediately preceding sentence.
+
+### Per-tool citation formats
+
+#### Generic tool result citation
+
+When a sentence is grounded in the result of any tool call, emit
+immediately after that sentence a marker block of the form:
+
+    {QUOTE_START_MARKER}{{"tool_call_id":"<id>"}}{QUOTE_END_MARKER}
+
+Required fields (all strings, copied **verbatim** from the conversation
+context):
+    - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
+        that produced the supporting tool result
+
+Do not invent IDs. If the exact `tool_call_id` is not visible in the
+conversation context, do not emit a marker for that sentence.
+{joined_fragments}
+
+### General rules
+- Emit a citation marker **after every individual sentence** whose content is
+  grounded — do not summarise multiple sentences into a single end-of-paragraph
+  marker.
+- Emit exactly one JSON object per marker block.
+- Only use values (tool_call_id, chunk_id where applicable) that appear verbatim
+  in prior assistant tool calls and tool results in the conversation context.
+- Never invent IDs (no timestamps, suffixes, prefixes, or reformatted variants).
+- If an exact tool_call_id is not visible in the conversation context, do not
+  emit a marker.
+- Logical inferences and transitions derived from cited material do not require
+  their own marker — only direct factual claims do.
+- If you make a factual claim that you cannot back with a citation marker,
+  emit a marker block immediately after the claim:
+    {QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}
+- Keep all normal user-facing answer text outside the markers.
+"""
+        return CitationLayerSystemMessage(llm_content=prompt)
 
     def make_user_message(self, user_text: str) -> CitationLayerUserMessage:
         """Prepend the per-turn citation reminder to *user_text*.
 
-        Behavior preservation: the reminder block is identical in content and
-        position to today's, with ``user_text`` no longer carrying citation
-        framing of its own.
+        The reminder starts with the tool-agnostic base block, then appends
+        any ``reminder_fragment`` contributed by registered ``CiteableTool``s,
+        keeping tool-specific nudges co-located with their tool.
         """
-        return CitationLayerUserMessage(llm_content=f"{_USER_REMINDER}{user_text}\n")
+        tool_reminders = "\n".join(
+            [
+                instr.reminder_fragment
+                for tool in self._tools_by_name.values()
+                if (instr := tool.cite_instructions()).reminder_fragment is not None
+            ]
+        )
+        reminder = f"""Reminder: when your answer uses tool outputs, emit inline
+citation markers immediately after the supported sentence — one marker per
+sentence, not one per paragraph. Use exactly the marker tokens
+{QUOTE_START_MARKER} and {QUOTE_END_MARKER}; do not use any marker variants.
+Copy tool_call_id and chunk_id values exactly from prior tool calls
+and tool results in the conversation context. Never invent IDs or append
+suffixes. If the exact ID is not visible, emit no marker.
+Never emit a standalone marker list block. A marker is only valid if it appears
+immediately after the exact sentence it supports.
+
+{tool_reminders}
+
+!!!IMPORTANT!!!
+Every factual claim in your answer must either:
+  (a) be immediately followed by a citation marker referencing the exact tool
+      output whose content supports it, OR
+  (b) be followed by an unsubstantiated marker if no tool output contains
+      the information: {QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}
+There is no third option: do not state facts without a citation marker or an
+unsubstantiated marker. Logical inferences and transitional sentences derived
+from cited material are exempt. Do not append markers in a separate trailing
+citation section. Place each marker at the point of use, directly after the
+supported sentence.
+
+The actual user message is:
+
+{user_text}
+"""
+        return CitationLayerUserMessage(llm_content=reminder)
 
     def make_assistant_message(
         self,
-        parts: Sequence[str | Citation | HallucinatedCitation],
+        parts: Sequence[str | Citation | HallucinatedCitation | UnsubstantiatedClaim],
         *,
         tool_calls: Sequence[ToolCallInfo] | None = None,
     ) -> CitationLayerAssistantMessage:
@@ -330,8 +340,10 @@ def _validate(
     tool_call_lookup: dict[str, str],
     tools_by_name: dict[str, CiteableTool],
     ctx: CitationContext,
-) -> Citation | HallucinatedCitation:
+) -> Citation | HallucinatedCitation | UnsubstantiatedClaim:
     """Route to the registered CiteableTool or fall back to a generic ToolCitation."""
+    if raw.kind == "unsubstantiated":
+        return UnsubstantiatedClaim(raw=raw)
     tool_call_id = raw.tool_call_id
     tool_name = tool_call_lookup.get(tool_call_id)
     if tool_name is None:

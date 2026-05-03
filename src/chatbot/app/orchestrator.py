@@ -33,6 +33,7 @@ from src.chatbot.app.citation import (
     CiteableTool,
     HallucinatedCitation,
     NumberedCitation,
+    UnsubstantiatedClaim,
     canonical_key,
 )
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
@@ -62,7 +63,7 @@ tracer = trace.get_tracer(__name__)
 _MAX_TOOL_STEPS = 10  # safety limit to prevent infinite agentic loops
 
 
-type ProcessEvent = str | NumberedCitation | HallucinatedCitation
+type ProcessEvent = str | NumberedCitation | HallucinatedCitation | UnsubstantiatedClaim
 
 
 def _tool_call_sequence_signature(tool_calls: list[ToolCallInfo]) -> tuple[tuple[str, str], ...]:
@@ -284,7 +285,7 @@ class ChatOrchestrator:
                         tool_schemas=tool_schemas,
                     )
 
-                    parts: list[str | Citation | HallucinatedCitation] = []
+                    parts: list[str | Citation | HallucinatedCitation | UnsubstantiatedClaim] = []
                     tool_calls: list[ToolCallInfo] = []
                     text_chars = 0
 
@@ -299,6 +300,10 @@ class ChatOrchestrator:
                             continue
                         if isinstance(item, HallucinatedCitation):
                             hallucinated_count += 1
+                            parts.append(item)
+                            yield item
+                            continue
+                        if isinstance(item, UnsubstantiatedClaim):
                             parts.append(item)
                             yield item
                             continue
@@ -387,6 +392,9 @@ class ChatOrchestrator:
                         continue
                     elif isinstance(item, HallucinatedCitation):
                         hallucinated_count += 1
+                        parts.append(item)
+                        yield item
+                    elif isinstance(item, UnsubstantiatedClaim):
                         parts.append(item)
                         yield item
                     else:

@@ -56,7 +56,7 @@ class _SearchInput(ToolInputModel):
     query: str
 
 
-_CITE_FRAGMENT = f"""### {_TOOL_NAME}
+_CITE_FRAGMENT = f"""#### {_TOOL_NAME}
 
 When a sentence is grounded in a chunk returned by `{_TOOL_NAME}`, emit
 immediately after that sentence a marker block of the form:
@@ -71,7 +71,37 @@ context — no re-formatting):
     whose content supports the sentence
 
 Do not invent IDs. If the exact `tool_call_id` or `chunk_id` is not visible
-in the conversation context, do not emit a marker for that sentence."""
+in the conversation context, do not emit a marker for that sentence.
+
+Only cite a chunk if the claim is directly supported by the text in that
+chunk's inner content — do not cite a chunk whose text does not contain
+the information being stated. Read the chunk content first, then copy
+that chunk's `chunk_id`.
+
+A common failure mode is to default to the first `<chunk>` of a source.
+Do not do this. The `chunk_id` must come from the specific `<chunk>`
+element whose inner text supports the sentence — not from the first chunk
+or a sibling chunk of the same `<source>`.
+
+Correct vs. incorrect attribution example:
+
+  Given:
+    <source ...>
+      <chunk chunk_id=\"AAA\">Job losses are likely in some sectors.</chunk>
+      <chunk chunk_id=\"BBB\">AI can also create new jobs and raise productivity.</chunk>
+    </source>
+
+  CORRECT (claim about new jobs cites BBB, whose content supports it):
+    AI may create new jobs. {QUOTE_START_MARKER}{{"tool_call_id":"...","chunk_id":"BBB"}}{QUOTE_END_MARKER}
+
+  INCORRECT (claim about new jobs cites AAA, the first chunk, whose content is about job losses):
+    AI may create new jobs. {QUOTE_START_MARKER}{{"tool_call_id":"...","chunk_id":"AAA"}}{QUOTE_END_MARKER}"""
+
+_CITE_REMINDER = (
+    f"For {_TOOL_NAME}: only cite a chunk whose content actually contains the stated "
+    "information — verify the chunk text matches the claim before copying its chunk_id. "
+    "Do not default to the first chunk of a source."
+)
 
 
 def _trace_request(*, span: trace.Span, args: JsonObject) -> None:
@@ -303,7 +333,7 @@ Note that the search is an embedding based vector search, not a keyword search.
     # --- CiteableTool ------------------------------------------------
 
     def cite_instructions(self) -> CiteInstructions:
-        return CiteInstructions(prompt_fragment=_CITE_FRAGMENT)
+        return CiteInstructions(prompt_fragment=_CITE_FRAGMENT, reminder_fragment=_CITE_REMINDER)
 
     def format_for_history(self, result: JsonObject) -> str:
         return _format_chunks_as_xml(result)

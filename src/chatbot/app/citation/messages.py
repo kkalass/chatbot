@@ -7,7 +7,7 @@ messages — see :mod:`src.chatbot.app.citation.layer`.
 
 from dataclasses import dataclass
 
-from src.chatbot.app.citation.models import Citation, HallucinatedCitation
+from src.chatbot.app.citation.models import Citation, HallucinatedCitation, UnsubstantiatedClaim
 from src.chatbot.app.protocols import JsonObject, ToolCallInfo
 
 
@@ -41,7 +41,7 @@ class CitationLayerAssistantMessage:
     of this turn (mutually exclusive with a final text-only assistant message).
     """
 
-    parts: tuple[str | Citation | HallucinatedCitation, ...]
+    parts: tuple[str | Citation | HallucinatedCitation | UnsubstantiatedClaim, ...]
     llm_content: str
     tool_calls: tuple[ToolCallInfo, ...] | None = None
 

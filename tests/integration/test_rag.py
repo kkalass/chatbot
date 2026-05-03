@@ -126,6 +126,7 @@ class TestOrchestratorWithCitationLayer:
             CitationLayer,
             HallucinatedCitation,
             NumberedCitation,
+            UnsubstantiatedClaim,
         )
         from src.chatbot.app.orchestrator import ChatOrchestrator
         from src.chatbot.infrastructure.chat import (
@@ -158,11 +159,14 @@ class TestOrchestratorWithCitationLayer:
         response = ""
         numbered: list[NumberedCitation] = []
         hallucinated: list[HallucinatedCitation] = []
+        unsubstantiated: list[UnsubstantiatedClaim] = []
         async for event in orchestrator.process_message("What is Zurich known for?"):
             if isinstance(event, str):
                 response += event
             elif isinstance(event, NumberedCitation):
                 numbered.append(event)
+            elif isinstance(event, UnsubstantiatedClaim):
+                unsubstantiated.append(event)
             else:
                 hallucinated.append(event)
 

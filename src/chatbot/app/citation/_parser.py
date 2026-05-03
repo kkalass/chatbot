@@ -56,6 +56,11 @@ def _parse_quote_block(raw_block: str) -> RawCitation | None:
         parsed_payload.pop("raw_marker_text", None)
         parsed_payload["raw_marker_text"] = raw_block
 
+        # Unsubstantiated claims carry no tool_call_id; provide sentinel so
+        # model_validate succeeds — _validate() short-circuits on kind first.
+        if parsed_payload.get("kind") == "unsubstantiated" and "tool_call_id" not in parsed_payload:
+            parsed_payload["tool_call_id"] = ""
+
         return RawCitation.model_validate(parsed_payload)
     except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
         logger.warning(

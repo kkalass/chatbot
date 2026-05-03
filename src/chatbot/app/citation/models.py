@@ -27,10 +27,13 @@ QUOTE_END_MARKER = "</°_quote_°>"
 class RawCitation(BaseModel):
     """Marker payload emitted by the model.
 
-    Only ``tool_call_id`` is mandatory for all citations. ``chunk_id`` is
-    required for document-level citations (handled by a
-    :class:`~src.chatbot.app.citation.citeable_tool.CiteableTool`); its
-    presence signals that the tool must resolve the specific chunk.
+    ``tool_call_id`` is required for all regular citations. For unsubstantiated
+    claims the model emits ``{"kind": "unsubstantiated"}`` without a
+    ``tool_call_id``; the parser injects a sentinel ``tool_call_id=""`` so that
+    ``model_validate`` succeeds, and ``_validate`` short-circuits on ``kind``
+    before consulting the tool-call lookup.
+
+    ``chunk_id`` is present for document-level citations only.
 
     The :class:`~src.chatbot.app.citation.layer.CitationLayer` routes
     validation to the ``CiteableTool`` registered for the cited
@@ -43,6 +46,7 @@ class RawCitation(BaseModel):
 
     tool_call_id: str
     chunk_id: str | None = None
+    kind: str | None = None
     raw_marker_text: str = ""
 
 
@@ -94,6 +98,24 @@ class HallucinatedCitation:
 
     raw: RawCitation
     reason: str
+
+    @property
+    def raw_marker_text(self) -> str:
+        return self.raw.raw_marker_text
+
+
+@dataclass(frozen=True)
+class UnsubstantiatedClaim:
+    """A ``RawCitation`` with ``kind="unsubstantiated"`` — the model explicitly
+    signals that no tool output supports the preceding claim.
+
+    This is *not* a validation failure: it is correct, transparent model
+    behaviour. The UI renders it as ``_(unbelegt)_`` inline at the marker
+    position. ``raw_marker_text`` is spliced back into the LLM-side history
+    so the model sees its own signal on subsequent turns.
+    """
+
+    raw: RawCitation
 
     @property
     def raw_marker_text(self) -> str:

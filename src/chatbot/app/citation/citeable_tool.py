@@ -24,9 +24,16 @@ class CiteInstructions:
     the tool's result payload feed into that schema. The
     :class:`CitationLayer` concatenates fragments from all registered
     ``CiteableTool``s into the citation section of the system prompt.
+
+    ``reminder_fragment``, if provided, is included in the per-turn user
+    reminder so the model is nudged on every turn with tool-specific
+    attribution rules that are easy to forget (e.g. chunk-content
+    verification for document retrieval). Keep it short — one to three
+    sentences.
     """
 
     prompt_fragment: str
+    reminder_fragment: str | None = None
 
 
 @runtime_checkable

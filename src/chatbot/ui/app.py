@@ -31,6 +31,7 @@ from src.chatbot.app.citation import (
     HallucinatedCitation,
     NumberedCitation,
     ToolCitation,
+    UnsubstantiatedClaim,
     canonical_key,
 )
 from src.chatbot.app.orchestrator import ChatOrchestrator, ProcessEvent
@@ -370,6 +371,15 @@ async def on_message(message: cl.Message) -> None:
                         reason=event.reason,
                         tool_call_id=event.raw.tool_call_id,
                     )
+                case UnsubstantiatedClaim():
+                    tokens, pending_whitespace = _format_text_chunk(
+                        # TODO: i18n: we emit "unbelegt" in german; consider making this configurable or part of the prompt instructions.
+                        " _(unbelegt)_",
+                        pending_whitespace,
+                    )
+                    for token in tokens:
+                        await _stream_response_token(token)
+                    logger.debug("session.unsubstantiated_claim")
                 case _:
                     assert_never(event)
 

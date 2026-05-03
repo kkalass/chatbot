@@ -11,7 +11,7 @@ Public API:
     - :class:`CitationContext`
     - :class:`RawCitation`
     - :data:`Citation`, :class:`DocumentCitation`, :class:`ToolCitation`
-    - :class:`NumberedCitation`, :class:`HallucinatedCitation`
+    - :class:`NumberedCitation`, :class:`HallucinatedCitation`, :class:`UnsubstantiatedClaim`
     - :data:`CitationLayerMessage` and its variants
 """
 
@@ -34,6 +34,7 @@ from src.chatbot.app.citation.models import (
     NumberedCitation,
     RawCitation,
     ToolCitation,
+    UnsubstantiatedClaim,
     canonical_key,
 )
 
@@ -55,6 +56,7 @@ __all__ = [
     "NumberedCitation",
     "RawCitation",
     "ToolCitation",
+    "UnsubstantiatedClaim",
     "build_citation_context",
     "canonical_key",
 ]
