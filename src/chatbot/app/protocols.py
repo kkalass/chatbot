@@ -158,8 +158,8 @@ class ModelProfile(Protocol):
 
         Models that serialise tool invocations as plain JSON in their response
         text (e.g. qwen2.5-coder) require the adapter to buffer and parse that
-        text.  For all other models this must be ``False`` to avoid unnecessary
-        buffering that breaks streaming UX.
+        text.  Only responses whose first chunk starts with ``{`` or a fenced
+        JSON block are buffered; all other responses stream through unchanged.
         """
         ...
 
