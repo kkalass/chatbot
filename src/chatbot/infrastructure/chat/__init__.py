@@ -15,6 +15,7 @@ from ._model_profile import (
     SmallModelProfile,
 )
 from ._ollama import build_ollama_chat_model
+from ._text_tool_call_wrapper import TextToolCallParsingWrapper
 
 
 @dataclass(frozen=True)
@@ -66,15 +67,17 @@ def build_chat_model(
     profile = build_chat_model_profile(config)
     match config.provider:
         case "ollama":
-            return build_ollama_chat_model(
+            model = build_ollama_chat_model(
                 base_url=config.base_url,
                 model=config.model,
                 temperature=config.temperature,
                 seed=config.seed,
-                parse_text_tool_calls=profile.parse_text_tool_calls,
             )
         case _:
             assert_never(config.provider)
+    if profile.parse_text_tool_calls:
+        return TextToolCallParsingWrapper(model)
+    return model
 
 
 __all__ = [

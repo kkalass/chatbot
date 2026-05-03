@@ -1,6 +1,6 @@
-"""Unit tests for the text-encoded tool call parser in the Ollama chat model."""
+"""Unit tests for the text-encoded tool call parser."""
 
-from src.chatbot.infrastructure.chat._ollama import (
+from src.chatbot.infrastructure.chat._text_tool_call_wrapper import (
     _try_parse_text_tool_call,  # pyright: ignore[reportPrivateUsage]
 )
 

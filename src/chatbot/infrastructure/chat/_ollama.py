@@ -6,7 +6,6 @@ imported outside the infrastructure package.
 
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from typing import cast
 
 import structlog
 from ollama import AsyncClient, Message
@@ -36,75 +35,6 @@ from src.chatbot.observability.schema import SPAN_CHAT_MODEL_OLLAMA_STREAM
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
-
-
-def _normalize_text_tool_call_payload(text: str) -> str:
-    """Strip markdown code fences from text-encoded tool calls.
-
-    Some models wrap the JSON payload in a fenced block such as
-    `````json ... ````` before emitting it as text.
-    """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-
-    lines = stripped.splitlines()
-    if len(lines) < 2:
-        return stripped
-    if not lines[0].startswith("```"):
-        return stripped
-    if lines[-1].strip() != "```":
-        return stripped
-    return "\n".join(lines[1:-1]).strip()
-
-
-def _looks_like_text_tool_call_start(text: str) -> bool:
-    """Return whether the first streamed text chunk could be a text tool call."""
-    stripped = text.lstrip()
-    return stripped.startswith("{") or stripped.startswith("```")
-
-
-def _coerce_text_tool_call_arguments(value: object) -> dict[str, object] | None:
-    """Coerce tool-call argument payloads to a JSON object when possible."""
-    if isinstance(value, dict):
-        return value  # type: ignore[return-value]
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed: object = json.loads(_normalize_text_tool_call_payload(value))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return parsed  # type: ignore[return-value]
-
-
-def _try_parse_text_tool_call(text: str) -> ToolCallInfo | None:
-    """Parse a text-encoded tool call emitted by models that don't use the native tool_calls field.
-
-    Some models (e.g. qwen2.5-coder) serialise tool invocations as plain JSON text:
-    ``{"name": "fn", "arguments": {...}}``
-    instead of populating ``message.tool_calls``.  Returns ``None`` if ``text``
-    does not match that shape, so the caller can fall back to yielding text.
-    """
-    normalized = _normalize_text_tool_call_payload(text)
-    try:
-        # Annotate as object so isinstance narrows cleanly without Unknown propagation.
-        raw: object = json.loads(normalized)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(raw, dict):
-        return None
-    payload = cast(dict[str, object], raw)
-    name: object = payload.get("name")
-    raw_arguments: object = payload.get("arguments")
-    if raw_arguments is None:
-        # Some models emit OpenAI-style "parameters" instead of "arguments".
-        raw_arguments = payload.get("parameters")
-    arguments = _coerce_text_tool_call_arguments(raw_arguments)
-    if not isinstance(name, str) or arguments is None:
-        return None
-    return ToolCallInfo(name=name, arguments=arguments, call_id=name)
 
 
 def _to_ollama_tool(tool_schema: ToolSchema) -> OllamaTool:
@@ -247,13 +177,11 @@ class OllamaChatModel:
         model: str,
         temperature: float | None = None,
         seed: int | None = None,
-        parse_text_tool_calls: bool = False,
     ) -> None:
         self._client = client
         self._model = model
         self._temperature = temperature
         self._seed = seed
-        self._parse_text_tool_calls = parse_text_tool_calls
         self._ollama_options: dict[str, object] = {
             **({"temperature": temperature} if temperature is not None else {}),
             **({"seed": seed} if seed is not None else {}),
@@ -298,29 +226,13 @@ class OllamaChatModel:
                 trace_response_text_parts: list[str] = []
 
                 tool_calls: list[ToolCallInfo] = []
-                # Buffer used when the first content chunk starts with '{' (or '```json\n{') — the model
-                # may be emitting a text-encoded tool call instead of using tool_calls.
-                # Only active when parse_text_tool_calls=True (opt-in, model-specific).
-                parse_text_tool_calls = self._parse_text_tool_calls
-                text_tool_call_buffer: list[str] | None = None
                 try:
                     async for chunk in response_stream:
                         content = chunk.message.content
                         if content:
                             trace_streamed_text_chars += len(content)
-                            if text_tool_call_buffer is not None:
-                                # Already in buffering mode — keep collecting.
-                                text_tool_call_buffer.append(content)
-                            elif (
-                                parse_text_tool_calls
-                                and not trace_response_text_parts
-                                and _looks_like_text_tool_call_start(content)
-                            ):
-                                # First content chunk looks like JSON — enter buffering mode.
-                                text_tool_call_buffer = [content]
-                            else:
-                                trace_response_text_parts.append(content)
-                                yield content
+                            trace_response_text_parts.append(content)
+                            yield content
                         if chunk.message.tool_calls:
                             for tc in chunk.message.tool_calls:
                                 tool_calls.append(
@@ -330,22 +242,6 @@ class OllamaChatModel:
                                         call_id=tc.function.name,
                                     )
                                 )
-
-                    # Resolve text-tool-call buffer: try to parse, fall back to text.
-                    if text_tool_call_buffer is not None:
-                        accumulated = "".join(text_tool_call_buffer)
-                        parsed = _try_parse_text_tool_call(accumulated)
-                        if parsed is not None:
-                            logger.debug(
-                                "ollama.stream.text_tool_call_detected",
-                                name=parsed.name,
-                            )
-                            tool_calls.append(parsed)
-                        else:
-                            # Not a tool call — emit as regular text.
-                            trace_response_text_parts.extend(text_tool_call_buffer)
-                            for part in text_tool_call_buffer:
-                                yield part
 
                     if tool_calls:
                         yield tool_calls
@@ -375,23 +271,12 @@ def build_ollama_chat_model(
     model: str,
     temperature: float | None = None,
     seed: int | None = None,
-    parse_text_tool_calls: bool = False,
 ) -> ChatModel:
-    """Build an Ollama-backed chat model.
-
-    Args:
-        parse_text_tool_calls: Enable detection of text-encoded tool calls
-            (JSON in response text) for models that don't use the native
-            tool_calls field (e.g. qwen2.5-coder). Off by default — enabling
-            it buffers the entire first response chunk when it starts with
-            ``{`` or a fenced code block, which degrades streaming UX for
-            normal text models.
-    """
+    """Build an Ollama-backed chat model."""
     client = AsyncClient(host=base_url)
     return OllamaChatModel(
         client=client,
         model=model,
         temperature=temperature,
         seed=seed,
-        parse_text_tool_calls=parse_text_tool_calls,
     )
