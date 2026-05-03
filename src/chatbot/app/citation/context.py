@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Read-only view of past tool results passed to ``CiteableTool.validate_and_enrich``.
 
 The :class:`CitationContext` Protocol is the only coupling point between the

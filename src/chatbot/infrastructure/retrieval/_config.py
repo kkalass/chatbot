@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """RetrieverConfig — construction-time config for the retrieval adapter."""
 
 from dataclasses import dataclass

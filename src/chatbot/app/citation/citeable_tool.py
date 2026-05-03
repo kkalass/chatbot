@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """``CiteableTool`` Protocol — extends ``Tool`` with custom citation behavior.
 
 The :class:`CitationLayer` already supports default ``tool_call`` citations for

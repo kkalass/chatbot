@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Chat orchestration: conversation history and agentic tool-call loop.
 
 The orchestrator is the single entry point for the UI layer. It depends

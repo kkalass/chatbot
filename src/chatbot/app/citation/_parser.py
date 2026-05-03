@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Streaming marker-block parser for the citation layer.
 
 Detects ``QUOTE_START_MARKER`` / ``QUOTE_END_MARKER`` blocks in a model text

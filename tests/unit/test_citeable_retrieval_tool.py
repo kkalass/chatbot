@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the citeable :class:`RetrievalTool`."""
 
 from collections.abc import Sequence

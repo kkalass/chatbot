@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Ingestion pipeline: load, chunk, embed, and index txt/md/pdf documents.
 
 This module owns the Haystack pipeline logic for ingestion.  Infrastructure

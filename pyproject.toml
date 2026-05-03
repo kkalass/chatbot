@@ -9,6 +9,8 @@ packages = ["src"]
 name = "chatbot"
 version = "0.1.0"
 description = "Locally-run RAG chatbot using Chainlit, Haystack, Ollama, and Qdrant"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Klas Kalaß" }]
 requires-python = ">=3.12"
 dependencies = [
     "chainlit>=2.0",

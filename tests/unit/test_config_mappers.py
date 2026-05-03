@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for settings-to-config mapping helpers."""
 
 from src.ingest.config import build_document_store_config

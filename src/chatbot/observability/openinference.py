@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """OpenInference helpers for Phoenix-friendly manual span annotation.
 
 This module centralizes all OpenInference-specific constants and helper API

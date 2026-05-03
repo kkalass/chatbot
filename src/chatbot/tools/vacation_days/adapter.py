@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Simulated HR service adapter with Pydantic boundary models.
 
 This module is the only place in the application that knows about the

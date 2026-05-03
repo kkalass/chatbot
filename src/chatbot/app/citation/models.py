@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Citation vocabulary: marker tokens, raw payloads, validated citations.
 
 The :class:`CitationLayer` defines the citation format vocabulary as a single

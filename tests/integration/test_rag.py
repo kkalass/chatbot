@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Integration tests for text RAG: ingest fixture corpus, retrieve, and verify citations.
 
 These tests require live Qdrant and Ollama services. They are skipped

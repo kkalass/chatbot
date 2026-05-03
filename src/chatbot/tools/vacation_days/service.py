@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Typed boundaries for the vacation-days integration.
 
 These Protocols describe the collaboration points around the vacation-days

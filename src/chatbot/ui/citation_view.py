@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Citation rendering helpers for the Chainlit UI.
 
 Renders both :class:`DocumentCitation` (retrieved chunks) and

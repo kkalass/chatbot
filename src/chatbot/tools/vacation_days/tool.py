@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """VacationDaysTool: bridges the LLM tool-calling contract and the HR adapter.
 
 Nothing in this module imports ``chainlit`` or any UI module.  All

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Model profile implementations.
 
 The model-profile interface lives in ``src.chatbot.app.protocols.ModelProfile``.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Chainlit entry point: session lifecycle, streaming renderer, and observability.
 
 This module is the composition root for the application. Responsibilities:

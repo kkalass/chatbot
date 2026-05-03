@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ToolInputModel JSON-string coercion behavior."""
 
 from pydantic import ValidationError

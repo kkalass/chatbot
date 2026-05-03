@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Ollama embedder implementation helpers."""
 
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder

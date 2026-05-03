@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tracing schema contract for span names and attribute ownership.
 
 This module defines stable span operation names used across the chatbot.

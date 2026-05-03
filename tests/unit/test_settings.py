@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for src/config/settings.py."""
 
 from src.settings import Settings, get_settings

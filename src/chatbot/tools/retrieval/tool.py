@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LLM-callable, citeable retrieval tool.
 
 Modelling retrieval as a tool lets the LLM decide *when* to search and *how*

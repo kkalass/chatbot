@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for :class:`ChatOrchestrator`: per-turn ref numbering, dispatch, fallbacks."""
 
 from collections.abc import AsyncIterator, Sequence

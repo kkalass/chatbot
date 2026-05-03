@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared value objects and Protocol interfaces for the application layer.
 
 Protocol-based boundaries keep the orchestrator independent of concrete

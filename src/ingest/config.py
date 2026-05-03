@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Settings → ingest infrastructure config converters.
 
 Pure data transformation — no I/O, no object construction.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """OpenTelemetry setup and trace-safe attribute serialization helpers."""
 
 from __future__ import annotations

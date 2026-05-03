@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Provider-agnostic decorator that detects text-encoded tool calls in a chat stream.
 
 Some models (e.g. qwen2.5-coder) serialise tool invocations as plain JSON in

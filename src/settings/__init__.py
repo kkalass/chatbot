@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Application-wide settings loaded from environment variables.
 
 All runtime configuration (model names, service endpoints, retrieval parameters)

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Common Pydantic base model for LLM-facing tool argument parsing.
 
 LLM tool-calls sometimes serialize structured arguments as JSON strings

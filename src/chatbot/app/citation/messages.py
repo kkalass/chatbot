@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Citation-layer history messages with pre-computed LLM-side content.
 
 Each variant carries the LLM-ready ``llm_content`` string alongside any

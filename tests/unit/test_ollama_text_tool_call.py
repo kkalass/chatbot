@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the text-encoded tool call parser."""
 
 from src.chatbot.infrastructure.chat._text_tool_call_wrapper import (

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """structlog configuration for the application.
 
 Call :func:`configure_logging` exactly once at process startup (before any

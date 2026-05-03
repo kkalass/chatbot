@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for model profiles after the citation-layer refactor.
 
 The base ``Prompts`` no longer carry any citation framing — those concerns

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Klas Kalaß
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Vacation-days-specific interactive username/password authentication.
 
 This module intentionally lives inside the ``vacation_days`` package because
