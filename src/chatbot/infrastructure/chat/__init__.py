@@ -62,6 +62,7 @@ def build_chat_model_profile(config: ChatModelConfig) -> ModelProfile:
 
 def build_chat_model(
     config: ChatModelConfig,
+    *,
     parse_text_tool_calls: bool = False,
 ) -> ChatModel:
     """Construct the chat model prescribed by ``config.provider``.
