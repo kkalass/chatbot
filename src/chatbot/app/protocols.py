@@ -133,14 +133,26 @@ class ChatModel(Protocol):
 
 
 @runtime_checkable
-class PromptProfile(Protocol):
-    """Structural interface for model-specific prompt and tool-schema adaptation.
+class ModelProfile(Protocol):
+    """Structural interface for model-specific adaptation of prompts, tool schemas,
+    and adapter-level capabilities.
 
     Implementations are selected at composition time based on the target model
-    and applied once when wiring the orchestrator. ``PromptProfile`` is
-    explicitly **not** a citation concern; it adjusts the base system prompt
-    and tool schemas, both of which the orchestrator owns.
+    and applied once when wiring the orchestrator. ``ModelProfile`` is
+    explicitly **not** a citation concern; it adjusts the base system prompt,
+    tool schemas, and infrastructure flags that depend on the model's behaviour.
     """
+
+    @property
+    def parse_text_tool_calls(self) -> bool:
+        """Whether the chat adapter should detect tool calls emitted as JSON text.
+
+        Models that serialise tool invocations as plain JSON in their response
+        text (e.g. qwen2.5-coder) require the adapter to buffer and parse that
+        text.  For all other models this must be ``False`` to avoid unnecessary
+        buffering that breaks streaming UX.
+        """
+        ...
 
     def adjust_prompts(self, prompts: Prompts) -> Prompts:
         """Return model-adjusted prompt templates."""

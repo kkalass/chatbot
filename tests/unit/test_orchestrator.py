@@ -23,7 +23,7 @@ from src.chatbot.app.citation.messages import (
 from src.chatbot.app.orchestrator import ChatOrchestrator
 from src.chatbot.app.protocols import (
     JsonObject,
-    PromptProfile,
+    ModelProfile,
     ToolCallInfo,
     ToolSchema,
 )
@@ -33,6 +33,10 @@ from src.chatbot.app.protocols import (
 
 @dataclass(frozen=True)
 class _IdentityProfile:
+    @property
+    def parse_text_tool_calls(self) -> bool:
+        return False
+
     def adjust_prompts(self, prompts: object) -> object:
         return prompts
 
@@ -117,7 +121,7 @@ def _doc_citation(*, marker: str = "[M]", chunk_id: str = "c1") -> DocumentCitat
     )
 
 
-def _profile() -> PromptProfile:
+def _profile() -> ModelProfile:
     return _IdentityProfile()  # type: ignore[return-value]
 
 

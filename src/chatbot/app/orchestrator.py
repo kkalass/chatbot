@@ -37,7 +37,7 @@ from src.chatbot.app.citation import (
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
     JsonObject,
-    PromptProfile,
+    ModelProfile,
     Tool,
     ToolCallInfo,
     ToolSchema,
@@ -191,7 +191,7 @@ class ChatOrchestrator:
         self,
         citation_layer: CitationLayer,
         *,
-        prompt_profile: PromptProfile,
+        prompt_profile: ModelProfile,
         tools: list[Tool] | None = None,
         prompts: Prompts = DEFAULT_PROMPTS,
     ) -> None:
@@ -380,8 +380,8 @@ class ChatOrchestrator:
         return _gen()
 
 
-def _adjust_tool_schema(schema: ToolSchema, *, prompt_profile: PromptProfile) -> ToolSchema:
-    """Apply model-specific prompt-profile adaptations to a tool schema once."""
+def _adjust_tool_schema(schema: ToolSchema, *, prompt_profile: ModelProfile) -> ToolSchema:
+    """Apply model-specific profile adaptations to a tool schema once."""
     return ToolSchema(
         name=schema.name,
         description=prompt_profile.adjust_tool_description(schema.name, schema.description),

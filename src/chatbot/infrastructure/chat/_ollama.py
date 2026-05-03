@@ -298,7 +298,7 @@ class OllamaChatModel:
                 trace_response_text_parts: list[str] = []
 
                 tool_calls: list[ToolCallInfo] = []
-                # Buffer used when the first content chunk starts with '{' — the model
+                # Buffer used when the first content chunk starts with '{' (or '```json\n{') — the model
                 # may be emitting a text-encoded tool call instead of using tool_calls.
                 # Only active when parse_text_tool_calls=True (opt-in, model-specific).
                 parse_text_tool_calls = self._parse_text_tool_calls

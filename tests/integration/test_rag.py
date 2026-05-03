@@ -131,14 +131,14 @@ class TestOrchestratorWithCitationLayer:
         from src.chatbot.infrastructure.chat import (
             ChatModelConfig,
             build_chat_model,
-            build_chat_prompt_profile,
+            build_chat_model_profile,
         )
         from src.chatbot.tools.retrieval.tool import RetrievalTool
         from src.settings import get_settings
 
         settings = get_settings()
         config = ChatModelConfig(base_url=settings.ollama_base_url, model=settings.chat_model)
-        prompt_profile = build_chat_prompt_profile(config)
+        prompt_profile = build_chat_model_profile(config)
         chat_model = build_chat_model(config)
         retriever = build_retriever(
             config=_RETRIEVER_CONFIG,

@@ -1,6 +1,5 @@
 """Unit tests for settings-to-config mapping helpers."""
 
-from src.chatbot.config import build_chat_model_config
 from src.ingest.config import build_document_store_config
 from src.settings import Settings
 
@@ -21,20 +20,3 @@ class TestConfigMappers:
         assert config.port == 7000
         assert config.collection == "my_collection"
         assert config.embedding_dim == 384
-
-
-class TestBuildChatModelConfig:
-    def test_qwen_coder_model_enables_parse_text_tool_calls(self) -> None:
-        settings = Settings(chat_model="qwen2.5-coder:14b")
-        config = build_chat_model_config(settings)
-        assert config.parse_text_tool_calls is True
-
-    def test_qwen_non_coder_model_disables_parse_text_tool_calls(self) -> None:
-        settings = Settings(chat_model="qwen3.5:9b")
-        config = build_chat_model_config(settings)
-        assert config.parse_text_tool_calls is False
-
-    def test_other_model_disables_parse_text_tool_calls(self) -> None:
-        settings = Settings(chat_model="llama3.1:8b")
-        config = build_chat_model_config(settings)
-        assert config.parse_text_tool_calls is False

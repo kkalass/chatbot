@@ -36,7 +36,7 @@ from src.chatbot.config import (
     build_retriever_config,
     build_text_embedder_config,
 )
-from src.chatbot.infrastructure.chat import build_chat_model, build_chat_prompt_profile
+from src.chatbot.infrastructure.chat import build_chat_model, build_chat_model_profile
 from src.chatbot.infrastructure.embeddings_text import build_text_embedder
 from src.chatbot.infrastructure.retrieval import build_retriever
 from src.chatbot.observability import configure_tracing, to_attribute_text
@@ -202,7 +202,7 @@ def _build_retriever() -> Retriever:
 def _build_orchestrator() -> ChatOrchestrator:
     """Compose one session-scoped chat orchestrator instance."""
     chat_model_config = build_chat_model_config(_settings)
-    prompt_profile = build_chat_prompt_profile(chat_model_config)
+    prompt_profile = build_chat_model_profile(chat_model_config)
 
     chat_model = build_chat_model(chat_model_config)
     vacation_days_tool = _build_vacation_days_tool()
