@@ -35,7 +35,7 @@ from src.chatbot.app.citation import (
 )
 from src.chatbot.app.orchestrator import ChatOrchestrator, ProcessEvent
 from src.chatbot.app.prompts import DEFAULT_PROMPTS
-from src.chatbot.app.protocols import Retriever, Tool
+from src.chatbot.app.protocols import Tool
 from src.chatbot.config import (
     build_chat_model_config,
     build_retriever_config,
@@ -193,14 +193,15 @@ def _build_vacation_days_tool() -> VacationDaysTool:
     return VacationDaysTool(service=service, auth=auth)
 
 
-def _build_retriever() -> Retriever:
-    """Construct the Qdrant retriever for this session."""
+def _build_retrieval_tool() -> RetrievalTool:
+    """Create the retrieval tool and bind its retriever infrastructure."""
     text_embedder = build_text_embedder(build_text_embedder_config(_settings))
     retriever_config = build_retriever_config(_settings)
-    return build_retriever(
+    retriever = build_retriever(
         config=retriever_config,
         text_embedder=text_embedder,
     )
+    return RetrievalTool(retriever=retriever)
 
 
 def _build_orchestrator() -> ChatOrchestrator:
@@ -210,7 +211,7 @@ def _build_orchestrator() -> ChatOrchestrator:
 
     chat_model = build_chat_model(chat_model_config, prompt_profile.parse_text_tool_calls)
     vacation_days_tool = _build_vacation_days_tool()
-    retrieval_tool = RetrievalTool(retriever=_build_retriever())
+    retrieval_tool = _build_retrieval_tool()
     tools: list[Tool] = [vacation_days_tool, retrieval_tool]
     return ChatOrchestrator.create(
         chat_model,
