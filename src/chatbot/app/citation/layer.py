@@ -191,6 +191,10 @@ conversation context, do not emit a marker for that sentence.
 - If you make a factual claim that you cannot back with a citation marker,
   emit a marker block immediately after the claim:
     {QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}
+- Do NOT emit an unsubstantiated marker when you explicitly decline to make a
+  claim (e.g. "the documents do not contain information about X" or "I cannot
+  make a substantiated statement about Y"). Those sentences are transparent
+  refusals, not assertions, and need no marker.
 - Keep all normal user-facing answer text outside the markers.
 """
         return CitationLayerSystemMessage(llm_content=prompt)
@@ -229,9 +233,13 @@ Every factual claim in your answer must either:
       the information: {QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}
 There is no third option: do not state facts without a citation marker or an
 unsubstantiated marker. Logical inferences and transitional sentences derived
-from cited material are exempt. Do not append markers in a separate trailing
-citation section. Place each marker at the point of use, directly after the
-supported sentence.
+from cited material are exempt.
+IMPORTANT EXCEPTION: if you explicitly decline to make a claim — e.g. you
+explain that the retrieved documents do not contain the requested information
+and therefore you cannot answer — that is a transparent refusal, not an
+assertion. Do NOT append an unsubstantiated marker to a refusal sentence.
+Do not append markers in a separate trailing citation section. Place each
+marker at the point of use, directly after the supported sentence.
 
 The actual user message is:
 

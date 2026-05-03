@@ -372,13 +372,9 @@ async def on_message(message: cl.Message) -> None:
                         tool_call_id=event.raw.tool_call_id,
                     )
                 case UnsubstantiatedClaim():
-                    tokens, pending_whitespace = _format_text_chunk(
-                        # TODO: i18n: we emit "unbelegt" in german; consider making this configurable or part of the prompt instructions.
-                        " _(unbelegt)_",
-                        pending_whitespace,
-                    )
-                    for token in tokens:
-                        await _stream_response_token(token)
+                    # Emit inline (like a citation marker) — do not flush pending_whitespace
+                    # so the marker stays attached to the preceding sentence without leading newlines.
+                    await _stream_response_token(" ⚠️")
                     logger.debug("session.unsubstantiated_claim")
                 case _:
                     assert_never(event)
