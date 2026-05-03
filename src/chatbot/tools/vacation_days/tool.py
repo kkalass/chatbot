@@ -7,7 +7,7 @@ session-specific dependencies are injected at construction time.
 import structlog
 from pydantic import ValidationError
 
-from src.chatbot.app.protocols import JsonObject, ToolContext, ToolEvent, ToolSchema
+from src.chatbot.app.protocols import JsonObject, ToolSchema
 from src.chatbot.tools.vacation_days.auth import VacationDaysAuth
 from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
@@ -44,30 +44,27 @@ class VacationDaysTool:
     ) -> None:
         self._service = service
         self._auth = auth
-        # Generate schema from Pydantic model to ensure consistency between
-        # validation and advertisement.  The Pydantic schema is the single
-        # source of truth.
         self.schema = ToolSchema(
             name=_TOOL_NAME,
-            description="""Look up the vacation day balance for the currently authenticated employee.
+            description="""Retrieve the vacation day balance (Urlaubstage / Resturlaub) for the current employee directly from the HR system.
 
-Provide the calendar year to query.
-Returns total allocation, used days, and remaining days for that year.""",
+Use this tool whenever the user asks about vacation days, remaining leave, used days, or annual leave entitlement — do NOT use the document search tool for this.
+
+Parameter: year (integer) — the calendar year to query (e.g. 2026).
+Returns: total_days (annual entitlement), used_days, remaining_days.""",
             parameters_schema=VacationDaysInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
 
-    async def execute(
-        self, args: JsonObject, context: ToolContext
-    ) -> tuple[JsonObject, list[ToolEvent]]:
+    async def execute(self, args: JsonObject) -> JsonObject:
         """Validate *args*, collect credentials if needed, and call the adapter."""
         try:
             tool_input = VacationDaysInput.model_validate(args)
         except ValidationError as exc:
-            return {"error": f"Invalid arguments: {exc}"}, []
+            return {"error": f"Invalid arguments: {exc}"}
 
         credentials = await self._auth.get_credentials()
         if credentials is None:
-            return {"error": "Credential collection was canceled by the user."}, []
+            return {"error": "Credential collection was canceled by the user."}
 
         try:
             result = await self._service.get_vacation_days(
@@ -83,7 +80,7 @@ Returns total allocation, used days, and remaining days for that year.""",
                     "Authentication failed. The stored credentials were cleared. "
                     "Please try again — you will be prompted for your credentials."
                 )
-            }, []
+            }
 
         logger.info("tool.success", username=credentials.username, year=tool_input.year)
-        return result.model_dump(), []
+        return result.model_dump()

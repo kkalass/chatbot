@@ -1,6 +1,10 @@
-"""Unit tests for UI citation rendering helpers."""
+"""Tests for the Chainlit citation rendering helpers."""
 
-from src.chatbot.app.protocols import SourceChunk
+from src.chatbot.app.citation import (
+    DocumentCitation,
+    NumberedCitation,
+    ToolCitation,
+)
 from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
@@ -8,170 +12,113 @@ from src.chatbot.ui.citation_view import (
 )
 
 
-class TestCitationView:
-    def test_build_citation_name_prefers_title(self) -> None:
-        chunk = SourceChunk(
-            content="c",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
-            title="Nice Title",
+def _doc(
+    *,
+    title: str | None = None,
+    author: str | None = None,
+    publication_date: str | None = None,
+    page: str | None = None,
+    source: str = "docs/a.md",
+    source_url: str | None = None,
+    content: str = "an excerpt",
+) -> DocumentCitation:
+    return DocumentCitation(
+        raw_marker_text="<m>",
+        tool_call_id="tc1",
+        source=source,
+        chunk_id="c1",
+        content=content,
+        score=0.9,
+        title=title,
+        author=author,
+        publication_date=publication_date,
+        source_url=source_url,
+        page=page,
+    )
+
+
+class TestBuildCitationName:
+    def test_uses_title_when_present(self) -> None:
+        citation = NumberedCitation(reference_number=3, citation=_doc(title="My Doc"))
+        assert build_citation_name(citation) == "My Doc"
+
+    def test_appends_page_when_present(self) -> None:
+        citation = NumberedCitation(reference_number=3, citation=_doc(title="T", page="42"))
+        assert build_citation_name(citation) == "T (p. 42)"
+
+    def test_falls_back_to_author_date_then_source(self) -> None:
+        citation = NumberedCitation(
+            reference_number=3,
+            citation=_doc(author="A", publication_date="2024"),
         )
+        assert build_citation_name(citation) == "A - 2024"
 
-        assert build_citation_name(chunk) == "Nice Title"
+        citation = NumberedCitation(reference_number=4, citation=_doc(source="x.md"))
+        assert build_citation_name(citation) == "x.md"
 
-    def test_build_citation_name_falls_back_to_source(self) -> None:
-        chunk = SourceChunk(
-            content="c",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
+    def test_tool_citation_uses_tool_name(self) -> None:
+        cit = ToolCitation(
+            raw_marker_text="<m>",
+            tool_call_id="tc1",
+            tool_name="get_vacation_days",
+            result={"days": 30},
         )
+        numbered = NumberedCitation(reference_number=2, citation=cit)
+        assert build_citation_name(numbered) == "Tool: get_vacation_days"
 
-        assert build_citation_name(chunk) == "doc.txt"
 
-    def test_build_citation_name_includes_page_when_present(self) -> None:
-        chunk = SourceChunk(
-            content="c",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
-            title="Nice Title",
-            page="7",
+class TestBuildCitationContent:
+    def test_document_includes_excerpt(self) -> None:
+        rendered = build_citation_content(
+            NumberedCitation(reference_number=3, citation=_doc(title="T", content="hello world"))
         )
+        assert "### T" in rendered
+        assert "hello world" in rendered
+        assert "**Excerpt**" in rendered
 
-        assert build_citation_name(chunk) == "Nice Title (p. 7)"
-
-    def test_build_citation_content_includes_optional_metadata_when_present(self) -> None:
-        chunk = SourceChunk(
-            content="Chunk body",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
-            author="Alice",
-            publication_date="2024-10-01",
-            source_url="https://example.com/doc",
-            page="4",
+    def test_document_with_url_renders_markdown_link(self) -> None:
+        rendered = build_citation_content(
+            NumberedCitation(
+                reference_number=3,
+                citation=_doc(title="T", source_url="https://e.com/d"),
+            )
         )
+        assert "### [T](https://e.com/d)" in rendered
 
-        content = build_citation_content(chunk)
-
-        assert "### doc.txt" not in content
-        assert "### Nice Title" not in content
-        assert "### [Alice - 2024-10-01](https://example.com/doc)" in content
-        assert "**Author:** Alice" in content
-        assert "**Date:** 2024-10-01" in content
-        assert "**Page:** 4" in content
-        assert "[Open source](https://example.com/doc)" not in content
-        assert "**Source:** doc.txt" not in content
-        assert content.endswith("Chunk body")
-
-    def test_build_citation_content_omits_missing_optional_metadata(self) -> None:
-        chunk = SourceChunk(
-            content="Chunk body",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
+    def test_tool_citation_renders_property_list(self) -> None:
+        cit = ToolCitation(
+            raw_marker_text="<m>",
+            tool_call_id="tc1",
+            tool_name="get_vacation_days",
+            result={"total_days": 30, "remaining_days": 20},
         )
+        rendered = build_citation_content(NumberedCitation(reference_number=2, citation=cit))
+        assert "### get_vacation_days" in rendered
+        assert "**total_days:** 30" in rendered
+        assert "**remaining_days:** 20" in rendered
 
-        content = build_citation_content(chunk)
 
-        assert "**Author:**" not in content
-        assert "**Date:**" not in content
-        assert "**Page:**" not in content
-        assert "[Open source](" not in content
-        assert "**Source:** doc.txt" in content
+class TestBuildCitationMarkdown:
+    def test_empty_returns_empty_string(self) -> None:
+        assert build_citation_markdown([]) == ""
 
-    def test_build_citation_content_uses_title_as_header_and_dedents_excerpt(self) -> None:
-        chunk = SourceChunk(
-            content="    Line one\n        Line two",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
-            title="Nice Title",
+    def test_orders_by_reference_number(self) -> None:
+        a = NumberedCitation(reference_number=2, citation=_doc(title="A"))
+        b = NumberedCitation(reference_number=1, citation=_doc(title="B"))
+
+        rendered = build_citation_markdown([a, b])
+
+        idx_a = rendered.find("A")
+        idx_b = rendered.find("B")
+        assert 0 < idx_b < idx_a
+        assert rendered.startswith("---\n**Sources**")
+
+    def test_tool_citation_appendix_uses_tool_name(self) -> None:
+        cit = ToolCitation(
+            raw_marker_text="<m>",
+            tool_call_id="tc1",
+            tool_name="get_vacation_days",
+            result={"days": 30},
         )
-
-        content = build_citation_content(chunk)
-
-        assert content.startswith("### Nice Title")
-        assert "**Source:** doc.txt" not in content
-        assert "\n    Line one" not in content
-        assert content.endswith("Line one\n    Line two")
-
-    def test_build_citation_content_links_title_when_source_url_present(self) -> None:
-        chunk = SourceChunk(
-            content="Chunk body",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
-            title="Executive Order 14110",
-            source_url="https://example.com/eo-14110",
-        )
-
-        content = build_citation_content(chunk)
-
-        assert content.startswith("### [Executive Order 14110](https://example.com/eo-14110)")
-        assert "[Open source](" not in content
-
-    def test_build_citation_markdown_deduplicates_sources_and_links_url(self) -> None:
-        first = SourceChunk(
-            content="Chunk A",
-            source="doc.txt",
-            score=0.9,
-            chunk_id="42",
-            title="Nice Title",
-            author="Alice",
-            publication_date="2024-10-01",
-            source_url="https://example.com/doc",
-            page="2",
-        )
-        duplicate_same_doc = SourceChunk(
-            content="Chunk B",
-            source="doc.txt",
-            score=0.8,
-            chunk_id="43",
-            title="Nice Title",
-            author="Alice",
-            publication_date="2024-10-01",
-            source_url="https://example.com/doc",
-            page="2",
-        )
-        fallback = SourceChunk(
-            content="Chunk C",
-            source="fallback.txt",
-            score=0.7,
-            chunk_id="44",
-        )
-
-        markdown = build_citation_markdown([first, duplicate_same_doc, fallback])
-
-        assert markdown.count("1. ") == 1
-        assert markdown.count("2. ") == 1
-        assert "[Nice Title](https://example.com/doc) - Alice - 2024-10-01 - p. 2" in markdown
-        assert "fallback.txt" in markdown
-        assert markdown.count("Nice Title") == 1
-
-    def test_build_citation_markdown_keeps_same_source_for_different_pages(self) -> None:
-        page_1 = SourceChunk(
-            content="Chunk A",
-            source="doc.pdf",
-            score=0.9,
-            chunk_id="42",
-            title="Policy",
-            page="1",
-        )
-        page_2 = SourceChunk(
-            content="Chunk B",
-            source="doc.pdf",
-            score=0.8,
-            chunk_id="43",
-            title="Policy",
-            page="2",
-        )
-
-        markdown = build_citation_markdown([page_1, page_2])
-
-        assert markdown.count("1. ") == 1
-        assert markdown.count("2. ") == 1
-        assert "Policy - p. 1" in markdown
-        assert "Policy - p. 2" in markdown
+        rendered = build_citation_markdown([NumberedCitation(reference_number=1, citation=cit)])
+        assert "1. get_vacation_days" in rendered

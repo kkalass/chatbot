@@ -13,8 +13,15 @@ from ollama._types import ChatResponse
 from ollama._types import Tool as OllamaTool
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
-from src.chatbot.app.protocols import ChatMessage, ChatModel, ToolCallInfo, ToolSchema
+from src.chatbot.app.protocols import (
+    ChatMessage,
+    ChatModel,
+    ChatStreamItem,
+    ToolCallInfo,
+    ToolSchema,
+)
 from src.chatbot.app.tracing import summarize_messages
 from src.chatbot.observability import to_attribute_text
 from src.chatbot.observability.openinference import (
@@ -28,8 +35,6 @@ from src.chatbot.observability.schema import SPAN_CHAT_MODEL_OLLAMA_STREAM
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
-
-_MAX_TRACED_RESPONSE_PREVIEW_CHARS = 1200
 
 
 def _to_ollama_tool(tool_schema: ToolSchema) -> OllamaTool:
@@ -186,7 +191,7 @@ class OllamaChatModel:
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[ToolSchema] | None = None,
-    ) -> AsyncIterator[str | list[ToolCallInfo]]:
+    ) -> AsyncIterator[ChatStreamItem]:
         """Stream model output and optional tool calls."""
         ollama_messages = [_to_ollama_message(m) for m in messages]
         ollama_tools = [_to_ollama_tool(t) for t in tools] if tools else None
@@ -194,7 +199,7 @@ class OllamaChatModel:
         model = self._model
         client = self._client
 
-        async def _gen() -> AsyncGenerator[str | list[ToolCallInfo], None]:
+        async def _gen() -> AsyncGenerator[ChatStreamItem, None]:
             with tracer.start_as_current_span(SPAN_CHAT_MODEL_OLLAMA_STREAM) as span:
                 _trace_request(
                     span=span,
@@ -221,35 +226,41 @@ class OllamaChatModel:
                 trace_response_text_parts: list[str] = []
 
                 tool_calls: list[ToolCallInfo] = []
-                async for chunk in response_stream:
-                    content = chunk.message.content
-                    if content:
-                        trace_streamed_text_chars += len(content)
-                        if trace_streamed_text_chars < _MAX_TRACED_RESPONSE_PREVIEW_CHARS:
+                try:
+                    async for chunk in response_stream:
+                        content = chunk.message.content
+                        if content:
+                            trace_streamed_text_chars += len(content)
                             trace_response_text_parts.append(content)
-                        yield content
-                    if chunk.message.tool_calls:
-                        for tc in chunk.message.tool_calls:
-                            tool_calls.append(
-                                ToolCallInfo(
-                                    name=tc.function.name,
-                                    arguments=dict(tc.function.arguments),
-                                    call_id=tc.function.name,
+                            yield content
+                        if chunk.message.tool_calls:
+                            for tc in chunk.message.tool_calls:
+                                tool_calls.append(
+                                    ToolCallInfo(
+                                        name=tc.function.name,
+                                        arguments=dict(tc.function.arguments),
+                                        call_id=tc.function.name,
+                                    )
                                 )
-                            )
-                if tool_calls:
-                    yield tool_calls
 
-                _trace_response(
-                    span=span,
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    tool_calls=tool_calls,
-                    response_text="".join(trace_response_text_parts),
-                    streamed_text_chars=trace_streamed_text_chars,
-                    ollama_options=ollama_options,
-                )
+                    if tool_calls:
+                        yield tool_calls
+
+                    _trace_response(
+                        span=span,
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                        tool_calls=tool_calls,
+                        response_text="".join(trace_response_text_parts),
+                        streamed_text_chars=trace_streamed_text_chars,
+                        ollama_options=ollama_options,
+                    )
+                    span.set_status(StatusCode.OK)
+                except Exception as exc:
+                    span.record_exception(exc)
+                    span.set_status(StatusCode.ERROR, str(exc))
+                    raise
 
         return _gen()
 

@@ -108,7 +108,7 @@ Opens a chat interface at `http://localhost:8000` by default.
 
 ## Local Tracing (OpenTelemetry + Arize Phoenix + Jaeger)
 
-This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, orchestrator rounds, model call, retrieval tool, citation tool, and Qdrant retrieval).
+This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, orchestrator rounds, model call, retrieval tool, and Qdrant retrieval).
 
 ### 1. Start local Phoenix
 
@@ -190,7 +190,7 @@ You can inspect the same traces in Phoenix (<http://localhost:6006>) and Jaeger 
 - Root UI span for each message (`chat.ui.on_message`)
 - Orchestrator spans (`chat.orchestrator.process_message`, `chat.orchestrator.round`)
 - Model call span (`chat.model.ollama.stream`) with request/response previews
-- Tool spans (`chat.tool.search_documents`, `chat.tool.cite_sources`)
+- Tool spans (`chat.tool.search_documents`) with tool input and result summary
 - Retriever span (`chat.retriever.qdrant.retrieve`) with top-k result preview
 
 ### 5.1 Tracing Schema (Ownership Rules)
@@ -293,8 +293,11 @@ src/
   settings/     Shared pydantic-settings configuration (Settings + get_settings)
   chatbot/      Chatbot application
     app/          Orchestrator, protocols, prompts
+      citation/   CitationLayer, default tool citation, CiteableTool extension for custom validation
     ui/           Chainlit UI layer and session lifecycle
     tools/        Typed tool schemas and external-service adapters
+      retrieval/  Document retrieval tool (CiteableTool)
+      vacation_days/  Vacation-days lookup tool
     infrastructure/
       chat/       Ollama chat model adapter
       embeddings_text/  Query-time text embedder

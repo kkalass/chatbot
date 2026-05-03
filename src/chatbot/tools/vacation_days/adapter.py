@@ -54,8 +54,6 @@ class SimulatedVacationDaysAdapter:
 
         _, total_days, used_days = record
         result = VacationDaysOutput(
-            employee_username=username,
-            year=tool_input.year,
             total_days=total_days,
             used_days=used_days,
             remaining_days=total_days - used_days,

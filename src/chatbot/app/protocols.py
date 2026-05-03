@@ -87,35 +87,7 @@ class ToolSchema:
     parameters_schema: JsonObject  # JSON Schema object describing parameters
 
 
-@dataclass(frozen=True)
-class SourceCitationEvent:
-    """Emitted by :class:`CitationTool` when the model successfully cites its sources.
-
-    Carries only the validated chunks — those whose source paths were both
-    claimed by the model *and* present in a prior ``search_documents`` result.
-    """
-
-    validated: tuple[SourceChunk, ...]
-
-
-# Union of all events that a tool may emit alongside its JSON result.
-type ToolEvent = SourceCitationEvent
-
-# Union of all items yielded by :meth:`~src.chatbot.app.orchestrator.ChatOrchestrator.process_message`.
-# ``str`` items are streamed text chunks; ``ToolEvent`` items carry structured
-# metadata (citations, etc.) that the UI renders separately.
-type ProcessEvent = str | ToolEvent
-
-
-@dataclass(frozen=True)
-class ToolContext:
-    """Snapshot of conversation history passed to every tool execution.
-
-    Frozen at the point of the tool call so tools see a consistent view of
-    history even in a concurrent or multi-round agentic loop.
-    """
-
-    history: tuple[ChatMessage, ...]
+type ChatStreamItem = str | list[ToolCallInfo]
 
 
 @runtime_checkable
@@ -131,24 +103,11 @@ class Tool(Protocol):
 
     schema: ToolSchema  # All metadata needed by the model (name, description, parameters)
 
-    async def execute(
-        self, args: JsonObject, context: ToolContext
-    ) -> tuple[JsonObject, list[ToolEvent]]:
+    async def execute(self, args: JsonObject) -> JsonObject:
         """Execute the tool with *args* decoded from the LLM's tool_call.
 
-        Args:
-            args: Decoded JSON arguments from the LLM (validated inside the
-                tool implementation).
-            context: Snapshot of conversation history at the time of this call.
-                Tools may inspect past ``search_documents`` results to validate
-                claims (e.g. :class:`CitationTool`) but must not mutate history.
-
-        Returns:
-            A two-tuple of ``(result, events)`` where ``result`` is the
-            ``JsonObject`` forwarded to the model as the tool result and
-            ``events`` is a (possibly empty) list of :data:`ToolEvent` items
-            emitted to the caller (e.g. :class:`SourceCitationEvent`).
-            Values in ``result`` must never contain raw credentials.
+        Returns a structured ``JsonObject`` forwarded to the model as the tool
+        result.  Values must never contain raw credentials.
         """
         ...
 
@@ -169,7 +128,7 @@ class ChatModel(Protocol):
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[ToolSchema] | None = None,
-    ) -> AsyncIterator[str | list[ToolCallInfo]]:
+    ) -> AsyncIterator[ChatStreamItem]:
         """Stream a chat completion, optionally advertising tool schemas.
 
         Args:
@@ -185,12 +144,24 @@ class ChatModel(Protocol):
 
 
 @runtime_checkable
-class PromptProfile(Protocol):
-    """Structural interface for model-specific prompt and tool-schema adaptation.
+class ModelProfile(Protocol):
+    """Structural interface for model-specific adaptation of prompts, tool schemas,
+    and adapter-level capabilities.
 
     Implementations are selected at composition time based on the target model
     and applied once when wiring the orchestrator.
     """
+
+    @property
+    def parse_text_tool_calls(self) -> bool:
+        """Whether the chat adapter should detect tool calls emitted as JSON text.
+
+        Models that serialise tool invocations as plain JSON in their response
+        text (e.g. qwen2.5-coder) require the adapter to buffer and parse that
+        text.  Only responses whose first chunk starts with ``{`` or a fenced
+        JSON block are buffered; all other responses stream through unchanged.
+        """
+        ...
 
     def adjust_prompts(self, prompts: Prompts) -> Prompts:
         """Return model-adjusted prompt templates."""
@@ -206,21 +177,8 @@ class PromptProfile(Protocol):
 
 
 class Retriever(Protocol):
-    """Structural boundary between orchestration and retrieval infrastructure.
-
-    Implementations wrap a vector store and an embedding model.  The tool
-    layer calls ``retrieve`` and never touches the underlying clients directly.
-    """
+    """Structural boundary between orchestration and retrieval infrastructure."""
 
     async def retrieve(self, query: str) -> list[SourceChunk]:
-        """Return ranked, score-filtered chunks relevant to *query*.
-
-        Args:
-            query: Natural-language question or search string from the user.
-
-        Returns:
-            A list of :class:`SourceChunk` objects sorted by descending score,
-            already filtered to the configured similarity threshold.  May be
-            empty if no relevant chunks exist.
-        """
+        """Return ranked, score-filtered chunks relevant to *query*."""
         ...

@@ -7,10 +7,15 @@ provider-specific integrations in internal modules.
 from dataclasses import dataclass
 from typing import Literal, assert_never
 
-from src.chatbot.app.protocols import ChatModel, PromptProfile
+from src.chatbot.app.protocols import ChatModel, ModelProfile
 
+from ._model_profile import (
+    DefaultChatModelProfile,
+    QwenCoderModelProfile,
+    SmallModelProfile,
+)
 from ._ollama import build_ollama_chat_model
-from ._prompt_profile import DefaultChatPromptProfile, SmallModelPromptProfile
+from ._text_tool_call_wrapper import TextToolCallParsingWrapper
 
 
 @dataclass(frozen=True)
@@ -32,31 +37,44 @@ class ChatModelConfig:
     provider: Literal["ollama"] = "ollama"
 
 
-def build_chat_prompt_profile(config: ChatModelConfig) -> PromptProfile:
-    """Build a prompt-adaptation profile for the configured model.
+def build_chat_model_profile(config: ChatModelConfig) -> ModelProfile:
+    """Build a model profile for the configured model.
 
-    Prompt behaviour is model-specific (not provider-specific): two different
-    models on the same Ollama server may require very different tuning.  Add a
-    case here when a particular model needs it, e.g.:
+    The profile encapsulates all model-specific adaptations: prompt tuning,
+    tool-schema adjustments, and adapter-level capability flags such as
+    ``parse_text_tool_calls``.  Add a case here when a particular model needs
+    non-default behaviour, e.g.::
 
-        case model if model.startswith("llama3.1"):
-            return Llama31PromptProfile()
+        case name if name.startswith("llama3.1"):
+            return CustomLlamaModelProfile()
     """
     model_name = config.model.lower()
     match model_name:
         case name if "llama" in name:
-            return SmallModelPromptProfile()
+            return SmallModelProfile()
+        case name if "qwen" in name and "coder" in name:
+            return QwenCoderModelProfile()
+        case name if "qwen" in name:
+            return SmallModelProfile()
         case _:
-            return DefaultChatPromptProfile()
+            return DefaultChatModelProfile()
 
 
 def build_chat_model(
     config: ChatModelConfig,
+    *,
+    parse_text_tool_calls: bool = False,
 ) -> ChatModel:
-    """Construct the chat model prescribed by ``config.provider``."""
+    """Construct the chat model prescribed by ``config.provider``.
+
+    Args:
+        parse_text_tool_calls: Enable detection of text-encoded tool calls
+            for models that don't use the native tool_calls field. Determined
+            by the active ModelProfile at the call site.
+    """
     match config.provider:
         case "ollama":
-            return build_ollama_chat_model(
+            model = build_ollama_chat_model(
                 base_url=config.base_url,
                 model=config.model,
                 temperature=config.temperature,
@@ -64,13 +82,17 @@ def build_chat_model(
             )
         case _:
             assert_never(config.provider)
+    if parse_text_tool_calls:
+        return TextToolCallParsingWrapper(model)
+    return model
 
 
 __all__ = [
     "ChatModelConfig",
-    "DefaultChatPromptProfile",
-    "PromptProfile",
-    "SmallModelPromptProfile",
+    "DefaultChatModelProfile",
+    "ModelProfile",
+    "QwenCoderModelProfile",
+    "SmallModelProfile",
     "build_chat_model",
-    "build_chat_prompt_profile",
+    "build_chat_model_profile",
 ]

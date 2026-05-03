@@ -4,11 +4,11 @@ argument-hint: "Which phase to implement (e.g. 'Phase 0', 'Phase 1')"
 agent: "agent"
 ---
 
-Implement **${input:phase}** of the RAG chatbot project as defined in [doc/05-delivery-plan.md](../../doc/05-delivery-plan.md).
+Implement **${input:phase}** of the RAG chatbot project as defined in the phase concept documents in [doc/phases](../../doc/phases).
 
 ## Instructions
 
-1. Read the delivery plan and identify all tasks for the requested phase.
+1. Read the phase concept document of the requested phase and identify all tasks for the phase.
 2. Read the relevant spec documents for that phase:
    - [doc/01-product-scope.md](../../doc/01-product-scope.md) — goals and scope
    - [doc/02-requirements.md](../../doc/02-requirements.md) — FR/NFR, especially NFR-06 code quality
