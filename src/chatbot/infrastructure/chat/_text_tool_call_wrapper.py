@@ -5,11 +5,6 @@ their response text instead of using the native tool-calling channel.  This
 wrapper intercepts the stream from any ``ChatModel``, buffers the first chunk
 when it looks like a JSON tool call, and either promotes it to a real
 ``ToolCallInfo`` or re-emits the buffered text if parsing fails.
-
-The wrapper is composed at construction time by ``build_chat_model()`` when
-the active ``ModelProfile`` declares ``parse_text_tool_calls = True``.  For
-all other models the inner ``ChatModel`` is used directly, so there is zero
-overhead.
 """
 
 import json
