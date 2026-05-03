@@ -40,11 +40,6 @@ class SmallModelPromptProfile(DefaultChatPromptProfile):
 When calling tools, provide arguments as native JSON values (arrays/objects),
 never as JSON-encoded strings and never as schema metadata.
 
-Inline citation JSON rules (when emitting quote markers):
-- The JSON inside markers must be a single strict object with no extra fields.
-- Copy tool_call_id, source, and chunk_id values exactly as they
-    appear in tool results — do not paraphrase or abbreviate them.
-
 Tool call rules:
 - NEVER write a tool call as a code block or as JSON in your response text.
 - NEVER describe what you intend to do with a tool instead of doing it.
@@ -69,9 +64,8 @@ class QwenCoderPromptProfile(SmallModelPromptProfile):
             return f"""{base_prompts.system_prompt(now)}
 
 Qwen-coder specific tool-call rules:
-- NEVER output a bare arguments object such as {{"citations": [...]}}.
+- NEVER output a bare arguments object as your response text.
 - NEVER omit the tool name when calling a tool.
-- If you accidentally express a tool call as JSON text, it must be a single object of the form {{"name": "tool_name", "arguments": {{...}}}}.
-- For the cite_sources tool specifically, the tool name must be exactly "cite_sources" and citations must appear inside the arguments object."""
+- If you accidentally express a tool call as JSON text, it must be a single object of the form {{"name": "tool_name", "arguments": {{...}}}}."""
 
         return replace(base_prompts, system_prompt=_system_prompt)

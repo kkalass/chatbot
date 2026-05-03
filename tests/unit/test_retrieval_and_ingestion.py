@@ -20,7 +20,7 @@ import pytest
 from haystack.components.preprocessors import DocumentSplitter
 from haystack.dataclasses import Document
 
-from src.chatbot.app.protocols import SourceChunk, ToolContext
+from src.chatbot.app.protocols import SourceChunk
 from src.chatbot.tools.retrieval.tool import RetrievalTool
 from src.ingest.pipeline import IngestionConfig, IngestionPipeline, load_sidecar_meta
 
@@ -41,9 +41,6 @@ class _FakeRetriever:
         return list(self.chunks)
 
 
-_EMPTY_CONTEXT = ToolContext(history=())
-
-
 # ---------------------------------------------------------------------------
 # RetrievalTool
 # ---------------------------------------------------------------------------
@@ -56,7 +53,7 @@ class TestRetrievalTool:
         retriever = _FakeRetriever(chunks)
         tool = RetrievalTool(retriever=retriever)
 
-        await tool.execute({"query": "what is the capital?"}, _EMPTY_CONTEXT)
+        await tool.execute({"query": "what is the capital?"})
 
         assert retriever.calls == ["what is the capital?"]
 
@@ -69,14 +66,13 @@ class TestRetrievalTool:
         ]
         tool = RetrievalTool(retriever=_FakeRetriever(chunks))
 
-        result, events = await tool.execute({"query": "capital of France"}, _EMPTY_CONTEXT)
+        result = await tool.execute({"query": "capital of France"})
 
         assert "chunks" in result
-        first = result["chunks"][0]  # type: ignore[index]
-        assert first["source"] == "france.txt"  # type: ignore[index]
-        assert first["chunk_id"] == "1"  # type: ignore[index]
-        assert first["content"] == "Paris is the capital."  # type: ignore[index]
-        assert events == []
+        first = result["chunks"][0]
+        assert first["source"] == "france.txt"
+        assert first["chunk_id"] == "1"
+        assert first["content"] == "Paris is the capital."
 
     @pytest.mark.asyncio
     async def test_result_preserves_optional_chunk_metadata(self) -> None:
@@ -94,33 +90,30 @@ class TestRetrievalTool:
         ]
         tool = RetrievalTool(retriever=_FakeRetriever(chunks))
 
-        result, events = await tool.execute({"query": "EO 14110"}, _EMPTY_CONTEXT)
+        result = await tool.execute({"query": "EO 14110"})
 
-        first = result["chunks"][0]  # type: ignore[index]
-        assert first["title"] == "Executive Order 14110"  # type: ignore[index]
-        assert first["author"] == "Executive Office of the President"  # type: ignore[index]
-        assert first["publication_date"] == "2023-11-01"  # type: ignore[index]
-        assert first["source_url"] == "https://example.com/eo-14110"  # type: ignore[index]
-        assert events == []
+        first = result["chunks"][0]
+        assert first["title"] == "Executive Order 14110"
+        assert first["author"] == "Executive Office of the President"
+        assert first["publication_date"] == "2023-11-01"
+        assert first["source_url"] == "https://example.com/eo-14110"
 
     @pytest.mark.asyncio
     async def test_returns_no_results_message_on_empty_retrieval(self) -> None:
         tool = RetrievalTool(retriever=_FakeRetriever([]))
 
-        result, events = await tool.execute({"query": "unknown topic"}, _EMPTY_CONTEXT)
+        result = await tool.execute({"query": "unknown topic"})
 
-        assert result["chunks"] == []  # type: ignore[comparison-overlap]
+        assert result["chunks"] == []
         assert "message" in result
-        assert events == []
 
     @pytest.mark.asyncio
     async def test_returns_error_on_missing_query_arg(self) -> None:
         tool = RetrievalTool(retriever=_FakeRetriever([]))
 
-        result, events = await tool.execute({}, _EMPTY_CONTEXT)
+        result = await tool.execute({})
 
         assert "error" in result
-        assert events == []
 
 
 # ---------------------------------------------------------------------------

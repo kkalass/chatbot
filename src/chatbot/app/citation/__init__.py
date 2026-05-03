@@ -1,0 +1,64 @@
+"""Citation layer: prompt augmentation, marker parsing, and validation.
+
+This package owns the entire citation concern. The orchestrator depends on
+:class:`~src.chatbot.app.citation.layer.CitationLayer` (a decorator around a
+:class:`~src.chatbot.app.protocols.ChatModel`) and never touches markers,
+parsers, or per-tool citation logic directly.
+
+Public API:
+    - :class:`CitationLayer`
+    - :class:`CiteableTool`, :class:`CiteInstructions`
+    - :class:`CitationContext`
+    - :data:`RawCitation`, :class:`DocumentRawCitation`, :class:`ToolRawCitation`
+    - :data:`Citation`, :class:`DocumentCitation`, :class:`ToolCitation`
+    - :class:`NumberedCitation`, :class:`HallucinatedCitation`
+    - :data:`CitationLayerMessage` and its variants
+"""
+
+from src.chatbot.app.citation.citeable_tool import CiteableTool, CiteInstructions
+from src.chatbot.app.citation.context import CitationContext, build_citation_context
+from src.chatbot.app.citation.layer import CitationLayer
+from src.chatbot.app.citation.messages import (
+    CitationLayerAssistantMessage,
+    CitationLayerMessage,
+    CitationLayerSystemMessage,
+    CitationLayerToolMessage,
+    CitationLayerUserMessage,
+)
+from src.chatbot.app.citation.models import (
+    QUOTE_END_MARKER,
+    QUOTE_START_MARKER,
+    Citation,
+    DocumentCitation,
+    DocumentRawCitation,
+    HallucinatedCitation,
+    NumberedCitation,
+    RawCitation,
+    ToolCitation,
+    ToolRawCitation,
+    canonical_key,
+)
+
+__all__ = [
+    "QUOTE_END_MARKER",
+    "QUOTE_START_MARKER",
+    "Citation",
+    "CitationContext",
+    "CitationLayer",
+    "CitationLayerAssistantMessage",
+    "CitationLayerMessage",
+    "CitationLayerSystemMessage",
+    "CitationLayerToolMessage",
+    "CitationLayerUserMessage",
+    "CiteInstructions",
+    "CiteableTool",
+    "DocumentCitation",
+    "DocumentRawCitation",
+    "HallucinatedCitation",
+    "NumberedCitation",
+    "RawCitation",
+    "ToolCitation",
+    "ToolRawCitation",
+    "build_citation_context",
+    "canonical_key",
+]

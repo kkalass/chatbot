@@ -1,8 +1,8 @@
 """Chainlit entry point and session lifecycle hooks.
 
 This module is the composition root for the application: it wires together
-all infrastructure adapters and the orchestrator, then stores the assembled
-graph in session-scoped state.
+all infrastructure adapters, the citation layer, and the orchestrator, then
+stores the assembled graph in session-scoped state.
 
 Session state keys
 ------------------
@@ -19,17 +19,19 @@ from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferen
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from src.chatbot.app.orchestrator import ChatOrchestrator
-from src.chatbot.app.prompts import DEFAULT_PROMPTS
-from src.chatbot.app.protocols import (
-    ProcessEvent,
-    QuoteReferenceEvent,
-    Retriever,
-    SourceChunk,
-    SourceCitationEvent,
-    Tool,
-    ToolCitationEvent,
+from src.chatbot.app.citation import (
+    Citation,
+    CitationLayer,
+    CiteableTool,
+    DocumentCitation,
+    HallucinatedCitation,
+    NumberedCitation,
+    ToolCitation,
+    canonical_key,
 )
+from src.chatbot.app.orchestrator import ChatOrchestrator, ProcessEvent
+from src.chatbot.app.prompts import DEFAULT_PROMPTS
+from src.chatbot.app.protocols import Retriever, Tool
 from src.chatbot.config import (
     build_chat_model_config,
     build_retriever_config,
@@ -48,7 +50,6 @@ from src.chatbot.observability.openinference import (
     using_session_attributes,
 )
 from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
-from src.chatbot.tools.citation.tool import CitationTool
 from src.chatbot.tools.retrieval.tool import RetrievalTool
 from src.chatbot.tools.vacation_days import (
     InteractiveVacationDaysAuthSession,
@@ -59,9 +60,6 @@ from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
     build_citation_name,
-    build_tool_citation_content,
-    build_tool_citation_markdown,
-    build_tool_citation_name,
 )
 from src.chatbot.ui.logging_config import configure_logging
 from src.settings import get_settings
@@ -103,34 +101,19 @@ async def _ask_user(prompt: str) -> str | None:
     return str(value).strip() if value else None
 
 
-def collect_unique_citation_chunks(
-    citation_events: list[SourceCitationEvent],
-) -> list[SourceChunk]:
-    """Flatten and deduplicate citation chunks while preserving first-seen order."""
-    seen_chunks: set[tuple[str, str]] = set()
-    unique_chunks: list[SourceChunk] = []
-    for citation_event in citation_events:
-        for chunk in citation_event.validated:
-            key = (chunk.source, chunk.chunk_id)
-            if key in seen_chunks:
-                continue
-            seen_chunks.add(key)
-            unique_chunks.append(chunk)
-    return unique_chunks
-
-
-def collect_unique_tool_citations(
-    tool_citation_events: list[ToolCitationEvent],
-) -> list[ToolCitationEvent]:
-    """Deduplicate tool citations while preserving first-seen order."""
-    seen_call_ids: set[str] = set()
-    unique_tool_citations: list[ToolCitationEvent] = []
-    for tool_citation_event in tool_citation_events:
-        if tool_citation_event.tool_call_id in seen_call_ids:
+def collect_unique_numbered_citations(
+    numbered: list[NumberedCitation],
+) -> list[NumberedCitation]:
+    """Deduplicate numbered citations by canonical key, keeping first occurrence."""
+    seen: set[str] = set()
+    unique: list[NumberedCitation] = []
+    for nc in numbered:
+        key = canonical_key(nc.citation)
+        if key in seen:
             continue
-        seen_call_ids.add(tool_citation_event.tool_call_id)
-        unique_tool_citations.append(tool_citation_event)
-    return unique_tool_citations
+        seen.add(key)
+        unique.append(nc)
+    return unique
 
 
 def consume_text_chunk(
@@ -139,12 +122,11 @@ def consume_text_chunk(
 ) -> tuple[list[str], str]:
     """Return stream tokens for a text chunk while buffering trailing whitespace.
 
-    Trailing whitespace is held back so a following ``QuoteReferenceEvent`` can be
+    Trailing whitespace is held back so a following ``[N]`` reference can be
     rendered directly after the preceding sentence without an inserted newline.
     """
     stripped = chunk.rstrip(" \t\r\n")
     if not stripped:
-        # Keep accumulating whitespace until we see either real text or a quote reference.
         return [], f"{pending_whitespace}{chunk}"
 
     tokens: list[str] = []
@@ -157,24 +139,24 @@ def consume_text_chunk(
     return tokens, trailing_whitespace
 
 
-def consume_quote_reference_event(
-    event: QuoteReferenceEvent,
+def consume_numbered_citation(
+    nc: NumberedCitation,
     pending_whitespace: str,
 ) -> tuple[list[str], str]:
     """Return stream tokens that place ``[n]`` before pending trailing whitespace."""
-    tokens = [f"[{event.reference_number}]"]
+    tokens = [f"[{nc.reference_number}]"]
     if pending_whitespace:
         tokens.append(pending_whitespace)
     return tokens, ""
 
 
-def _build_source_elements(unique_chunks: list[SourceChunk]) -> list[cl.Text]:
-    """Build sidebar source elements with stable duplicate disambiguation."""
-    base_names = [build_citation_name(chunk) for chunk in unique_chunks]
+def _build_side_elements(unique: list[NumberedCitation]) -> list[cl.Text]:
+    """Build sidebar elements with stable duplicate-label disambiguation."""
+    base_names = [build_citation_name(nc.citation) for nc in unique]
     total_counts = Counter(base_names)
     seen_counts: defaultdict[str, int] = defaultdict(int)
     elements: list[cl.Text] = []
-    for chunk, base_name in zip(unique_chunks, base_names, strict=True):
+    for nc, base_name in zip(unique, base_names, strict=True):
         seen_counts[base_name] += 1
         display_name = base_name
         if total_counts[base_name] > 1:
@@ -182,27 +164,20 @@ def _build_source_elements(unique_chunks: list[SourceChunk]) -> list[cl.Text]:
         elements.append(
             cl.Text(
                 name=display_name,
-                content=build_citation_content(chunk),
+                content=build_citation_content(nc.citation),
                 display="side",
             )
         )
     return elements
 
 
-def _build_tool_source_elements(tool_citations: list[ToolCitationEvent]) -> list[cl.Text]:
-    """Build sidebar source elements for successful (non-error) tool results."""
-    elements: list[cl.Text] = []
-    for tool_citation in tool_citations:
-        if "error" in tool_citation.result:
-            continue
-        elements.append(
-            cl.Text(
-                name=build_tool_citation_name(tool_citation),
-                content=build_tool_citation_content(tool_citation),
-                display="side",
-            )
-        )
-    return elements
+def _has_renderable_side_element(citation: Citation) -> bool:
+    """Side panels suppress tool citations carrying error payloads."""
+    match citation:
+        case DocumentCitation():
+            return True
+        case ToolCitation():
+            return "error" not in citation.result
 
 
 def _build_vacation_days_tool() -> VacationDaysTool:
@@ -233,10 +208,11 @@ def _build_orchestrator() -> ChatOrchestrator:
     chat_model = build_chat_model(chat_model_config)
     vacation_days_tool = _build_vacation_days_tool()
     retrieval_tool = RetrievalTool(retriever=_build_retriever())
-    citation_tool = CitationTool()
-    tools: list[Tool] = [vacation_days_tool, retrieval_tool, citation_tool]
+    citeable_tools: list[CiteableTool] = [vacation_days_tool, retrieval_tool]
+    citation_layer = CitationLayer(chat_model, citeable_tools=citeable_tools)
+    tools: list[Tool] = list(citeable_tools)
     return ChatOrchestrator(
-        model=chat_model,
+        citation_layer=citation_layer,
         tools=tools,
         prompt_profile=prompt_profile,
         prompts=DEFAULT_PROMPTS,
@@ -290,8 +266,8 @@ def _trace_response(
     final_response_text: str,
     emitted_chars: int,
     emitted_chunks: list[str],
-    citation_events: list[SourceCitationEvent],
-    tool_citation_events: list[ToolCitationEvent],
+    numbered: list[NumberedCitation],
+    hallucinated: list[HallucinatedCitation],
 ) -> None:
     span.set_attributes(
         build_output_attributes(final_response_text, mime_type=OpenInferenceMimeTypeValues.TEXT)
@@ -299,8 +275,8 @@ def _trace_response(
     span.set_attributes(
         build_metadata_attributes(
             {
-                "citation_events": len(citation_events),
-                "tool_citation_events": len(tool_citation_events),
+                "numbered_citations": len(numbered),
+                "hallucinated_citations": len(hallucinated),
             }
         )
     )
@@ -308,8 +284,8 @@ def _trace_response(
     span.set_attribute(
         "chat.response.preview", to_attribute_text("".join(emitted_chunks), max_chars=600)
     )
-    span.set_attribute("chat.response.citation_events", len(citation_events))
-    span.set_attribute("chat.response.tool_citation_events", len(tool_citation_events))
+    span.set_attribute("chat.response.numbered_citations", len(numbered))
+    span.set_attribute("chat.response.hallucinated_citations", len(hallucinated))
     span.set_status(StatusCode.OK)
 
 
@@ -340,12 +316,9 @@ async def on_message(message: cl.Message) -> None:
 
     user_text = str(message.content)
 
-    # Delay creating the response bubble until the first text token arrives so
-    # that interactive auth prompts (AskUserMessage) are not sandwiched between
-    # an empty placeholder and the eventual answer.
     response: cl.Message | None = None
-    citation_events: list[SourceCitationEvent] = []
-    tool_citation_events: list[ToolCitationEvent] = []
+    numbered: list[NumberedCitation] = []
+    hallucinated: list[HallucinatedCitation] = []
     emitted_chars = 0
     emitted_chunks: list[str] = []
     pending_whitespace = ""
@@ -354,11 +327,7 @@ async def on_message(message: cl.Message) -> None:
         using_session_attributes(trace_session),
         _tracer.start_as_current_span(SPAN_CHAT_UI_ON_MESSAGE) as span,
     ):
-        _trace_request(
-            span=span,
-            user_text=user_text,
-            trace_session=trace_session,
-        )
+        _trace_request(span=span, user_text=user_text, trace_session=trace_session)
 
         event: ProcessEvent
 
@@ -379,21 +348,24 @@ async def on_message(message: cl.Message) -> None:
                     tokens, pending_whitespace = consume_text_chunk(event, pending_whitespace)
                     for token in tokens:
                         await _stream_response_token(token)
-                case SourceCitationEvent():
-                    citation_events.append(event)
-                case ToolCitationEvent():
-                    tool_citation_events.append(event)
-                case QuoteReferenceEvent():
-                    tokens, pending_whitespace = consume_quote_reference_event(
-                        event,
-                        pending_whitespace,
+                case NumberedCitation():
+                    numbered.append(event)
+                    tokens, pending_whitespace = consume_numbered_citation(
+                        event, pending_whitespace
                     )
                     for token in tokens:
                         await _stream_response_token(token)
                     logger.debug(
-                        "session.quote_reference_rendered",
+                        "session.numbered_citation_rendered",
                         reference_number=event.reference_number,
-                        canonical_key=event.canonical_key,
+                        canonical_key=canonical_key(event.citation),
+                    )
+                case HallucinatedCitation():
+                    hallucinated.append(event)
+                    logger.info(
+                        "session.hallucinated_citation",
+                        reason=event.reason,
+                        kind=event.raw.kind,
                     )
                 case _:
                     assert_never(event)
@@ -402,38 +374,22 @@ async def on_message(message: cl.Message) -> None:
             await _stream_response_token(pending_whitespace)
             pending_whitespace = ""
 
-        unique_chunks = collect_unique_citation_chunks(citation_events)
-        unique_tool_citations = collect_unique_tool_citations(tool_citation_events)
+        unique_numbered = collect_unique_numbered_citations(numbered)
+        renderable = [nc for nc in unique_numbered if _has_renderable_side_element(nc.citation)]
 
-        if (unique_chunks or unique_tool_citations) and response is None:
-            # Ensure citations can still be rendered even if no text token was emitted.
+        if unique_numbered and response is None:
             response = cl.Message(content="")
             await response.send()
 
         if response is not None:
-            if unique_chunks or unique_tool_citations:
-                appendix_sections: list[str] = []
-                sources_markdown = build_citation_markdown(unique_chunks)
-                if sources_markdown:
-                    appendix_sections.append(sources_markdown)
+            sources_markdown = build_citation_markdown(unique_numbered)
+            if sources_markdown:
+                response.content = f"{response.content.rstrip()}\n\n{sources_markdown}"
 
-                tool_citations_markdown = build_tool_citation_markdown(unique_tool_citations)
-                if tool_citations_markdown:
-                    appendix_sections.append(tool_citations_markdown)
+            if renderable:
+                response.elements = _build_side_elements(renderable)  # pyright: ignore[reportAttributeAccessIssue]
+                logger.info("session.sources_displayed", count=len(renderable))
 
-                if appendix_sections:
-                    response.content = (
-                        f"{response.content.rstrip()}\n\n{'\n\n'.join(appendix_sections)}"
-                    )
-
-                elements = [
-                    *_build_source_elements(unique_chunks),
-                    *_build_tool_source_elements(unique_tool_citations),
-                ]
-                response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
-                logger.info("session.sources_displayed", count=len(elements))
-
-            # Finalize the streamed message even when no post-processing payload exists.
             await response.update()
 
         trace_final_response_text = (
@@ -444,8 +400,8 @@ async def on_message(message: cl.Message) -> None:
             final_response_text=trace_final_response_text,
             emitted_chars=emitted_chars,
             emitted_chunks=emitted_chunks,
-            citation_events=citation_events,
-            tool_citation_events=tool_citation_events,
+            numbered=unique_numbered,
+            hallucinated=hallucinated,
         )
 
     logger.info("session.message_handled", length=len(user_text))

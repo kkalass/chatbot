@@ -1,139 +1,39 @@
-"""Unit tests for ChatOrchestrator in inline-quote-only mode."""
+"""Tests for :class:`ChatOrchestrator`: per-turn ref numbering, dispatch, fallbacks."""
 
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from dataclasses import replace
-from datetime import datetime
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 
 import pytest
 
+from src.chatbot.app.citation import (
+    Citation,
+    CitationLayerMessage,
+    DocumentCitation,
+    HallucinatedCitation,
+    NumberedCitation,
+    ToolRawCitation,
+)
+from src.chatbot.app.citation.layer import CitationLayerStreamItem
+from src.chatbot.app.citation.messages import (
+    CitationLayerAssistantMessage,
+    CitationLayerSystemMessage,
+    CitationLayerToolMessage,
+    CitationLayerUserMessage,
+)
 from src.chatbot.app.orchestrator import ChatOrchestrator
-from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
-    ChatMessage,
-    ChatStreamItem,
     JsonObject,
-    ProcessEvent,
     PromptProfile,
-    QuoteReferenceEvent,
-    RawAssistantText,
-    SearchResultQuote,
-    SourceCitationEvent,
     ToolCallInfo,
-    ToolCallQuote,
-    ToolCitationEvent,
-    ToolContext,
-    ToolEvent,
     ToolSchema,
 )
 
-
-class _FakeChatModel:
-    def __init__(
-        self,
-        turns: list[tuple[list[str | SearchResultQuote | ToolCallQuote], list[ToolCallInfo]]]
-        | None = None,
-    ) -> None:
-        self.turns = turns or [(["default response"], [])]
-        self._turn_idx = 0
-        self.stream_calls: list[list[ChatMessage]] = []
-        self.stream_tools: list[list[ToolSchema] | None] = []
-
-    def stream(
-        self,
-        messages: Sequence[ChatMessage],
-        tools: Sequence[ToolSchema] | None = None,
-    ) -> AsyncIterator[str | list[ToolCallInfo] | SearchResultQuote | ToolCallQuote]:
-        self.stream_calls.append(list(messages))
-        self.stream_tools.append(list(tools) if tools is not None else None)
-        idx = min(self._turn_idx, len(self.turns) - 1)
-        self._turn_idx += 1
-        chunks, tool_calls = self.turns[idx]
-        return self._gen(chunks, tool_calls)
-
-    def _gen(
-        self,
-        chunks: list[str | SearchResultQuote | ToolCallQuote],
-        tool_calls: list[ToolCallInfo],
-    ) -> AsyncIterator[str | list[ToolCallInfo] | SearchResultQuote | ToolCallQuote]:
-        async def _inner() -> AsyncGenerator[
-            str | list[ToolCallInfo] | SearchResultQuote | ToolCallQuote,
-            None,
-        ]:
-            for chunk in chunks:
-                yield chunk
-            if tool_calls:
-                yield tool_calls
-
-        return _inner()
+# --- Stubs ------------------------------------------------------------------
 
 
-class _FakeTool:
-    def __init__(
-        self,
-        name: str,
-        result: dict[str, object] | None = None,
-        events: list[ToolEvent] | None = None,
-    ) -> None:
-        self.schema = ToolSchema(
-            name=name,
-            description="A fake tool",
-            parameters_schema={"type": "object", "properties": {}},
-        )
-        self.result: dict[str, object] = result if result is not None else {"output": "tool_result"}
-        self.events = events or []
-        self.calls: list[dict[str, object]] = []
-        self.contexts: list[ToolContext] = []
-
-    async def execute(
-        self,
-        args: dict[str, object],
-        context: ToolContext,
-    ) -> tuple[dict[str, object], list[ToolEvent]]:
-        self.calls.append(dict(args))
-        self.contexts.append(context)
-        return self.result, list(self.events)
-
-
-class _FakeRawTextChatModel:
-    def __init__(
-        self,
-        turns: list[tuple[list[ChatStreamItem], list[ToolCallInfo]]] | None = None,
-    ) -> None:
-        self.turns = turns or [
-            (["default response", RawAssistantText(text="default response")], [])
-        ]
-        self._turn_idx = 0
-        self.stream_calls: list[list[ChatMessage]] = []
-        self.stream_tools: list[list[ToolSchema] | None] = []
-
-    def stream(
-        self,
-        messages: Sequence[ChatMessage],
-        tools: Sequence[ToolSchema] | None = None,
-    ) -> AsyncIterator[ChatStreamItem]:
-        self.stream_calls.append(list(messages))
-        self.stream_tools.append(list(tools) if tools is not None else None)
-        idx = min(self._turn_idx, len(self.turns) - 1)
-        self._turn_idx += 1
-        chunks, tool_calls = self.turns[idx]
-        return self._gen(chunks, tool_calls)
-
-    def _gen(
-        self,
-        chunks: list[ChatStreamItem],
-        tool_calls: list[ToolCallInfo],
-    ) -> AsyncIterator[ChatStreamItem]:
-        async def _inner() -> AsyncGenerator[ChatStreamItem, None]:
-            for chunk in chunks:
-                yield chunk
-            if tool_calls:
-                yield tool_calls
-
-        return _inner()
-
-
-class _IdentityPromptProfile(PromptProfile):
-    def adjust_prompts(self, prompts: Prompts) -> Prompts:
+@dataclass(frozen=True)
+class _IdentityProfile:
+    def adjust_prompts(self, prompts: object) -> object:
         return prompts
 
     def adjust_tool_description(self, tool_name: str, description: str) -> str:
@@ -143,409 +43,182 @@ class _IdentityPromptProfile(PromptProfile):
         return schema
 
 
-async def _collect(stream: AsyncIterator[ProcessEvent]) -> str:
-    parts: list[str] = []
-    async for event in stream:
-        if isinstance(event, str):
-            parts.append(event)
-    return "".join(parts)
+class _StubCitationLayer:
+    """Minimal CitationLayer stand-in honouring the surface used by the orchestrator."""
 
+    def __init__(self, scripted_streams: list[list[CitationLayerStreamItem]]) -> None:
+        self._streams = scripted_streams
+        self._index = 0
+        self.received_histories: list[list[CitationLayerMessage]] = []
+        self.received_tool_lists: list[Sequence[ToolSchema] | None] = []
 
-async def _collect_all(stream: AsyncIterator[ProcessEvent]) -> tuple[str, list[ProcessEvent]]:
-    text_parts: list[str] = []
-    non_text_events: list[ProcessEvent] = []
-    async for event in stream:
-        if isinstance(event, str):
-            text_parts.append(event)
-        else:
-            non_text_events.append(event)
-    return "".join(text_parts), non_text_events
+    def make_system_message(self, base_prompt: str) -> CitationLayerSystemMessage:
+        return CitationLayerSystemMessage(llm_content=base_prompt)
 
+    def make_user_message(self, user_text: str) -> CitationLayerUserMessage:
+        return CitationLayerUserMessage(llm_content=user_text)
 
-class TestChatOrchestratorStreaming:
-    @pytest.mark.asyncio
-    async def test_yields_model_chunks(self) -> None:
-        model = _FakeChatModel(turns=[(["Hello", ", ", "world!"], [])])
-        orchestrator = ChatOrchestrator(model, prompt_profile=_IdentityPromptProfile())
-
-        assert await _collect(orchestrator.process_message("Hi")) == "Hello, world!"
-
-    @pytest.mark.asyncio
-    async def test_system_prompt_is_first_message(self) -> None:
-        model = _FakeChatModel(turns=[(["response"], [])])
-
-        def _fixed_prompt(_dt: datetime) -> str:
-            return "You are a test bot."
-
-        prompts = replace(DEFAULT_PROMPTS, system_prompt=_fixed_prompt)
-        orchestrator = ChatOrchestrator(
-            model,
-            prompt_profile=_IdentityPromptProfile(),
-            prompts=prompts,
-        )
-
-        await _collect(orchestrator.process_message("Hi"))
-
-        assert model.stream_calls[0][0].role == "system"
-        assert model.stream_calls[0][0].content == "You are a test bot."
-
-    @pytest.mark.asyncio
-    async def test_current_user_turn_is_formatted_for_model_call_only(self) -> None:
-        model = _FakeChatModel(turns=[(["response"], []), (["next response"], [])])
-
-        def _format_user_message(user_text: str) -> str:
-            return f"QUESTION:\n{user_text}\n\nRemember citations."
-
-        prompts = replace(
-            DEFAULT_PROMPTS,
-            user_message=_format_user_message,
-        )
-        orchestrator = ChatOrchestrator(
-            model,
-            prompt_profile=_IdentityPromptProfile(),
-            prompts=prompts,
-        )
-
-        await _collect(orchestrator.process_message("Hi"))
-
-        assert model.stream_calls[0][1].role == "user"
-        assert model.stream_calls[0][1].content == "QUESTION:\nHi\n\nRemember citations."
-
-        await _collect(orchestrator.process_message("Next"))
-
-        second_turn_user_messages = [
-            message.content for message in model.stream_calls[1] if message.role == "user"
-        ]
-        assert second_turn_user_messages == [
-            "Hi",
-            "QUESTION:\nNext\n\nRemember citations.",
-        ]
-
-
-class TestAgenticLoop:
-    @pytest.mark.asyncio
-    async def test_executes_tool_then_continues_with_tool_result_in_history(self) -> None:
-        tool = _FakeTool("echo", result={"value": "from_tool"})
-        tc = ToolCallInfo(name="echo", arguments={"x": 1}, call_id="c1")
-        model = _FakeChatModel(turns=[([], [tc]), (["Done."], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
-
-        text = await _collect(orchestrator.process_message("do thing"))
-
-        assert text == "Done."
-        assert tool.calls == [{"x": 1}]
-        second_call_messages = model.stream_calls[1]
-        tool_msgs = [m for m in second_call_messages if m.role == "tool"]
-        assert tool_msgs and tool_msgs[-1].tool_call_id == "c1"
-
-    @pytest.mark.asyncio
-    async def test_follow_up_step_keeps_formatting_latest_user_turn_without_extra_message(
+    def make_assistant_message(
         self,
-    ) -> None:
-        tool = _FakeTool("echo", result={"value": "from_tool"})
-        tc = ToolCallInfo(name="echo", arguments={"x": 1}, call_id="c1")
-
-        def _format_user_message(user_text: str) -> str:
-            return f"{user_text}\n\nCite tool-backed claims inline."
-
-        prompts = replace(
-            DEFAULT_PROMPTS,
-            user_message=_format_user_message,
-        )
-        model = _FakeChatModel(turns=[([], [tc]), (["Done."], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[tool],
-            prompt_profile=_IdentityPromptProfile(),
-            prompts=prompts,
+        parts: Sequence[str | Citation | HallucinatedCitation],
+        *,
+        tool_calls: Sequence[ToolCallInfo] | None = None,
+    ) -> CitationLayerAssistantMessage:
+        return CitationLayerAssistantMessage(
+            parts=tuple(parts),
+            llm_content="".join(p if isinstance(p, str) else "" for p in parts),
+            tool_calls=tuple(tool_calls) if tool_calls else None,
         )
 
-        await _collect(orchestrator.process_message("do thing"))
-
-        second_call_messages = model.stream_calls[1]
-        user_messages = [m for m in second_call_messages if m.role == "user"]
-        assert len(user_messages) == 1
-        assert user_messages[0].content == "do thing\n\nCite tool-backed claims inline."
-
-    @pytest.mark.asyncio
-    async def test_breaks_to_no_tools_fallback_on_repeated_equivalent_tool_calls(self) -> None:
-        tool = _FakeTool("echo", result={"value": "from_tool"})
-        first = ToolCallInfo(name="echo", arguments={"x": 1}, call_id="c1")
-        repeated = ToolCallInfo(name="echo", arguments={"x": 1}, call_id="c2")
-        model = _FakeChatModel(
-            turns=[
-                ([], [first]),
-                ([], [repeated]),
-                (["Fallback answer."], []),
-            ]
-        )
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[tool],
-            prompt_profile=_IdentityPromptProfile(),
+    def make_tool_message(
+        self, call_id: str, name: str, result: JsonObject
+    ) -> CitationLayerToolMessage:
+        return CitationLayerToolMessage(
+            tool_call_id=call_id, tool_name=name, result=result, llm_content=""
         )
 
-        text = await _collect(orchestrator.process_message("do thing"))
-
-        assert text == "Fallback answer."
-        assert tool.calls == [{"x": 1}]
-        assert model.stream_tools[2] is None
-
-
-class TestInlineQuotePipeline:
-    def _search_result(self) -> dict[str, object]:
-        return {
-            "chunks": [
-                {
-                    "source": "doc.txt",
-                    "chunk_id": "c1",
-                    "content": "body",
-                    "score": 0.9,
-                    "title": "Doc Title",
-                    "author": "A",
-                    "publication_date": "2023-03-10",
-                }
-            ]
-        }
-
-    @pytest.mark.asyncio
-    async def test_valid_search_quote_emits_reference_and_source_citation(self) -> None:
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeChatModel(turns=[([], [search_tc]), (["Answer. ", quote, " end."], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
-
-        text, events = await _collect_all(orchestrator.process_message("ask"))
-
-        assert text == "Answer.  end."
-        ref_events = [e for e in events if isinstance(e, QuoteReferenceEvent)]
-        assert len(ref_events) == 1
-        assert ref_events[0].reference_number == 1
-        citation_events = [e for e in events if isinstance(e, SourceCitationEvent)]
-        assert len(citation_events) == 1
-        assert citation_events[0].validated[0].source == "doc.txt"
-
-    @pytest.mark.asyncio
-    async def test_duplicate_quote_reuses_reference_number(self) -> None:
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeChatModel(turns=[([], [search_tc]), (["A", quote, "B", quote], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
-
-        _, events = await _collect_all(orchestrator.process_message("ask"))
-
-        refs = [e for e in events if isinstance(e, QuoteReferenceEvent)]
-        assert len(refs) == 2
-        assert refs[0].reference_number == 1
-        assert refs[1].reference_number == 1
-
-    @pytest.mark.asyncio
-    async def test_invalid_search_quote_is_dropped(self) -> None:
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        bad_quote = SearchResultQuote(
-            claim="claim",
-            tool_call_id="s1",
-            source="unknown.txt",
-            chunk_id="bad",
-        )
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeChatModel(turns=[([], [search_tc]), (["Text.", bad_quote], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
-
-        text, events = await _collect_all(orchestrator.process_message("ask"))
-
-        assert text == "Text."
-        assert not any(isinstance(e, QuoteReferenceEvent) for e in events)
-        assert not any(isinstance(e, SourceCitationEvent) for e in events)
-
-    @pytest.mark.asyncio
-    async def test_search_quote_with_leading_slash_source_is_accepted(self) -> None:
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        quote = SearchResultQuote(
-            claim="claim",
-            tool_call_id="get_search_results",
-            source="/doc.txt",
-            chunk_id="c1",
-        )
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeChatModel(turns=[([], [search_tc]), (["Answer. ", quote, " end."], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
-
-        text, events = await _collect_all(orchestrator.process_message("ask"))
-
-        assert text == "Answer.  end."
-        ref_events = [e for e in events if isinstance(e, QuoteReferenceEvent)]
-        assert len(ref_events) == 1
-        citation_events = [e for e in events if isinstance(e, SourceCitationEvent)]
-        assert len(citation_events) == 1
-        assert citation_events[0].validated[0].source == "doc.txt"
-
-    @pytest.mark.asyncio
-    async def test_tool_call_quote_emits_reference_and_tool_citation(self) -> None:
-        vacation_tc = ToolCallInfo(name="get_vacation_days", arguments={}, call_id="v1")
-        quote = ToolCallQuote(
-            tool_call_id="v1",
-        )
-        vacation_tool = _FakeTool("get_vacation_days", result={"remaining_days": 27})
-        model = _FakeChatModel(turns=[([], [vacation_tc]), (["You have ", quote, " days."], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[vacation_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
-
-        text, events = await _collect_all(orchestrator.process_message("ask"))
-
-        assert text == "You have  days."
-        assert len([e for e in events if isinstance(e, QuoteReferenceEvent)]) == 1
-        assert not any(isinstance(e, SourceCitationEvent) for e in events)
-        tool_citation_events = [e for e in events if isinstance(e, ToolCitationEvent)]
-        assert len(tool_citation_events) == 1
-        assert tool_citation_events[0].tool_name == "get_vacation_days"
-        assert tool_citation_events[0].result == {"remaining_days": 27}
-
-    @pytest.mark.asyncio
-    async def test_quote_reference_events_keep_stream_order(self) -> None:
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeChatModel(turns=[([], [search_tc]), (["before", quote, "after"], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
-
-        all_events: list[ProcessEvent] = []
-        async for event in orchestrator.process_message("ask"):
-            all_events.append(event)
-
-        expected_ref = QuoteReferenceEvent(reference_number=1, canonical_key="search:s1:doc.txt:c1")
-        inline_events = [e for e in all_events if isinstance(e, (str, QuoteReferenceEvent))]
-        assert inline_events == ["before", expected_ref, "after"]
-
-    @pytest.mark.asyncio
-    async def test_follow_up_turn_receives_assistant_history_with_rendered_reference_tokens(
+    def stream(
         self,
-    ) -> None:
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeChatModel(
-            turns=[
-                ([], [search_tc]),
-                (["Answer.", quote], []),
-                (["Follow-up reply."], []),
-            ]
-        )
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
+        history: Sequence[CitationLayerMessage],
+        *,
+        tools: Sequence[ToolSchema] | None = None,
+    ) -> AsyncIterator[CitationLayerStreamItem]:
+        self.received_histories.append(list(history))
+        self.received_tool_lists.append(tools)
+        items = self._streams[self._index]
+        self._index += 1
 
-        await _collect(orchestrator.process_message("ask"))
-        await _collect(orchestrator.process_message("next"))
+        async def _gen() -> AsyncIterator[CitationLayerStreamItem]:
+            for item in items:
+                yield item
 
-        follow_up_messages = model.stream_calls[2]
-        assistant_messages = [
-            message.content
-            for message in follow_up_messages
-            if message.role == "assistant" and isinstance(message.content, str)
-        ]
-        assert "Answer.[1]" in assistant_messages
+        return _gen()
+
+
+class _StubTool:
+    def __init__(self, name: str, *, result: JsonObject) -> None:
+        self.schema = ToolSchema(name=name, description="d", parameters_schema={"type": "object"})
+        self._result = result
+        self.calls: list[JsonObject] = []
+
+    async def execute(self, args: JsonObject) -> JsonObject:
+        self.calls.append(args)
+        return self._result
+
+
+def _doc_citation(*, marker: str = "[M]", chunk_id: str = "c1") -> DocumentCitation:
+    return DocumentCitation(
+        raw_marker_text=marker,
+        tool_call_id="tc1",
+        source="s",
+        chunk_id=chunk_id,
+        content="x",
+        score=1.0,
+    )
+
+
+def _profile() -> PromptProfile:
+    return _IdentityProfile()  # type: ignore[return-value]
+
+
+# --- Tests ------------------------------------------------------------------
+
+
+class TestSingleTurn:
+    @pytest.mark.asyncio
+    async def test_yields_streamed_text_and_appends_history(self) -> None:
+        layer = _StubCitationLayer([["hello ", "world"]])
+        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
+
+        events = [e async for e in orch.process_message("hi")]
+
+        assert events == ["hello ", "world"]
 
     @pytest.mark.asyncio
-    async def test_follow_up_turn_prefers_raw_assistant_text_with_quote_markers_in_history(
-        self,
-    ) -> None:
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        quote = SearchResultQuote(claim="claim", tool_call_id="s1", source="doc.txt", chunk_id="c1")
-        raw_answer = (
-            "Answer."
-            '<°_quote_°>{"kind":"search_result","tool_call_id":"s1",'
-            '"source":"doc.txt","chunk_id":"c1"}</°_quote_°>'
-        )
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeRawTextChatModel(
-            turns=[
-                ([], [search_tc]),
-                (["Answer.", quote, RawAssistantText(text=raw_answer)], []),
-                (["Follow-up reply.", RawAssistantText(text="Follow-up reply.")], []),
-            ]
-        )
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
-        )
+    async def test_assigns_sequential_ref_numbers(self) -> None:
+        c1 = _doc_citation(chunk_id="c1")
+        c2 = _doc_citation(chunk_id="c2")
+        layer = _StubCitationLayer([["a", c1, "b", c2]])
+        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
 
-        await _collect(orchestrator.process_message("ask"))
-        await _collect(orchestrator.process_message("next"))
+        events = [e async for e in orch.process_message("hi")]
+        numbered = [e for e in events if isinstance(e, NumberedCitation)]
 
-        follow_up_messages = model.stream_calls[2]
-        assistant_messages = [
-            message.content
-            for message in follow_up_messages
-            if message.role == "assistant" and isinstance(message.content, str)
-        ]
-        assert raw_answer in assistant_messages
+        assert [n.reference_number for n in numbered] == [1, 2]
 
     @pytest.mark.asyncio
-    async def test_search_chunks_are_rendered_as_markdown_for_model(self) -> None:
-        """History keeps original JSON; model sees markdown with chunk_id adjacent to content."""
-        search_tc = ToolCallInfo(name="search_documents", arguments={"query": "q"}, call_id="s1")
-        search_tool = _FakeTool("search_documents", result=self._search_result())
-        model = _FakeChatModel(turns=[([], [search_tc]), (["Reply."], [])])
-        orchestrator = ChatOrchestrator(
-            model,
-            tools=[search_tool],
-            prompt_profile=_IdentityPromptProfile(),
+    async def test_reuses_ref_number_for_same_canonical_key(self) -> None:
+        c1a = _doc_citation(chunk_id="c1")
+        c1b = _doc_citation(chunk_id="c1")  # same canonical key
+        layer = _StubCitationLayer([[c1a, " then ", c1b]])
+        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
+
+        events = [e async for e in orch.process_message("hi")]
+        numbered = [e for e in events if isinstance(e, NumberedCitation)]
+
+        assert [n.reference_number for n in numbered] == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_passes_through_hallucinated_citation(self) -> None:
+        h = HallucinatedCitation(
+            raw=ToolRawCitation(tool_call_id="missing", raw_marker_text="<m>"),
+            reason="x",
+        )
+        layer = _StubCitationLayer([["a", h, "b"]])
+        orch = ChatOrchestrator(layer, prompt_profile=_profile())  # type: ignore[arg-type]
+
+        events = [e async for e in orch.process_message("hi")]
+        assert h in events
+
+
+class TestToolDispatchLoop:
+    @pytest.mark.asyncio
+    async def test_dispatches_then_continues_to_next_step(self) -> None:
+        tc = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
+        tool = _StubTool("vac", result={"days": 30})
+        layer = _StubCitationLayer(
+            [
+                ["thinking ", [tc]],
+                ["final answer"],
+            ]
+        )
+        orch = ChatOrchestrator(
+            layer,  # type: ignore[arg-type]
+            prompt_profile=_profile(),
+            tools=[tool],
         )
 
-        await _collect(orchestrator.process_message("ask"))
+        events = [e async for e in orch.process_message("how many days?")]
 
-        # Step 2 messages — model sees markdown, not raw JSON.
-        step2_messages = model.stream_calls[1]
-        tool_msgs = [m for m in step2_messages if m.role == "tool"]
-        assert len(tool_msgs) == 1
-        tool_content = tool_msgs[0].content
-        assert isinstance(tool_content, str), "model should receive str, not dict"
-        assert "<search_results>" in tool_content
-        assert (
-            '<source title="Doc Title" source_path="doc.txt" year="2023" author="A">'
-            in tool_content
+        assert "thinking " in events
+        assert "final answer" in events
+        assert tool.calls == [{"year": 2026}]
+        # Second stream sees the tool result in history
+        second_history = layer.received_histories[1]
+        assert any(isinstance(m, CitationLayerToolMessage) for m in second_history)
+
+
+class TestRepeatedToolCallSafety:
+    @pytest.mark.asyncio
+    async def test_repeated_signature_triggers_fallback_without_tools(self) -> None:
+        tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
+        tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
+        tool = _StubTool("vac", result={"days": 30})
+        layer = _StubCitationLayer(
+            [
+                [[tc1]],
+                [[tc2]],
+                ["fallback answer"],
+            ]
         )
-        assert '<chunk chunk_id="c1" page="unknown">' in tool_content
-        assert "body" in tool_content
-        assert "</search_results>" in tool_content
-        # Original JSON dict must NOT be in the message sent to the model.
-        assert "{" not in tool_content or "chunk_id" in tool_content  # no raw JSON keys
+        orch = ChatOrchestrator(
+            layer,  # type: ignore[arg-type]
+            prompt_profile=_profile(),
+            tools=[tool],
+        )
 
-        # History must still carry the original JSON for citation_support.
-        history_tool_msgs = [m for m in orchestrator._history if m.role == "tool"]  # pyright: ignore[reportPrivateUsage]
-        assert len(history_tool_msgs) == 1
-        assert isinstance(history_tool_msgs[0].content, dict)
-        assert "chunks" in history_tool_msgs[0].content
+        events = [e async for e in orch.process_message("hi")]
+
+        assert "fallback answer" in events
+        # Final stream should have been requested without tools.
+        assert layer.received_tool_lists[-1] is None

@@ -1,55 +1,45 @@
 """Chat orchestration: conversation history and agentic tool-call loop.
 
-The orchestrator is the single entry point for the UI layer.  It depends
-exclusively on Protocol interfaces — no concrete infrastructure is imported here.
+The orchestrator is the single entry point for the UI layer. It depends
+exclusively on Protocol interfaces — no concrete infrastructure is imported
+here.
 
 Document retrieval is modelled as a regular tool: the LLM decides *if* and
-*when* to call ``search_documents`` and formulates the query itself.  This
+*when* to call ``search_documents`` and formulates the query itself. This
 enables multi-hop retrieval and query reformulation from conversation context.
 
 Each turn runs the same loop regardless of which tools are registered:
-stream from the model, yield text chunks to the caller, execute any tool calls
-that arrive at the end of the stream, and repeat until the model produces a
-plain-text response. Grounding provenance is produced inline from parsed quote
-items and emitted as :class:`~src.chatbot.app.protocols.SourceCitationEvent`.
+stream from the :class:`~src.chatbot.app.citation.CitationLayer`, yield text
+chunks and citation events to the caller, execute any tool calls that arrive
+at the end of the stream, and repeat until the model produces a plain-text
+response. Citation marker parsing and validation are entirely owned by the
+citation layer; the orchestrator only assigns stable per-turn reference numbers
+to validated citations and surfaces hallucinated ones.
 """
 
-import html
 import json
-import re
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
-from typing import assert_never
 
 import structlog
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from src.chatbot.app.citation_support import (
-    build_canonical_key,
-    validate_search_quote,
-    validate_tool_call_quote,
+from src.chatbot.app.citation import (
+    Citation,
+    CitationLayer,
+    CitationLayerMessage,
+    HallucinatedCitation,
+    NumberedCitation,
+    canonical_key,
 )
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
-    ChatMessage,
-    ChatModel,
     JsonObject,
-    ProcessEvent,
     PromptProfile,
-    Quote,
-    QuoteReferenceEvent,
-    RawAssistantText,
-    SearchResultQuote,
-    SourceChunk,
-    SourceCitationEvent,
     Tool,
     ToolCallInfo,
-    ToolCallQuote,
-    ToolCitationEvent,
-    ToolContext,
-    ToolEvent,
     ToolSchema,
 )
 from src.chatbot.observability import to_attribute_text
@@ -70,191 +60,33 @@ tracer = trace.get_tracer(__name__)
 _MAX_TOOL_STEPS = 10  # safety limit to prevent infinite agentic loops
 
 
+type ProcessEvent = str | NumberedCitation | HallucinatedCitation
+
+
 def _tool_call_sequence_signature(tool_calls: list[ToolCallInfo]) -> tuple[tuple[str, str], ...]:
-    """Return a stable signature for a tool-call sequence, excluding backend call IDs.
+    """Stable signature for a tool-call sequence, excluding backend call IDs.
 
-    We intentionally compare only ``(name, arguments)`` so repeated calls are
-    detected even when the backend emits fresh correlation IDs each step.
+    Comparing only ``(name, arguments)`` lets us detect repeated calls even
+    when the backend mints fresh correlation IDs per step.
     """
-
     return tuple(
         (tc.name, json.dumps(tc.arguments, sort_keys=True, separators=(",", ":")))
         for tc in tool_calls
     )
 
 
-def _format_search_chunks_as_markdown(content: JsonObject) -> str:
-    """Render search result chunks as structured XML for model consumption.
-
-    Placing ``chunk_id`` immediately adjacent to its content makes it
-    significantly easier for smaller models to correctly attribute claims to
-    the right chunk rather than picking the first chunk in the list.
-    """
-    from typing import cast
-
-    chunks_raw: object = content.get("chunks")
-    if not isinstance(chunks_raw, list) or not chunks_raw:
-        message: object = content.get("message", "No relevant documents found.")
-        return str(message)
-
-    grouped_by_source: dict[str, list[dict[str, object]]] = {}
-    for raw_chunk in cast(list[object], chunks_raw):
-        if not isinstance(raw_chunk, dict):
-            continue
-        chunk_data = cast(dict[str, object], raw_chunk)
-        source = str(chunk_data.get("source", "unknown"))
-        grouped_by_source.setdefault(source, []).append(chunk_data)
-
-    parts: list[str] = ["<search_results>\n"]
-    for source, source_chunks in grouped_by_source.items():
-        title = source
-        author: str | None = None
-        year: str | None = None
-
-        for chunk_data in source_chunks:
-            raw_title = chunk_data.get("title")
-            if raw_title is not None and str(raw_title).strip():
-                title = str(raw_title).strip()
-                break
-
-        for chunk_data in source_chunks:
-            raw_author = chunk_data.get("author")
-            if raw_author is not None and str(raw_author).strip():
-                author = str(raw_author).strip()
-                break
-
-        for chunk_data in source_chunks:
-            raw_publication_date = chunk_data.get("publication_date")
-            if raw_publication_date is None:
-                continue
-            match = re.search(r"(?:19|20)\d{2}", str(raw_publication_date))
-            if match is not None:
-                year = match.group(0)
-                break
-
-        title_attr = html.escape(title, quote=True)
-        source_attr = html.escape(source, quote=True)
-        year_attr = html.escape(year or "unknown", quote=True)
-        author_attr = html.escape(author or "unknown", quote=True)
-        parts.append(
-            f'  <source title="{title_attr}" source_path="{source_attr}" year="{year_attr}" author="{author_attr}">\n'
-        )
-
-        for chunk_data in source_chunks:
-            chunk_id = str(chunk_data.get("chunk_id", ""))
-            page: object = chunk_data.get("page")
-            content_text = str(chunk_data.get("content", ""))
-            chunk_id_attr = html.escape(chunk_id, quote=True)
-            page_attr = html.escape(str(page), quote=True) if page is not None else "unknown"
-            content_escaped = html.escape(content_text)
-
-            parts.append(f'    <chunk chunk_id="{chunk_id_attr}" page="{page_attr}">\n')
-            parts.append(f"      {content_escaped}\n")
-            parts.append("    </chunk>\n")
-
-        parts.append("  </source>\n")
-
-    parts.append("</search_results>")
-    return "".join(parts)
-
-
-def _build_step_messages(
-    *,
-    system_text: str,
-    history: list[ChatMessage],
-    prompts: Prompts,
-) -> list[ChatMessage]:
-    """Build one step's model input without mutating persisted history.
-
-    Two transformations are applied:
-    - The last user message is enriched with a prompt reminder about quote
-      formatting (never stored in history to avoid token bloat).
-        - ``role="tool"`` messages containing search result chunks are rendered as
-            structured XML so that ``chunk_id`` appears directly adjacent to its
-      content, improving citation accuracy for smaller models.
-    """
-    latest_user_index = next(
-        (index for index in range(len(history) - 1, -1, -1) if history[index].role == "user"),
-        None,
-    )
-    step_history: list[ChatMessage] = []
-    for index, message in enumerate(history):
-        if index == latest_user_index and isinstance(message.content, str):
-            step_history.append(
-                ChatMessage(role=message.role, content=prompts.user_message(message.content))
-            )
-            continue
-        if (
-            message.role == "tool"
-            and isinstance(message.content, dict)
-            and "chunks" in message.content
-        ):
-            step_history.append(
-                ChatMessage(
-                    role=message.role,
-                    content=_format_search_chunks_as_markdown(message.content),  # type: ignore[arg-type]
-                    tool_call_id=message.tool_call_id,
-                )
-            )
-            continue
-        step_history.append(message)
-    return [ChatMessage(role="system", content=system_text), *step_history]
-
-
-def _resolve_quote(
-    quote: Quote,
-    history: tuple[ChatMessage, ...],
-) -> SourceChunk | ToolCallInfo | None:
-    """Validate a quote against conversation history.
-
-    Returns:
-        A ``SourceChunk`` for a valid ``SearchResultQuote``.
-        A ``ToolCallInfo`` (the actual call from history) for a valid ``ToolCallQuote``.
-        ``None`` when validation fails.
-    """
-    match quote:
-        case SearchResultQuote():
-            return validate_search_quote(quote, history)  # SourceChunk | None
-        case ToolCallQuote():
-            return validate_tool_call_quote(quote, history)  # ToolCallInfo | None
-        case _:
-            assert_never(quote)
-
-
-def _find_tool_result(call_id: str, history: tuple[ChatMessage, ...]) -> JsonObject | None:
-    """Return the tool-result JSON for *call_id* from history, or ``None`` if not found."""
-    for msg in history:
-        if msg.role == "tool" and msg.tool_call_id == call_id and isinstance(msg.content, dict):
-            return msg.content  # type: ignore[return-value]  # JsonObject is dict[str, object]
-    return None
-
-
-def _trace_quote_counts(
-    *,
-    detected: int,
-    validated: int,
-    invalid: int,
-    duplicate: int,
-) -> None:
-    span = trace.get_current_span()
-    span.set_attribute("quote.detected.count", detected)
-    span.set_attribute("quote.validated.count", validated)
-    span.set_attribute("quote.invalid.count", invalid)
-    span.set_attribute("quote.duplicate.count", duplicate)
-
-
 def _trace_step_request(
     *,
     span: trace.Span,
     step_num: int,
-    messages: list[ChatMessage],
+    history_size: int,
     tool_schemas: list[ToolSchema] | None,
 ) -> None:
     span.set_attribute("chat.step", step_num)
     span.set_attributes(
         build_input_attributes(
             {
-                "message_count": len(messages),
+                "history_size": history_size,
                 "step_num": step_num,
                 "tool_count": len(tool_schemas) if tool_schemas else 0,
             },
@@ -266,21 +98,17 @@ def _trace_step_request(
 def _trace_step_response(
     *,
     span: trace.Span,
-    collected: list[str],
+    text_chars: int,
     tool_calls: list[ToolCallInfo],
-    assistant_text: str | None = None,
+    assistant_text: str,
 ) -> None:
-    span.set_attribute("chat.step.text_chars", len("".join(collected)))
+    span.set_attribute("chat.step.text_chars", text_chars)
     span.set_attribute("chat.step.tool_call_count", len(tool_calls))
     span.set_attribute(
         "chat.step.tool_calls",
         to_attribute_text([tc.name for tc in tool_calls]),
     )
-    if assistant_text is not None:
-        span.set_attribute(
-            "chat.step.output_preview",
-            to_attribute_text(assistant_text),
-        )
+    span.set_attribute("chat.step.output_preview", to_attribute_text(assistant_text))
 
 
 def _trace_tool_dispatch_request(*, span: trace.Span, tc: ToolCallInfo) -> None:
@@ -299,19 +127,10 @@ def _trace_tool_dispatch_request(*, span: trace.Span, tc: ToolCallInfo) -> None:
     span.set_attributes(build_tool_execution_attributes(tool_name=tc.name, parameters=tc.arguments))
 
 
-def _trace_tool_dispatch_response(
-    *,
-    span: trace.Span,
-    result: JsonObject,
-    events: list[ToolEvent],
-) -> None:
+def _trace_tool_dispatch_response(*, span: trace.Span, result: JsonObject) -> None:
     span.set_attributes(
         build_output_attributes(
-            {
-                "status": "ok",
-                "result_keys": sorted(result.keys()),
-                "event_count": len(events),
-            },
+            {"status": "ok", "result_keys": sorted(result.keys())},
             mime_type=OpenInferenceMimeTypeValues.JSON,
         )
     )
@@ -327,14 +146,23 @@ def _trace_tool_dispatch_error(
         span.record_exception(exc)
     span.set_attributes(
         build_output_attributes(
-            {
-                "status": "error",
-                "message": error_msg,
-            },
+            {"status": "error", "message": error_msg},
             mime_type=OpenInferenceMimeTypeValues.JSON,
         )
     )
     span.set_status(StatusCode.ERROR, error_msg)
+
+
+def _trace_citation_counts(
+    *,
+    validated: int,
+    duplicate: int,
+    hallucinated: int,
+) -> None:
+    span = trace.get_current_span()
+    span.set_attribute("citation.validated.count", validated)
+    span.set_attribute("citation.duplicate.count", duplicate)
+    span.set_attribute("citation.hallucinated.count", hallucinated)
 
 
 class ChatOrchestrator:
@@ -345,23 +173,29 @@ class ChatOrchestrator:
     instantiated internally.
 
     Args:
-        model: Chat model backend (Protocol).
+        citation_layer: Citation-aware decorator over the underlying chat
+            model. Owns marker parsing, prompt fragment assembly, and citation
+            validation. The orchestrator never talks to the raw ``ChatModel``.
         tools: Tool implementations registered for dispatch and advertised to
-            the model.
-        prompt_profile: Model-specific prompt profile. Used once at construction
-            time to derive adjusted prompts and adjusted tool schemas.
-        prompts: Custom prompt configuration.  Mainly for testing (including manual tests) - allows to switch between different prompt variants for evaluation purposes.
+            the model. The same ``CiteableTool`` instances must also be passed
+            into the citation layer at construction so that dispatch and
+            citation validation share a single source of truth.
+        prompt_profile: Model-specific prompt profile. Used once at
+            construction time to derive adjusted prompts and adjusted tool
+            schemas.
+        prompts: Custom base prompt configuration. Mainly for testing — allows
+            switching between prompt variants for evaluation purposes.
     """
 
     def __init__(
         self,
-        model: ChatModel,
+        citation_layer: CitationLayer,
         *,
         prompt_profile: PromptProfile,
         tools: list[Tool] | None = None,
         prompts: Prompts = DEFAULT_PROMPTS,
     ) -> None:
-        self._model = model
+        self._citation_layer = citation_layer
         self._prompts = prompt_profile.adjust_prompts(prompts)
         _tools = tools or []
         self._tool_map: dict[str, Tool] = {t.schema.name: t for t in _tools}
@@ -369,134 +203,105 @@ class ChatOrchestrator:
             _adjust_tool_schema(t.schema, prompt_profile=prompt_profile) for t in _tools
         ]
         self._tool_schemas: list[ToolSchema] | None = adjusted_schemas if adjusted_schemas else None
-        self._history: list[ChatMessage] = []
+        self._history: list[CitationLayerMessage] = []
 
     def process_message(self, user_text: str) -> AsyncIterator[ProcessEvent]:
-        """Process *user_text* and return an async iterator of :data:`~src.chatbot.app.protocols.ProcessEvent` items.
+        """Process *user_text* and return an async iterator of :data:`ProcessEvent` items.
 
         Appends the user message to history eagerly (before iteration begins),
-        then returns a lazy async iterator that runs the agentic loop.  Tool
-        result messages are appended to history during tool steps but are not
-        yielded to the caller — only text chunks (``str``) and
-        :class:`~src.chatbot.app.protocols.ToolEvent` items are streamed back.
+        then returns a lazy async iterator that runs the agentic loop.
 
         Args:
             user_text: Raw message text from the user.
 
         Returns:
-            An async iterator yielding :data:`ProcessEvent` items —
-            ``str`` for streaming text and :class:`ToolEvent` subclasses for
-            structured metadata (e.g. :class:`~src.chatbot.app.protocols.SourceCitationEvent`).
+            Async iterator yielding ``str`` for streaming text and
+            :class:`NumberedCitation` / :class:`HallucinatedCitation` for
+            citation events.
         """
-        self._history.append(ChatMessage(role="user", content=user_text))
+        wrapped_user_text = self._prompts.user_message(user_text)
+        self._history.append(self._citation_layer.make_user_message(wrapped_user_text))
+
         history = self._history
-        model = self._model
+        citation_layer = self._citation_layer
         tool_schemas = self._tool_schemas
         tool_map = self._tool_map
         prompts = self._prompts
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
-            emitted_citation_events: list[SourceCitationEvent] = []
-            emitted_tool_citation_events: list[ToolCitationEvent] = []
-            fallback_without_tools = False
             previous_tool_call_signature: tuple[tuple[str, str], ...] | None = None
+            fallback_without_tools = False
 
-            # Inline-quote tracking.
-            quote_dedup: dict[str, int] = {}  # canonical_key -> reference_number
-            quote_ref_counter = 0
-            validated_search_chunks: list[SourceChunk] = []
-            quote_detected = 0
-            quote_validated = 0
-            quote_invalid = 0
-            quote_duplicate = 0
+            ref_by_key: dict[str, int] = {}
+            ref_counter = 0
+            validated_count = 0
+            duplicate_count = 0
+            hallucinated_count = 0
 
             for step_num in range(_MAX_TOOL_STEPS):
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:
-                    system_text = prompts.system_prompt(datetime.now(tz=UTC))
-                    messages = _build_step_messages(
-                        system_text=system_text,
-                        history=history,
-                        prompts=prompts,
+                    system_msg = citation_layer.make_system_message(
+                        prompts.system_prompt(datetime.now(tz=UTC))
                     )
+                    step_messages: list[CitationLayerMessage] = [system_msg, *history]
                     _trace_step_request(
                         span=step_span,
                         step_num=step_num,
-                        messages=messages,
+                        history_size=len(step_messages),
                         tool_schemas=tool_schemas,
                     )
-                    collected: list[str] = []
+
+                    parts: list[str | Citation | HallucinatedCitation] = []
                     tool_calls: list[ToolCallInfo] = []
-                    raw_assistant_text: str | None = None
+                    text_chars = 0
 
-                    async for item in model.stream(messages, tools=tool_schemas):
+                    async for item in citation_layer.stream(step_messages, tools=tool_schemas):
                         if isinstance(item, str):
-                            collected.append(item)
+                            text_chars += len(item)
+                            parts.append(item)
                             yield item
-                        elif isinstance(item, list):
+                            continue
+                        if isinstance(item, list):
                             tool_calls.extend(item)
-                        elif isinstance(item, RawAssistantText):
-                            raw_assistant_text = item.text
+                            continue
+                        if isinstance(item, HallucinatedCitation):
+                            hallucinated_count += 1
+                            parts.append(item)
+                            yield item
+                            continue
+                        # Validated Citation -> numbered + dedup.
+                        key = canonical_key(item)
+                        existing_ref = ref_by_key.get(key)
+                        if existing_ref is not None:
+                            duplicate_count += 1
+                            ref_number = existing_ref
                         else:
-                            quote_detected += 1
-                            canonical_key = build_canonical_key(item)
-                            if canonical_key in quote_dedup:
-                                quote_duplicate += 1
-                                reference_number = quote_dedup[canonical_key]
-                                collected.append(f"[{reference_number}]")
-                                yield QuoteReferenceEvent(
-                                    reference_number=reference_number,
-                                    canonical_key=canonical_key,
-                                )
-                            else:
-                                chunk = _resolve_quote(item, tuple(history))
-                                if chunk is not None:
-                                    quote_validated += 1
-                                    quote_ref_counter += 1
-                                    quote_dedup[canonical_key] = quote_ref_counter
-                                    collected.append(f"[{quote_ref_counter}]")
-                                    if isinstance(chunk, SourceChunk):
-                                        validated_search_chunks.append(chunk)
-                                    elif isinstance(item, ToolCallQuote):
-                                        # Use authoritative name from history, not the model's (potentially hallucinated) tool_name
-                                        tool_result = _find_tool_result(
-                                            item.tool_call_id, tuple(history)
-                                        )
-                                        emitted_tool_citation_events.append(
-                                            ToolCitationEvent(
-                                                tool_call_id=item.tool_call_id,
-                                                tool_name=chunk.name,
-                                                result=tool_result or {},
-                                            )
-                                        )
-                                    yield QuoteReferenceEvent(
-                                        reference_number=quote_ref_counter,
-                                        canonical_key=canonical_key,
-                                    )
-                                else:
-                                    quote_invalid += 1
-                                    logger.debug(
-                                        "orchestrator.quote_invalid",
-                                        kind=item.kind,
-                                        canonical_key=canonical_key,
-                                    )
+                            validated_count += 1
+                            ref_counter += 1
+                            ref_by_key[key] = ref_counter
+                            ref_number = ref_counter
+                        parts.append(item)
+                        yield NumberedCitation(reference_number=ref_number, citation=item)
 
-                    # If this is the final, text message (e.g. no tool calls)
+                    assistant_text = "".join(p for p in parts if isinstance(p, str))
+
                     if not tool_calls:
-                        assistant_text = raw_assistant_text or "".join(collected)
                         _trace_step_response(
                             span=step_span,
-                            collected=collected,
+                            text_chars=text_chars,
                             tool_calls=tool_calls,
                             assistant_text=assistant_text,
                         )
-                        history.append(ChatMessage(role="assistant", content=assistant_text))
+                        history.append(
+                            citation_layer.make_assistant_message(parts, tool_calls=None)
+                        )
                         break
 
-                    # tool calls present — emit step response and loop to execute tools and continue.
                     _trace_step_response(
                         span=step_span,
-                        collected=collected,
+                        text_chars=text_chars,
                         tool_calls=tool_calls,
+                        assistant_text=assistant_text,
                     )
 
                     current_signature = _tool_call_sequence_signature(tool_calls)
@@ -505,6 +310,11 @@ class ChatOrchestrator:
                             "orchestrator.repeated_tool_calls_detected",
                             step=step_num,
                             calls=[tc.name for tc in tool_calls],
+                        )
+                        # Persist the assistant turn so the model can still see it,
+                        # then break to the no-tools fallback below.
+                        history.append(
+                            citation_layer.make_assistant_message(parts, tool_calls=tool_calls)
                         )
                         fallback_without_tools = True
                         break
@@ -515,61 +325,56 @@ class ChatOrchestrator:
                         step=step_num,
                         calls=[tc.name for tc in tool_calls],
                     )
-                    assistant_tool_step_text = raw_assistant_text or "".join(collected)
+
                     history.append(
-                        ChatMessage(
-                            role="assistant",
-                            content=assistant_tool_step_text,
-                            tool_calls=tuple(tool_calls),
-                        )
+                        citation_layer.make_assistant_message(parts, tool_calls=tool_calls)
                     )
-                    async for event in _dispatch_tool_calls(tool_calls, history, tool_map):
-                        # FIXME: we don't have the cite tool any more, right? So I think this events might never need dispatch?
-                        # Can we simplify this code by inlinig _dispatch_tool_calls and not yielding events, only appending to history?
-                        # Or can we think of other uses for tools to dispatch events?
-                        yield event
-                        match event:
-                            case SourceCitationEvent():
-                                emitted_citation_events.append(event)
-                            case ToolCitationEvent():
-                                emitted_tool_citation_events.append(event)
+                    for tc in tool_calls:
+                        result = await _dispatch(tc, tool_map)
+                        history.append(
+                            citation_layer.make_tool_message(tc.call_id, tc.name, result)
+                        )
             else:
                 # Safety: exceeded max steps — one final response without tools.
                 logger.warning("orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS)
-
                 fallback_without_tools = True
 
             if fallback_without_tools:
-                system_text = prompts.system_prompt(datetime.now(tz=UTC))
-                messages = [ChatMessage(role="system", content=system_text), *history]
-                final: list[str] = []
-                raw_final_text: str | None = None
-                async for item in model.stream(messages, tools=None):
-                    if isinstance(item, str):
-                        final.append(item)
-                        yield item
-                    elif isinstance(item, RawAssistantText):
-                        raw_final_text = item.text
-
-                history.append(
-                    ChatMessage(role="assistant", content=raw_final_text or "".join(final))
+                system_msg = citation_layer.make_system_message(
+                    prompts.system_prompt(datetime.now(tz=UTC))
                 )
+                step_messages = [system_msg, *history]
+                parts = []
+                async for item in citation_layer.stream(step_messages, tools=None):
+                    if isinstance(item, str):
+                        parts.append(item)
+                        yield item
+                    elif isinstance(item, list):
+                        # No tools advertised — defensively ignore any spurious calls.
+                        continue
+                    elif isinstance(item, HallucinatedCitation):
+                        hallucinated_count += 1
+                        parts.append(item)
+                        yield item
+                    else:
+                        key = canonical_key(item)
+                        existing_ref = ref_by_key.get(key)
+                        if existing_ref is not None:
+                            duplicate_count += 1
+                            ref_number = existing_ref
+                        else:
+                            validated_count += 1
+                            ref_counter += 1
+                            ref_by_key[key] = ref_counter
+                            ref_number = ref_counter
+                        parts.append(item)
+                        yield NumberedCitation(reference_number=ref_number, citation=item)
+                history.append(citation_layer.make_assistant_message(parts, tool_calls=None))
 
-            # Emit a SourceCitationEvent from validated inline search quotes.
-            if validated_search_chunks:
-                inline_citation = SourceCitationEvent(validated=tuple(validated_search_chunks))
-                emitted_citation_events.append(inline_citation)
-                yield inline_citation
-
-            for tool_citation_event in emitted_tool_citation_events:
-                yield tool_citation_event
-
-            # Tracing — quote counts collected across all steps of this turn.
-            _trace_quote_counts(
-                detected=quote_detected,
-                validated=quote_validated,
-                invalid=quote_invalid,
-                duplicate=quote_duplicate,
+            _trace_citation_counts(
+                validated=validated_count,
+                duplicate=duplicate_count,
+                hallucinated=hallucinated_count,
             )
 
         return _gen()
@@ -586,30 +391,8 @@ def _adjust_tool_schema(schema: ToolSchema, *, prompt_profile: PromptProfile) ->
     )
 
 
-def _dispatch_tool_calls(
-    tool_calls: list[ToolCallInfo],
-    history: list[ChatMessage],
-    tool_map: dict[str, Tool],
-) -> AsyncIterator[ToolEvent]:
-    """Dispatch *tool_calls*, append tool results to history, and stream tool events."""
-
-    async def _gen() -> AsyncGenerator[ToolEvent, None]:
-        for tc in tool_calls:
-            context = ToolContext(history=tuple(history))
-            result, events = await _dispatch(tc, tool_map, context)
-            for event in events:
-                yield event
-            history.append(ChatMessage(role="tool", content=result, tool_call_id=tc.call_id))
-
-    return _gen()
-
-
-async def _dispatch(
-    tc: ToolCallInfo,
-    tool_map: dict[str, Tool],
-    context: ToolContext,
-) -> tuple[JsonObject, list[ToolEvent]]:
-    """Look up the named tool, execute it, and return its structured result and events."""
+async def _dispatch(tc: ToolCallInfo, tool_map: dict[str, Tool]) -> JsonObject:
+    """Look up the named tool, execute it, and return its structured result."""
     with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH) as span:
         _trace_tool_dispatch_request(span=span, tc=tc)
 
@@ -618,12 +401,13 @@ async def _dispatch(
             logger.error("orchestrator.unknown_tool", name=tc.name)
             error_msg = f"unknown tool '{tc.name}'"
             _trace_tool_dispatch_error(span=span, error_msg=error_msg)
-            return {"error": error_msg}, []
+            return {"error": error_msg}
+
         try:
-            result, events = await tool.execute(tc.arguments, context)
-            _trace_tool_dispatch_response(span=span, result=result, events=events)
-            return result, events
+            result = await tool.execute(tc.arguments)
+            _trace_tool_dispatch_response(span=span, result=result)
+            return result
         except Exception as exc:
             logger.exception("orchestrator.tool_error", name=tc.name, exc=str(exc))
             _trace_tool_dispatch_error(span=span, error_msg=str(exc), exc=exc)
-            return {"error": f"Tool '{tc.name}' raised an error: {exc}"}, []
+            return {"error": f"Tool '{tc.name}' raised an error: {exc}"}
