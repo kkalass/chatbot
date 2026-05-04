@@ -189,9 +189,12 @@ inner content actually supports your sentence. Never invent, reformat,
 truncate, or compose tokens.{joined_fragments}
 
 ### General rules
-- Emit a marker **after every individual sentence** whose content is
-  grounded — do not summarise multiple sentences into a single trailing
-  marker.
+- A citation marker **covers all text since the previous marker**. You may
+  group consecutive sentences that are grounded in the **same** element
+  under one marker — place the marker after the **last** sentence in that
+  run. Split runs at source boundaries: if the next sentence draws from a
+  different element, close the current run with a marker before starting
+  the new one.
 - Emit exactly one JSON object per marker block.
 - Only use ``citation_token`` values that appear verbatim in prior tool
   results in the conversation context.
@@ -206,6 +209,9 @@ truncate, or compose tokens.{joined_fragments}
   a claim (e.g. "the documents do not contain information about X"). Those
   sentences are transparent refusals, not assertions, and need no marker.
 - Keep all normal user-facing answer text outside the markers.
+- Structure your answer with paragraphs where the content allows it. Each
+  paragraph should cover a coherent sub-topic; do not run all sentences
+  together in a single block.
 """
         return CitationSystemMessage(llm_content=prompt)
 
@@ -224,22 +230,25 @@ truncate, or compose tokens.{joined_fragments}
             ]
         )
         reminder = f"""Reminder: when your answer uses tool outputs, emit inline
-citation markers immediately after the supported sentence — one marker per
-sentence, not one per paragraph. Use exactly the marker tokens
+citation markers. A single marker covers all text since the previous marker
+— group consecutive sentences grounded in the **same** element under one
+marker placed after the last such sentence. Split at source boundaries, not
+sentence boundaries. Use exactly the marker tokens
 {QUOTE_START_MARKER} and {QUOTE_END_MARKER}; do not use any marker variants.
 The marker payload is always {{"ref":"<citation_token>"}} — copy the
 ``citation_token`` attribute value verbatim from the exact element whose
-inner content supports the sentence. Never invent tokens or append suffixes.
+inner content supports the run. Never invent tokens or append suffixes.
 If no exact token is visible, emit the unsubstantiated marker instead.
 Never emit a standalone marker list block. A marker is only valid if it
-appears immediately after the exact sentence it supports.
+appears immediately after the last sentence of the run it covers.
 
 {tool_reminders}
 
 !!!IMPORTANT!!!
 Every factual claim in your answer must either:
-  (a) be immediately followed by a citation marker referencing the
-      ``citation_token`` of the exact element whose content supports it, OR
+  (a) be the last sentence (or part of a same-source run ending) immediately
+      followed by a citation marker referencing the ``citation_token`` of the
+      exact element whose content supports the run, OR
   (b) be followed by an unsubstantiated marker if no tool output contains
       the information: {QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}
 There is no third option: do not state facts without one of these two
@@ -251,7 +260,7 @@ information and therefore you cannot answer — that is a transparent
 refusal, not an assertion. Do NOT append an unsubstantiated marker to a
 refusal sentence.
 Do not append markers in a separate trailing citation section. Place each
-marker at the point of use, directly after the supported sentence.
+marker at the point of use, directly after the last sentence of the run.
 
 The actual user message is:
 
