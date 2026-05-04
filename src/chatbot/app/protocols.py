@@ -436,9 +436,9 @@ class UnsubstantiatedClaim:
 
 @dataclass(frozen=True)
 class NumberedCitation:
-    """A ``Citation`` with a stable per-turn reference number assigned by the
+    """A ``Citation`` with a stable per-session reference number assigned by the
     orchestrator (``[N]`` in the rendered text). Reference numbers are reused
-    when the same canonical key appears more than once in a turn.
+    when the same canonical key appears more than once within or across turns.
     """
 
     reference_number: int
@@ -446,12 +446,20 @@ class NumberedCitation:
 
 
 def canonical_key(citation: Citation) -> str:
-    """Stable structural key for citation deduplication and reference reuse.
+    """Stable session-scoped key for citation deduplication and reference reuse.
 
-    The ``citation_token`` is a content-derived hash (or otherwise unique
-    per-call identifier) that the model copied verbatim into ``ref``. Using
-    it directly as the canonical key makes deduplication trivially correct:
-    two citations are the same evidence iff their tokens match.
+    The ``citation_token`` is a content-derived value that the model copied
+    verbatim into ``ref``:
+    - :class:`DocumentCitation`: ``citation_token`` equals the ingestion-time
+      ``chunk_id`` (a content hash), so it is identical across all turns that
+      retrieve the same chunk.
+    - :class:`ToolCitation` from a plain :class:`Tool`: ``citation_token`` is
+      derived from ``sha256(canonical_json(result))`` so it is stable as long as
+      the tool returns the same payload.
+    - :class:`ToolCitation` from a :class:`~src.chatbot.app.protocols_citeable_tool.CiteableTool`:
+      the tool controls its own token; determinism is the tool's responsibility.
+
+    Two citations are the same evidence iff their ``canonical_key`` matches.
     """
     match citation:
         case DocumentCitation():

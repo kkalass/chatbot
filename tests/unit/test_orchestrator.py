@@ -75,9 +75,7 @@ class _StubCitationModel:
             tool_calls=tuple(tool_calls) if tool_calls else None,
         )
 
-    def make_tool_message(
-        self, call_id: str, name: str, result: JsonObject
-    ) -> CitationToolMessage:
+    def make_tool_message(self, call_id: str, name: str, result: JsonObject) -> CitationToolMessage:
         return CitationToolMessage(
             tool_call_id=call_id, tool_name=name, result=result, llm_content=""
         )
@@ -374,3 +372,60 @@ class TestRepeatedToolCallSafety:
         assert tail[-1].llm_content.startswith("[ESCAPE]"), (
             "Last message must be the loop-escape user message"
         )
+
+
+class TestSessionStableNumbering:
+    """Reference numbers persist across turns within the same orchestrator session."""
+
+    @pytest.mark.asyncio
+    async def test_same_chunk_reuses_number_across_turns(self) -> None:
+        c1 = _doc_citation(chunk_id="c1")
+        layer = _StubCitationModel([[c1], [c1]])
+        orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
+
+        events1 = [e async for e in orch.process_message("first question")]
+        events2 = [e async for e in orch.process_message("second question")]
+
+        num1 = [e for e in events1 if isinstance(e, NumberedCitation)]
+        num2 = [e for e in events2 if isinstance(e, NumberedCitation)]
+        assert num1[0].reference_number == 1
+        assert num2[0].reference_number == 1, "Same chunk must reuse ref [1] in turn 2"
+
+    @pytest.mark.asyncio
+    async def test_new_chunk_in_turn2_gets_next_number(self) -> None:
+        c1 = _doc_citation(chunk_id="c1")
+        c2 = _doc_citation(chunk_id="c2")
+        layer = _StubCitationModel([[c1], [c2]])
+        orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
+
+        events1 = [e async for e in orch.process_message("first question")]
+        events2 = [e async for e in orch.process_message("second question")]
+
+        num1 = [e for e in events1 if isinstance(e, NumberedCitation)]
+        num2 = [e for e in events2 if isinstance(e, NumberedCitation)]
+        assert num1[0].reference_number == 1
+        assert num2[0].reference_number == 2, "New chunk in turn 2 must get ref [2]"
+
+    @pytest.mark.asyncio
+    async def test_mixed_reuse_and_new_in_turn2(self) -> None:
+        c1 = _doc_citation(chunk_id="c1")
+        c2 = _doc_citation(chunk_id="c2")
+        layer = _StubCitationModel([[c1], [c1, c2]])
+        orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
+
+        await orch.process_message("turn 1").__anext__()
+        # drain turn 1
+        async for _ in orch.process_message("turn 1"):
+            pass
+        # Re-create with fresh layer to avoid index exhaustion
+        layer2 = _StubCitationModel([[c1], [c1, c2]])
+        orch2 = ChatOrchestrator(layer2, model_profile=_profile())  # type: ignore[arg-type]
+
+        events1 = [e async for e in orch2.process_message("turn 1")]
+        events2 = [e async for e in orch2.process_message("turn 2")]
+
+        num1 = [e for e in events1 if isinstance(e, NumberedCitation)]
+        num2 = [e for e in events2 if isinstance(e, NumberedCitation)]
+        assert num1 == [NumberedCitation(reference_number=1, citation=c1)]
+        assert num2[0].reference_number == 1, "c1 reuses ref [1]"
+        assert num2[1].reference_number == 2, "c2 gets new ref [2]"

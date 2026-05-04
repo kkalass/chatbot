@@ -244,6 +244,7 @@ class ChatOrchestrator:
         ]
         self._tool_schemas: list[ToolSchema] | None = adjusted_schemas if adjusted_schemas else None
         self._history: list[CitationMessage] = []
+        self._numberer = _CitationNumberer()
 
     @classmethod
     def create(
@@ -295,11 +296,11 @@ class ChatOrchestrator:
         tool_map = self._tool_map
         prompts = self._prompts
         user_msg_content = user_msg.llm_content
+        numberer = self._numberer
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             previous_tool_call_signature: tuple[tuple[str, str], ...] | None = None
             last_step = False
-            numberer = _CitationNumberer()
 
             for step_num in range(_MAX_TOOL_STEPS + 1):
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:

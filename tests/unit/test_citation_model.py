@@ -281,3 +281,37 @@ class TestStream:
 
         items = [item async for item in layer.stream(())]
         assert any(isinstance(i, list) and i[0] is tc for i in items)
+
+
+class TestGenericRenderDeterministicToken:
+    """_generic_render_for_history must produce a stable citation_token for plain tools."""
+
+    def test_same_result_produces_same_token(self) -> None:
+        layer = CitationModel(_StubChatModel([]), tools=[])
+        msg1 = layer.make_tool_message("tc1", "plain_tool", {"days": 30, "year": 2026})
+        msg2 = layer.make_tool_message("tc2", "plain_tool", {"days": 30, "year": 2026})
+
+        assert msg1.units[0].citation_token == msg2.units[0].citation_token
+
+    def test_different_result_produces_different_token(self) -> None:
+        layer = CitationModel(_StubChatModel([]), tools=[])
+        msg1 = layer.make_tool_message("tc1", "plain_tool", {"days": 30})
+        msg2 = layer.make_tool_message("tc2", "plain_tool", {"days": 25})
+
+        assert msg1.units[0].citation_token != msg2.units[0].citation_token
+
+    def test_token_is_deterministic_regardless_of_key_order(self) -> None:
+        """JSON key order in the caller's dict must not affect the token."""
+        layer = CitationModel(_StubChatModel([]), tools=[])
+        msg1 = layer.make_tool_message("tc1", "t", {"a": 1, "b": 2})
+        msg2 = layer.make_tool_message("tc2", "t", {"b": 2, "a": 1})
+
+        assert msg1.units[0].citation_token == msg2.units[0].citation_token
+
+    def test_token_is_hex_string_of_expected_length(self) -> None:
+        layer = CitationModel(_StubChatModel([]), tools=[])
+        msg = layer.make_tool_message("tc1", "t", {"x": 1})
+        token = msg.units[0].citation_token
+
+        assert len(token) == 16
+        assert all(c in "0123456789abcdef" for c in token)

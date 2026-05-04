@@ -19,10 +19,10 @@ The orchestrator depends on ``CitationModel`` (not on the underlying
 ``str | list[ToolCallInfo] | Citation | HallucinatedCitation | UnsubstantiatedClaim``.
 """
 
+import hashlib
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Sequence
 from typing import assert_never, cast
-from uuid import uuid4
 
 import structlog
 from opentelemetry import trace
@@ -465,10 +465,13 @@ def _validate(
 def _generic_render_for_history(result: JsonObject) -> ToolHistoryRendering:
     """Generic fallback rendering: wrap the JSON result in a citeable element.
 
-    Embeds a fresh UUID as ``citation_token`` so the model can cite the
-    result even though the tool itself is not citation-aware.
+    Derives a deterministic ``citation_token`` from the tool result content via
+    ``sha256(canonical_json(result))[:16]``. The same result always produces the
+    same token, which makes plain-tool citations session-stable without requiring
+    the tool itself to implement :class:`~src.chatbot.app.protocols_citeable_tool.CiteableTool`.
     """
-    token = str(uuid4())
+    canonical = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    token = hashlib.sha256(canonical.encode()).hexdigest()[:16]
     encoded = json.dumps(result, ensure_ascii=False)
     llm_content = f'<tool_result citation_token="{token}">{encoded}</tool_result>'
     unit = CitableUnit(citation_token=token, payload=result)
