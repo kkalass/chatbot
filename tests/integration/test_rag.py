@@ -112,8 +112,8 @@ class TestGroundedRetrieval:
             assert chunk.content.strip(), f"Empty content in chunk {chunk.chunk_id}"
 
 
-class TestOrchestratorWithCitationLayer:
-    """End-to-end: orchestrator wired with CitationLayer + RetrievalTool surfaces
+class TestOrchestratorWithCitationModel:
+    """End-to-end: orchestrator wired with CitationModel + RetrievalTool surfaces
     validated citations and any hallucinated ones produced by the live model.
 
     Citation emission is model-dependent; the test asserts only structural
@@ -124,7 +124,7 @@ class TestOrchestratorWithCitationLayer:
     async def test_grounded_query_completes_and_surfaces_citations(
         self, ingested_store: None
     ) -> None:
-        from src.chatbot.app.citation import CitationLayer
+        from src.chatbot.app.citation import CitationModel
         from src.chatbot.app.orchestrator import ChatOrchestrator
         from src.chatbot.app.protocols import (
             HallucinatedCitation,
@@ -150,7 +150,7 @@ class TestOrchestratorWithCitationLayer:
             text_embedder=build_text_embedder(_TEXT_EMBEDDER_CONFIG),
         )
         retrieval_tool = RetrievalTool(retriever=retriever)
-        citation_layer = CitationLayer(chat_model, tools=[retrieval_tool])
+        citation_layer = CitationModel(chat_model, tools=[retrieval_tool])
 
         orchestrator = ChatOrchestrator(
             citation_layer,

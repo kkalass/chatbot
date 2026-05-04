@@ -323,7 +323,7 @@ src/
   settings/     Shared pydantic-settings configuration (Settings + get_settings)
   chatbot/      Chatbot application
     app/          Orchestrator, protocols, prompts
-      citation/   CitationLayer, default tool citation, CiteableTool extension for custom validation
+      citation/   CitationModel, default tool citation, CiteableTool extension for custom validation
     ui/           Chainlit UI layer and session lifecycle
     tools/        Typed tool schemas and external-service adapters
       retrieval/  Document retrieval tool (CiteableTool)

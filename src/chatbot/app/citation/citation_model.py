@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Klas Kalaß
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``CitationLayer`` — decorator around ``ChatModel`` owning all citation concerns.
+"""``CitationModel`` — implements the full citation protocol between the orchestrator and the LLM.
 
 Three responsibilities:
 1. Augment the system prompt with a single, tool-agnostic citation
@@ -14,7 +14,7 @@ Three responsibilities:
    :class:`ToolCitation` for plain ``Tool``\\ s); unresolved tokens yield a
    :class:`HallucinatedCitation`.
 
-The orchestrator depends on ``CitationLayer`` (not on the underlying
+The orchestrator depends on ``CitationModel`` (not on the underlying
 ``ChatModel``) and consumes a stream of
 ``str | list[ToolCallInfo] | Citation | HallucinatedCitation | UnsubstantiatedClaim``.
 """
@@ -32,11 +32,11 @@ from src.chatbot.app.citation._parser import (
     CitationStreamParser,
 )
 from src.chatbot.app.citation.messages import (
-    CitationLayerAssistantMessage,
-    CitationLayerMessage,
-    CitationLayerSystemMessage,
-    CitationLayerToolMessage,
-    CitationLayerUserMessage,
+    CitationAssistantMessage,
+    CitationMessage,
+    CitationSystemMessage,
+    CitationToolMessage,
+    CitationUserMessage,
 )
 from src.chatbot.app.protocols import (
     ChatMessage,
@@ -63,7 +63,7 @@ from src.chatbot.app.protocols_citeable_tool import (
 
 logger = structlog.get_logger(__name__)
 
-type CitationLayerStreamItem = (
+type CitationStreamItem = (
     str
     | list[ToolCallInfo]
     | Citation
@@ -77,20 +77,20 @@ _REASON_MISSING_REF = "marker payload has no ref"
 _REASON_UNKNOWN_REF = "ref does not match any prior tool-result token"
 
 
-def _to_chat_message(msg: CitationLayerMessage) -> ChatMessage:
+def _to_chat_message(msg: CitationMessage) -> ChatMessage:
     """Project a citation-layer message to the wire-level ``ChatMessage``."""
     match msg:
-        case CitationLayerSystemMessage():
+        case CitationSystemMessage():
             return ChatMessage(role="system", content=msg.llm_content)
-        case CitationLayerUserMessage():
+        case CitationUserMessage():
             return ChatMessage(role="user", content=msg.llm_content)
-        case CitationLayerAssistantMessage():
+        case CitationAssistantMessage():
             return ChatMessage(
                 role="assistant",
                 content=msg.llm_content,
                 tool_calls=msg.tool_calls,
             )
-        case CitationLayerToolMessage():
+        case CitationToolMessage():
             return ChatMessage(
                 role="tool",
                 content=msg.llm_content,
@@ -113,7 +113,7 @@ def _splice_assistant_llm_content(
     return "".join(pieces)
 
 
-class CitationLayer:
+class CitationModel:
     """Citation decorator around a :class:`~src.chatbot.app.protocols.ChatModel`.
 
     Composition: instantiate once per session with the inner ``ChatModel`` and
@@ -156,7 +156,7 @@ class CitationLayer:
     # Factory methods — orchestrator calls these to build history entries.
     # ------------------------------------------------------------------
 
-    def make_system_message(self, adjusted_base_prompt: str) -> CitationLayerSystemMessage:
+    def make_system_message(self, adjusted_base_prompt: str) -> CitationSystemMessage:
         """Append citation instructions to the orchestrator-supplied base prompt."""
         joined_fragments = "\n\n".join(
             tool.cite_instructions().prompt_fragment for tool in self._citeable_by_name.values()
@@ -207,9 +207,9 @@ truncate, or compose tokens.{joined_fragments}
   sentences are transparent refusals, not assertions, and need no marker.
 - Keep all normal user-facing answer text outside the markers.
 """
-        return CitationLayerSystemMessage(llm_content=prompt)
+        return CitationSystemMessage(llm_content=prompt)
 
-    def make_user_message(self, user_text: str) -> CitationLayerUserMessage:
+    def make_user_message(self, user_text: str) -> CitationUserMessage:
         """Prepend the per-turn citation reminder to *user_text*.
 
         The reminder starts with the tool-agnostic base block, then appends
@@ -257,16 +257,16 @@ The actual user message is:
 
 {user_text}
 """
-        return CitationLayerUserMessage(llm_content=reminder)
+        return CitationUserMessage(llm_content=reminder)
 
     def make_assistant_message(
         self,
         parts: Sequence[str | Citation | HallucinatedCitation | UnsubstantiatedClaim],
         *,
         tool_calls: Sequence[ToolCallInfo] | None = None,
-    ) -> CitationLayerAssistantMessage:
+    ) -> CitationAssistantMessage:
         """Build an assistant message and pre-compute its LLM-side content."""
-        return CitationLayerAssistantMessage(
+        return CitationAssistantMessage(
             parts=tuple(parts),
             llm_content=_splice_assistant_llm_content(parts),
             tool_calls=tuple(tool_calls) if tool_calls else None,
@@ -277,7 +277,7 @@ The actual user message is:
         tool_call_id: str,
         tool_name: str,
         result: JsonObject,
-    ) -> CitationLayerToolMessage:
+    ) -> CitationToolMessage:
         """Build a tool-result message via the tool's renderer or the generic wrapper.
 
         Registered ``CiteableTool``s render themselves; plain ``Tool``s are
@@ -289,7 +289,7 @@ The actual user message is:
             rendering = citeable.render_for_history(result)
         else:
             rendering = _generic_render_for_history(result)
-        return CitationLayerToolMessage(
+        return CitationToolMessage(
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             result=result,
@@ -297,7 +297,7 @@ The actual user message is:
             units=rendering.units,
         )
 
-    def make_blocked_tool_response(self, tc: ToolCallInfo) -> CitationLayerToolMessage:
+    def make_blocked_tool_response(self, tc: ToolCallInfo) -> CitationToolMessage:
         """Build a synthetic tool-result that terminates a stuck tool-call loop.
 
         Called when the orchestrator detects a repeated tool-call sequence.
@@ -309,7 +309,7 @@ The actual user message is:
             f"[BLOCKED: Tool call '{tc.name}' was not executed because you already "
             f"called this tool with identical arguments in this turn.]"
         )
-        return CitationLayerToolMessage(
+        return CitationToolMessage(
             tool_call_id=tc.call_id,
             tool_name=tc.name,
             result={},
@@ -317,7 +317,7 @@ The actual user message is:
             units=(),
         )
 
-    def make_loop_escape_message(self, original_user_content: str) -> CitationLayerUserMessage:
+    def make_loop_escape_message(self, original_user_content: str) -> CitationUserMessage:
         """Build a user-turn message that forces text generation after a blocked loop.
 
         After blocked tool responses the history ends at a ``tool`` role,
@@ -339,7 +339,7 @@ The actual user message is:
             f"already in the conversation above. Do NOT call any tools.]\n\n"
             f"{original_user_content}"
         )
-        return CitationLayerUserMessage(llm_content=content)
+        return CitationUserMessage(llm_content=content)
 
     # ------------------------------------------------------------------
     # Streaming.
@@ -347,10 +347,10 @@ The actual user message is:
 
     def stream(
         self,
-        history: Sequence[CitationLayerMessage],
+        history: Sequence[CitationMessage],
         *,
         tools: Sequence[ToolSchema] | None = None,
-    ) -> AsyncIterator[CitationLayerStreamItem]:
+    ) -> AsyncIterator[CitationStreamItem]:
         """Stream a chat completion, validating inline citations as they arrive."""
         chat_messages = [_to_chat_message(msg) for msg in history]
         history_tuple = tuple(history)
@@ -359,7 +359,7 @@ The actual user message is:
         citeable_by_name = self._citeable_by_name
         plain_by_name = self._plain_by_name
 
-        async def _gen() -> AsyncGenerator[CitationLayerStreamItem, None]:
+        async def _gen() -> AsyncGenerator[CitationStreamItem, None]:
             token_index = _build_token_index(history_tuple)
 
             async for item in upstream:
@@ -396,7 +396,7 @@ The actual user message is:
 type _TokenIndex = dict[str, tuple[str, CitableUnit]]
 
 
-def _build_token_index(history: Sequence[CitationLayerMessage]) -> _TokenIndex:
+def _build_token_index(history: Sequence[CitationMessage]) -> _TokenIndex:
     """Index every ``CitableUnit`` ever rendered for the LLM by its token.
 
     Tokens that collide across tool results overwrite earlier entries; this
@@ -406,7 +406,7 @@ def _build_token_index(history: Sequence[CitationLayerMessage]) -> _TokenIndex:
     """
     index: _TokenIndex = {}
     for msg in history:
-        if isinstance(msg, CitationLayerToolMessage):
+        if isinstance(msg, CitationToolMessage):
             for unit in msg.units:
                 index[unit.citation_token] = (msg.tool_name, unit)
     return index
@@ -417,7 +417,7 @@ def _emit_parsed(
     token_index: _TokenIndex,
     citeable_by_name: dict[str, CiteableTool],
     plain_by_name: dict[str, Tool],
-) -> Iterator[CitationLayerStreamItem]:
+) -> Iterator[CitationStreamItem]:
     """Validate and yield each item produced by the stream parser."""
     for parsed in parsed_items:
         if isinstance(parsed, str):

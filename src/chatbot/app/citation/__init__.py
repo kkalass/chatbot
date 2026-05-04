@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Klas Kalaß
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Citation layer: prompt augmentation, marker parsing, and validation.
+"""Citation: prompt augmentation, marker parsing, and validation.
 
-This package owns the citation layer implementation. Its public API is
+This package owns the citation model implementation. Its public API is
 deliberately narrow — only the types that are *produced* by this package
 and consumed by callers outside it:
 
-- :class:`CitationLayer` — the main chat-model decorator
-- :data:`CitationLayerMessage` and its four concrete variants, which the
+- :class:`CitationModel` — the main chat-model decorator
+- :data:`CitationMessage` and its four concrete variants, which the
   orchestrator and tests inspect
 
 Value objects (:class:`~src.chatbot.app.protocols.Citation`,
@@ -16,20 +16,20 @@ Value objects (:class:`~src.chatbot.app.protocols.Citation`,
 in their respective ``protocols*`` modules; import them from there directly.
 """
 
-from src.chatbot.app.citation.layer import CitationLayer
+from src.chatbot.app.citation.citation_model import CitationModel
 from src.chatbot.app.citation.messages import (
-    CitationLayerAssistantMessage,
-    CitationLayerMessage,
-    CitationLayerSystemMessage,
-    CitationLayerToolMessage,
-    CitationLayerUserMessage,
+    CitationAssistantMessage,
+    CitationMessage,
+    CitationSystemMessage,
+    CitationToolMessage,
+    CitationUserMessage,
 )
 
 __all__ = [
-    "CitationLayer",
-    "CitationLayerAssistantMessage",
-    "CitationLayerMessage",
-    "CitationLayerSystemMessage",
-    "CitationLayerToolMessage",
-    "CitationLayerUserMessage",
+    "CitationModel",
+    "CitationAssistantMessage",
+    "CitationMessage",
+    "CitationSystemMessage",
+    "CitationToolMessage",
+    "CitationUserMessage",
 ]

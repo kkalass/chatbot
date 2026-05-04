@@ -3,8 +3,8 @@
 """Citation-layer history messages with pre-computed LLM-side content.
 
 Each variant carries the LLM-ready ``llm_content`` string alongside any
-citation-layer metadata. The :class:`CitationLayer` is the factory for these
-messages — see :mod:`src.chatbot.app.citation.layer`.
+citation metadata. :class:`CitationModel` is the factory for these
+messages — see :mod:`src.chatbot.app.citation.citation_model`.
 """
 
 from dataclasses import dataclass
@@ -20,7 +20,7 @@ from src.chatbot.app.protocols_citeable_tool import CitableUnit
 
 
 @dataclass(frozen=True)
-class CitationLayerSystemMessage:
+class CitationSystemMessage:
     """System turn. ``llm_content`` is the orchestrator-supplied profile-adjusted
     base prompt with citation instructions appended by the citation layer.
     """
@@ -29,16 +29,16 @@ class CitationLayerSystemMessage:
 
 
 @dataclass(frozen=True)
-class CitationLayerUserMessage:
+class CitationUserMessage:
     """User turn. ``llm_content`` is ``<reminder> + Prompts.user_message(text)``
-    as produced by :meth:`CitationLayer.make_user_message`.
+    as produced by :meth:`CitationModel.make_user_message`.
     """
 
     llm_content: str
 
 
 @dataclass(frozen=True)
-class CitationLayerAssistantMessage:
+class CitationAssistantMessage:
     """Assistant turn — the only variant that retains structured ``parts``.
 
     ``parts`` preserves the streaming order of text fragments, validated
@@ -55,7 +55,7 @@ class CitationLayerAssistantMessage:
 
 
 @dataclass(frozen=True)
-class CitationLayerToolMessage:
+class CitationToolMessage:
     """Tool-result turn correlated to a prior assistant tool call.
 
     ``llm_content`` is pre-computed via the responsible
@@ -75,9 +75,9 @@ class CitationLayerToolMessage:
     units: tuple[CitableUnit, ...] = ()
 
 
-type CitationLayerMessage = (
-    CitationLayerSystemMessage
-    | CitationLayerUserMessage
-    | CitationLayerAssistantMessage
-    | CitationLayerToolMessage
+type CitationMessage = (
+    CitationSystemMessage
+    | CitationUserMessage
+    | CitationAssistantMessage
+    | CitationToolMessage
 )

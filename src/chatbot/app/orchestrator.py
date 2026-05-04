@@ -31,8 +31,8 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.citation import (
-    CitationLayer,
-    CitationLayerMessage,
+    CitationModel,
+    CitationMessage,
 )
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
@@ -229,7 +229,7 @@ class ChatOrchestrator:
 
     def __init__(
         self,
-        citation_layer: CitationLayer,
+        citation_layer: CitationModel,
         *,
         model_profile: ModelProfile,
         tools: list[Tool] | None = None,
@@ -243,7 +243,7 @@ class ChatOrchestrator:
             _adjust_tool_schema(t.schema, model_profile=model_profile) for t in _tools
         ]
         self._tool_schemas: list[ToolSchema] | None = adjusted_schemas if adjusted_schemas else None
-        self._history: list[CitationLayerMessage] = []
+        self._history: list[CitationMessage] = []
 
     @classmethod
     def create(
@@ -269,7 +269,7 @@ class ChatOrchestrator:
                 :data:`~src.chatbot.app.prompts.DEFAULT_PROMPTS`.
         """
         _tools = tools or []
-        citation_layer = CitationLayer(model, tools=_tools)
+        citation_layer = CitationModel(model, tools=_tools)
         return cls(citation_layer, tools=_tools, model_profile=model_profile, prompts=prompts)
 
     def process_message(self, user_text: str) -> AsyncIterator[ProcessEvent]:

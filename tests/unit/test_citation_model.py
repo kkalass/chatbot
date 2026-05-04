@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Klas Kalaß
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for :class:`CitationLayer`: factory methods + streaming validation."""
+"""Tests for :class:`CitationModel`: factory methods + streaming validation."""
 
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
-from src.chatbot.app.citation import CitationLayer
+from src.chatbot.app.citation import CitationModel
 from src.chatbot.app.citation.messages import (
-    CitationLayerAssistantMessage,
-    CitationLayerSystemMessage,
-    CitationLayerUserMessage,
+    CitationAssistantMessage,
+    CitationSystemMessage,
+    CitationUserMessage,
 )
 from src.chatbot.app.protocols import (
     ChatMessage,
@@ -113,18 +113,18 @@ class TestConstruction:
         b = _StubCiteableTool("dup", fragment="B")
 
         with pytest.raises(ValueError, match="Duplicate"):
-            CitationLayer(_StubChatModel([]), tools=[a, b])
+            CitationModel(_StubChatModel([]), tools=[a, b])
 
 
 class TestMakeSystemMessage:
     def test_appends_fragments_and_general_rules(self) -> None:
         a = _StubCiteableTool("ta", fragment="FRAG-A")
         b = _StubCiteableTool("tb", fragment="FRAG-B")
-        layer = CitationLayer(_StubChatModel([]), tools=[a, b])
+        layer = CitationModel(_StubChatModel([]), tools=[a, b])
 
         msg = layer.make_system_message("BASE-PROMPT")
 
-        assert isinstance(msg, CitationLayerSystemMessage)
+        assert isinstance(msg, CitationSystemMessage)
         assert msg.llm_content.startswith("BASE-PROMPT")
         assert "FRAG-A" in msg.llm_content
         assert "FRAG-B" in msg.llm_content
@@ -132,7 +132,7 @@ class TestMakeSystemMessage:
         assert "General rules" in msg.llm_content
 
     def test_no_tools_still_documents_universal_marker(self) -> None:
-        layer = CitationLayer(_StubChatModel([]), tools=[])
+        layer = CitationModel(_StubChatModel([]), tools=[])
         msg = layer.make_system_message("BASE")
         assert msg.llm_content.startswith("BASE")
         # Universal marker schema is documented even without registered tools.
@@ -142,10 +142,10 @@ class TestMakeSystemMessage:
 
 class TestMakeUserMessage:
     def test_prepends_reminder_and_appends_newline(self) -> None:
-        layer = CitationLayer(_StubChatModel([]), tools=[])
+        layer = CitationModel(_StubChatModel([]), tools=[])
         msg = layer.make_user_message("hello world")
 
-        assert isinstance(msg, CitationLayerUserMessage)
+        assert isinstance(msg, CitationUserMessage)
         assert msg.llm_content.endswith("hello world\n")
         assert QUOTE_START_MARKER in msg.llm_content
         assert QUOTE_END_MARKER in msg.llm_content
@@ -153,7 +153,7 @@ class TestMakeUserMessage:
 
 class TestMakeAssistantMessage:
     def test_splices_raw_marker_text_between_string_parts(self) -> None:
-        layer = CitationLayer(_StubChatModel([]), tools=[])
+        layer = CitationModel(_StubChatModel([]), tools=[])
         cit = DocumentCitation(
             raw_marker_text="<MARKER>",
             citation_token="tok1",
@@ -164,13 +164,13 @@ class TestMakeAssistantMessage:
         )
         msg = layer.make_assistant_message(("hello ", cit, " world"))
 
-        assert isinstance(msg, CitationLayerAssistantMessage)
+        assert isinstance(msg, CitationAssistantMessage)
         assert msg.llm_content == "hello <MARKER> world"
         assert msg.tool_calls is None
         assert msg.parts == ("hello ", cit, " world")
 
     def test_propagates_tool_calls(self) -> None:
-        layer = CitationLayer(_StubChatModel([]), tools=[])
+        layer = CitationModel(_StubChatModel([]), tools=[])
         tc = ToolCallInfo(call_id="cid", name="n", arguments={"a": 1})
         msg = layer.make_assistant_message(("text",), tool_calls=[tc])
 
@@ -180,7 +180,7 @@ class TestMakeAssistantMessage:
 class TestMakeToolMessage:
     def test_uses_tool_renderer_when_registered(self) -> None:
         tool = _StubCiteableTool("vac", fragment="F")
-        layer = CitationLayer(_StubChatModel([]), tools=[tool])
+        layer = CitationModel(_StubChatModel([]), tools=[tool])
 
         msg = layer.make_tool_message("tc1", "vac", {"token": "tok-A"})
 
@@ -190,7 +190,7 @@ class TestMakeToolMessage:
         assert msg.units[0].citation_token == "tok-A"
 
     def test_falls_back_to_generic_wrapper_for_unknown_tool(self) -> None:
-        layer = CitationLayer(_StubChatModel([]), tools=[])
+        layer = CitationModel(_StubChatModel([]), tools=[])
         msg = layer.make_tool_message("tc1", "unknown", {"x": 1})
         # Generic wrapper embeds a UUID citation_token and JSON-serialises the result.
         assert msg.llm_content.startswith('<tool_result citation_token="')
@@ -205,7 +205,7 @@ class TestStream:
     @pytest.mark.asyncio
     async def test_validated_citation_is_yielded(self) -> None:
         tool = _StubCiteableTool("search", fragment="F")
-        layer = CitationLayer(
+        layer = CitationModel(
             _StubChatModel(
                 [f'prefix {QUOTE_START_MARKER}{{"ref":"tok-A"}}{QUOTE_END_MARKER} suffix']
             ),
@@ -230,7 +230,7 @@ class TestStream:
     async def test_unknown_ref_yields_hallucination(self) -> None:
         marker = f'{QUOTE_START_MARKER}{{"ref":"nope"}}{QUOTE_END_MARKER}'
         tool = _StubCiteableTool("search", fragment="F")
-        layer = CitationLayer(_StubChatModel([marker]), tools=[tool])
+        layer = CitationModel(_StubChatModel([marker]), tools=[tool])
 
         items = [item async for item in layer.stream(())]
 
@@ -241,7 +241,7 @@ class TestStream:
     @pytest.mark.asyncio
     async def test_missing_ref_yields_hallucination(self) -> None:
         marker = f"{QUOTE_START_MARKER}{{}}{QUOTE_END_MARKER}"
-        layer = CitationLayer(_StubChatModel([marker]), tools=[])
+        layer = CitationModel(_StubChatModel([marker]), tools=[])
 
         items = [item async for item in layer.stream(())]
 
@@ -250,7 +250,7 @@ class TestStream:
     @pytest.mark.asyncio
     async def test_unsubstantiated_marker_yields_unsubstantiated_claim(self) -> None:
         marker = f'{QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}'
-        layer = CitationLayer(_StubChatModel([marker]), tools=[])
+        layer = CitationModel(_StubChatModel([marker]), tools=[])
 
         items = [item async for item in layer.stream(())]
 
@@ -260,12 +260,12 @@ class TestStream:
     async def test_generic_tool_citation_via_wrapper(self) -> None:
         # Build the tool message via a helper layer so the generic wrapper
         # assigns a UUID token; the streaming layer below indexes that token.
-        helper = CitationLayer(_StubChatModel([]), tools=[])
+        helper = CitationModel(_StubChatModel([]), tools=[])
         tool_msg = helper.make_tool_message("tc1", "not_citeable", {"x": 1})
         token = tool_msg.units[0].citation_token
         marker = f'{QUOTE_START_MARKER}{{"ref":"{token}"}}{QUOTE_END_MARKER}'
 
-        layer = CitationLayer(_StubChatModel([marker]), tools=[])
+        layer = CitationModel(_StubChatModel([marker]), tools=[])
         items = [item async for item in layer.stream((tool_msg,))]
 
         citations = [item for item in items if isinstance(item, ToolCitation)]
@@ -277,7 +277,7 @@ class TestStream:
     @pytest.mark.asyncio
     async def test_passes_tool_calls_through(self) -> None:
         tc = ToolCallInfo(call_id="cid", name="n", arguments={})
-        layer = CitationLayer(_StubChatModel(["text", [tc]]), tools=[])
+        layer = CitationModel(_StubChatModel(["text", [tc]]), tools=[])
 
         items = [item async for item in layer.stream(())]
         assert any(isinstance(i, list) and i[0] is tc for i in items)

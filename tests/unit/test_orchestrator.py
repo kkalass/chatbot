@@ -7,13 +7,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.chatbot.app.citation import CitationLayerMessage
-from src.chatbot.app.citation.layer import CitationLayerStreamItem
+from src.chatbot.app.citation import CitationMessage
+from src.chatbot.app.citation.citation_model import CitationStreamItem
 from src.chatbot.app.citation.messages import (
-    CitationLayerAssistantMessage,
-    CitationLayerSystemMessage,
-    CitationLayerToolMessage,
-    CitationLayerUserMessage,
+    CitationAssistantMessage,
+    CitationSystemMessage,
+    CitationToolMessage,
+    CitationUserMessage,
 )
 from src.chatbot.app.orchestrator import ChatOrchestrator, ToolCallFinished, ToolCallStarted
 from src.chatbot.app.protocols import (
@@ -48,28 +48,28 @@ class _IdentityProfile:
         return schema
 
 
-class _StubCitationLayer:
-    """Minimal CitationLayer stand-in honouring the surface used by the orchestrator."""
+class _StubCitationModel:
+    """Minimal CitationModel stand-in honouring the surface used by the orchestrator."""
 
-    def __init__(self, scripted_streams: list[list[CitationLayerStreamItem]]) -> None:
+    def __init__(self, scripted_streams: list[list[CitationStreamItem]]) -> None:
         self._streams = scripted_streams
         self._index = 0
-        self.received_histories: list[list[CitationLayerMessage]] = []
+        self.received_histories: list[list[CitationMessage]] = []
         self.received_tool_lists: list[Sequence[ToolSchema] | None] = []
 
-    def make_system_message(self, base_prompt: str) -> CitationLayerSystemMessage:
-        return CitationLayerSystemMessage(llm_content=base_prompt)
+    def make_system_message(self, base_prompt: str) -> CitationSystemMessage:
+        return CitationSystemMessage(llm_content=base_prompt)
 
-    def make_user_message(self, user_text: str) -> CitationLayerUserMessage:
-        return CitationLayerUserMessage(llm_content=user_text)
+    def make_user_message(self, user_text: str) -> CitationUserMessage:
+        return CitationUserMessage(llm_content=user_text)
 
     def make_assistant_message(
         self,
         parts: Sequence[str | Citation | HallucinatedCitation],
         *,
         tool_calls: Sequence[ToolCallInfo] | None = None,
-    ) -> CitationLayerAssistantMessage:
-        return CitationLayerAssistantMessage(
+    ) -> CitationAssistantMessage:
+        return CitationAssistantMessage(
             parts=tuple(parts),
             llm_content="".join(p if isinstance(p, str) else "" for p in parts),
             tool_calls=tuple(tool_calls) if tool_calls else None,
@@ -77,34 +77,34 @@ class _StubCitationLayer:
 
     def make_tool_message(
         self, call_id: str, name: str, result: JsonObject
-    ) -> CitationLayerToolMessage:
-        return CitationLayerToolMessage(
+    ) -> CitationToolMessage:
+        return CitationToolMessage(
             tool_call_id=call_id, tool_name=name, result=result, llm_content=""
         )
 
-    def make_blocked_tool_response(self, tc: ToolCallInfo) -> CitationLayerToolMessage:
-        return CitationLayerToolMessage(
+    def make_blocked_tool_response(self, tc: ToolCallInfo) -> CitationToolMessage:
+        return CitationToolMessage(
             tool_call_id=tc.call_id,
             tool_name=tc.name,
             result={},
             llm_content="[BLOCKED]",
         )
 
-    def make_loop_escape_message(self, original_user_content: str) -> CitationLayerUserMessage:
-        return CitationLayerUserMessage(llm_content=f"[ESCAPE]{original_user_content}")
+    def make_loop_escape_message(self, original_user_content: str) -> CitationUserMessage:
+        return CitationUserMessage(llm_content=f"[ESCAPE]{original_user_content}")
 
     def stream(
         self,
-        history: Sequence[CitationLayerMessage],
+        history: Sequence[CitationMessage],
         *,
         tools: Sequence[ToolSchema] | None = None,
-    ) -> AsyncIterator[CitationLayerStreamItem]:
+    ) -> AsyncIterator[CitationStreamItem]:
         self.received_histories.append(list(history))
         self.received_tool_lists.append(tools)
         items = self._streams[self._index]
         self._index += 1
 
-        async def _gen() -> AsyncIterator[CitationLayerStreamItem]:
+        async def _gen() -> AsyncIterator[CitationStreamItem]:
             for item in items:
                 yield item
 
@@ -147,7 +147,7 @@ def _profile() -> ModelProfile:
 class TestSingleTurn:
     @pytest.mark.asyncio
     async def test_yields_streamed_text_and_appends_history(self) -> None:
-        layer = _StubCitationLayer([["hello ", "world"]])
+        layer = _StubCitationModel([["hello ", "world"]])
         orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
@@ -158,7 +158,7 @@ class TestSingleTurn:
     async def test_assigns_sequential_ref_numbers(self) -> None:
         c1 = _doc_citation(chunk_id="c1")
         c2 = _doc_citation(chunk_id="c2")
-        layer = _StubCitationLayer([["a", c1, "b", c2]])
+        layer = _StubCitationModel([["a", c1, "b", c2]])
         orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
@@ -170,7 +170,7 @@ class TestSingleTurn:
     async def test_reuses_ref_number_for_same_canonical_key(self) -> None:
         c1a = _doc_citation(chunk_id="c1")
         c1b = _doc_citation(chunk_id="c1")  # same canonical key
-        layer = _StubCitationLayer([[c1a, " then ", c1b]])
+        layer = _StubCitationModel([[c1a, " then ", c1b]])
         orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
@@ -184,7 +184,7 @@ class TestSingleTurn:
             raw=RawCitation(ref="missing", raw_marker_text="<m>"),
             reason="x",
         )
-        layer = _StubCitationLayer([["a", h, "b"]])
+        layer = _StubCitationModel([["a", h, "b"]])
         orch = ChatOrchestrator(layer, model_profile=_profile())  # type: ignore[arg-type]
 
         events = [e async for e in orch.process_message("hi")]
@@ -196,7 +196,7 @@ class TestToolDispatchLoop:
     async def test_dispatches_then_continues_to_next_step(self) -> None:
         tc = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
         tool = _StubTool("vac", result={"days": 30})
-        layer = _StubCitationLayer(
+        layer = _StubCitationModel(
             [
                 ["thinking ", [tc]],
                 ["final answer"],
@@ -218,7 +218,7 @@ class TestToolDispatchLoop:
     async def test_emits_tool_call_started_and_finished(self) -> None:
         tc = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
         tool = _StubTool("vac", result={"days": 30})
-        layer = _StubCitationLayer(
+        layer = _StubCitationModel(
             [
                 [[tc]],
                 ["final answer"],
@@ -245,7 +245,7 @@ class TestToolDispatchLoop:
         assert events.index(started[0]) < events.index(finished[0])
         # Second stream sees the tool result in history
         second_history = layer.received_histories[1]
-        assert any(isinstance(m, CitationLayerToolMessage) for m in second_history)
+        assert any(isinstance(m, CitationToolMessage) for m in second_history)
 
 
 class TestRepeatedToolCallSafety:
@@ -254,7 +254,7 @@ class TestRepeatedToolCallSafety:
         tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
         tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
         tool = _StubTool("vac", result={"days": 30})
-        layer = _StubCitationLayer(
+        layer = _StubCitationModel(
             [
                 [[tc1]],
                 [[tc2]],
@@ -281,7 +281,7 @@ class TestRepeatedToolCallSafety:
         tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
         tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
         tool = _StubTool("vac", result={"days": 30})
-        layer = _StubCitationLayer(
+        layer = _StubCitationModel(
             [
                 [[tc1]],
                 [[tc2]],
@@ -302,10 +302,10 @@ class TestRepeatedToolCallSafety:
         # tool_calls is fine, provided a tool result follows it.)
         final_history = layer.received_histories[-1]
         # Skip system message (index 0), inspect the rest.
-        tail = [m for m in final_history if not isinstance(m, CitationLayerSystemMessage)]
+        tail = [m for m in final_history if not isinstance(m, CitationSystemMessage)]
         assert tail, "History must not be empty"
         assert not (
-            isinstance(tail[-1], CitationLayerAssistantMessage) and tail[-1].tool_calls is not None
+            isinstance(tail[-1], CitationAssistantMessage) and tail[-1].tool_calls is not None
         ), "Last message in fallback-step history must not be an unanswered assistant tool-call."
 
     @pytest.mark.asyncio
@@ -315,7 +315,7 @@ class TestRepeatedToolCallSafety:
         tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
         tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
         tool = _StubTool("vac", result={"days": 30})
-        layer = _StubCitationLayer(
+        layer = _StubCitationModel(
             [
                 [[tc1]],
                 [[tc2]],
@@ -336,7 +336,7 @@ class TestRepeatedToolCallSafety:
         blocked = [
             m
             for m in final_history
-            if isinstance(m, CitationLayerToolMessage) and m.llm_content == "[BLOCKED]"
+            if isinstance(m, CitationToolMessage) and m.llm_content == "[BLOCKED]"
         ]
         assert len(blocked) >= 1, "Blocked tool-result message must appear in fallback-step history"
         assert blocked[-1].tool_call_id == "cid2"
@@ -349,7 +349,7 @@ class TestRepeatedToolCallSafety:
         tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
         tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
         tool = _StubTool("vac", result={"days": 30})
-        layer = _StubCitationLayer(
+        layer = _StubCitationModel(
             [
                 [[tc1]],
                 [[tc2]],
@@ -367,8 +367,8 @@ class TestRepeatedToolCallSafety:
 
         # The fallback step history must end with the loop-escape user message.
         final_history = layer.received_histories[-1]
-        tail = [m for m in final_history if not isinstance(m, CitationLayerSystemMessage)]
-        assert tail and isinstance(tail[-1], CitationLayerUserMessage), (
+        tail = [m for m in final_history if not isinstance(m, CitationSystemMessage)]
+        assert tail and isinstance(tail[-1], CitationUserMessage), (
             "Fallback-step history must end with a user message"
         )
         assert tail[-1].llm_content.startswith("[ESCAPE]"), (

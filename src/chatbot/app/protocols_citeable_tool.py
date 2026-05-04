@@ -124,7 +124,7 @@ class CiteableTool(Tool, Protocol):
 
         Owns the LLM-side rendering of this tool's output (e.g. structured XML
         for retrieval chunks). Called once per tool result by
-        :meth:`~src.chatbot.app.citation.layer.CitationLayer.make_tool_message`.
+        :meth:`~src.chatbot.app.citation.citation_model.CitationModel.make_tool_message`.
         """
         ...
 
