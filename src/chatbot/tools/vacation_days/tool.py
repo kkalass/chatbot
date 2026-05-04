@@ -9,8 +9,13 @@ session-specific dependencies are injected at construction time.
 import structlog
 from pydantic import ValidationError
 
-from src.chatbot.app.protocols import AuthRequiredException, I18nMessage, JsonObject, ToolSchema
-from src.chatbot.tools.vacation_days.auth import VacationDaysAuth
+from src.chatbot.app.protocols import (
+    AuthRequiredException,
+    CredentialStore,
+    I18nMessage,
+    JsonObject,
+    ToolSchema,
+)
 from src.chatbot.tools.vacation_days.keys import VacationDaysCallKey
 from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
@@ -21,32 +26,33 @@ from src.chatbot.tools.vacation_days.service import (
 logger = structlog.get_logger(__name__)
 
 _TOOL_NAME = "get_vacation_days"
+_CREDENTIAL_KEY = "vacation_days"
 
 
 class VacationDaysTool:
     """LLM-callable tool wrapping a vacation-days service boundary.
 
-    Vacation-days credentials are managed by an injected auth collaborator;
-    they never appear in LLM-visible arguments or results.
+    Credentials are retrieved from the injected :class:`CredentialStore` under
+    the stable key :data:`_CREDENTIAL_KEY` (``"vacation_days"``).  They never
+    appear in LLM-visible arguments or results.
 
     Binding points:
         - ``service`` is injected via ``VacationDaysService``.
-        - ``auth`` is injected via ``VacationDaysAuth``.
-    Concrete bindings are defined in the composition root (`on_chat_start`).
+        - ``credential_store`` is injected via ``CredentialStore``.
+    Concrete bindings are defined in the composition root (``on_chat_start``).
 
     Args:
         service: The vacation-days service to call after successful auth.
-        auth: Handles interactive credential collection and session-scoped
-            caching.
+        credential_store: Session-scoped key-indexed credential repository.
     """
 
     def __init__(
         self,
         service: VacationDaysService,
-        auth: VacationDaysAuth,
+        credential_store: CredentialStore,
     ) -> None:
         self._service = service
-        self._auth = auth
+        self._credential_store = credential_store
         self.display_name = I18nMessage(key=VacationDaysCallKey.DISPLAY_NAME, args={})
         self.schema = ToolSchema(
             name=_TOOL_NAME,
@@ -76,9 +82,12 @@ Returns: total_days (annual entitlement), used_days, remaining_days.""",
         except ValidationError as exc:
             return {"error": f"Invalid arguments: {exc}"}
 
-        credentials = self._auth.get_credentials()
+        credentials = self._credential_store.get_credentials(_CREDENTIAL_KEY)
         if credentials is None:
-            raise AuthRequiredException(service_display_name=self.display_name)
+            raise AuthRequiredException(
+                credential_key=_CREDENTIAL_KEY,
+                service_display_name=self.display_name,
+            )
 
         try:
             result = await self._service.get_vacation_days(
@@ -87,7 +96,7 @@ Returns: total_days (annual entitlement), used_days, remaining_days.""",
                 password=credentials.password,
             )
         except ToolAuthenticationError:
-            self._auth.clear_credentials()
+            self._credential_store.clear_credentials(_CREDENTIAL_KEY)
             logger.warning("tool.auth_failed", username=credentials.username)
             return {
                 "error": (

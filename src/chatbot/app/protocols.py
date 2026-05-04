@@ -102,6 +102,41 @@ class ChatMessage:
     tool_call_id: str | None = None  # populated for role="tool" result messages
 
 
+# ---------------------------------------------------------------------------
+# Credential contracts — shared by any tool that requires session-scoped auth.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UsernamePasswordCredentials:
+    """Username/password pair for a service requiring HTTP Basic-style auth."""
+
+    username: str
+    password: str
+
+
+class CredentialStore(Protocol):
+    """Session-scoped key-indexed credential repository.
+
+    Each tool that requires credentials operates under a stable ``key``
+    (e.g. ``"vacation_days"``).  The key is also carried in
+    :class:`AuthRequiredEvent` so the UI knows which slot to fill after the
+    login form is submitted.
+    """
+
+    def get_credentials(self, key: str) -> UsernamePasswordCredentials | None:
+        """Return stored credentials for *key*, or ``None`` if not present."""
+        ...
+
+    def set_credentials(self, key: str, username: str, password: str) -> None:
+        """Store a username/password pair under *key*, replacing any previous entry."""
+        ...
+
+    def clear_credentials(self, key: str) -> None:
+        """Discard stored credentials for *key* (e.g. after an auth failure)."""
+        ...
+
+
 class AuthRequiredException(Exception):
     """Raised by a :class:`Tool` when credentials are required but not available.
 
@@ -110,12 +145,17 @@ class AuthRequiredException(Exception):
     Any tool can raise this; it is not specific to vacation days.
 
     Args:
+        credential_key: Stable key that identifies the credential slot in the
+            session-scoped :class:`CredentialStore`
+            (e.g. ``"vacation_days"``).  Passed through to ``AuthRequiredEvent``
+            so the UI knows which slot to fill after form submission.
         service_display_name: Localizable name of the service requiring auth,
             passed through to ``AuthRequiredEvent`` for UI display.
     """
 
-    def __init__(self, service_display_name: I18nMessage) -> None:
+    def __init__(self, *, credential_key: str, service_display_name: I18nMessage) -> None:
         super().__init__(str(service_display_name.key))
+        self.credential_key = credential_key
         self.service_display_name = service_display_name
 
 
@@ -275,7 +315,8 @@ class AuthRequiredEvent:
     :attr:`credential_future`. The UI is expected to:
 
     1. Show a login form (e.g. :class:`~chainlit.AskElementMessage`).
-    2. Store the collected credentials in the session-scoped credential store.
+    2. Store the collected credentials in the session-scoped credential store
+       under :attr:`credential_key`.
     3. Set ``credential_future.set_result(True)`` on success, or
        ``set_result(False)`` on cancellation.
 
@@ -284,6 +325,7 @@ class AuthRequiredEvent:
     """
 
     tool_name: str
+    credential_key: str
     service_display_name: I18nMessage
     credential_future: asyncio.Future[bool]
 

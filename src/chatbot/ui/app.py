@@ -27,11 +27,13 @@ from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferen
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
+from src.chatbot.app.credential_store import InMemoryCredentialStore
 from src.chatbot.app.orchestrator import ChatOrchestrator
 from src.chatbot.app.prompts import DEFAULT_PROMPTS
 from src.chatbot.app.protocols import (
     AuthRequiredEvent,
     Citation,
+    CredentialStore,
     DocumentCitation,
     HallucinatedCitation,
     NumberedCitation,
@@ -64,7 +66,6 @@ from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
 from src.chatbot.tools.retrieval.tool import RetrievalTool
 from src.chatbot.tools.vacation_days import (
     SimulatedVacationDaysAdapter,
-    VacationDaysCredentialStore,
     VacationDaysTool,
 )
 from src.chatbot.ui.citation_view import (
@@ -197,15 +198,15 @@ def _has_renderable_side_element(citation: Citation) -> bool:
             return "error" not in citation.result
 
 
-def _build_vacation_days_tool() -> tuple[VacationDaysTool, VacationDaysCredentialStore]:
-    """Create the vacation-days tool and its credential store.
+def _build_credential_store() -> CredentialStore:
+    """Create the credential store."""
+    return InMemoryCredentialStore()
 
-    Returns both so the composition root can store the store in the session
-    for use by the login handler.
-    """
+
+def _build_vacation_days_tool(credential_store: CredentialStore) -> VacationDaysTool:
+    """Create the vacation-days tool."""
     service = SimulatedVacationDaysAdapter()
-    credential_store = VacationDaysCredentialStore()
-    return VacationDaysTool(service=service, auth=credential_store), credential_store
+    return VacationDaysTool(service=service, credential_store=credential_store)
 
 
 def _build_retrieval_tool() -> RetrievalTool:
@@ -219,7 +220,7 @@ def _build_retrieval_tool() -> RetrievalTool:
     return RetrievalTool(retriever=retriever)
 
 
-def _build_orchestrator() -> tuple[ChatOrchestrator, VacationDaysCredentialStore]:
+def _build_orchestrator() -> tuple[ChatOrchestrator, CredentialStore]:
     """Compose one session-scoped chat orchestrator instance."""
     chat_model_config = build_chat_model_config(_settings)
     model_profile = build_chat_model_profile(chat_model_config)
@@ -227,7 +228,8 @@ def _build_orchestrator() -> tuple[ChatOrchestrator, VacationDaysCredentialStore
     chat_model = build_chat_model(
         chat_model_config, parse_text_tool_calls=model_profile.parse_text_tool_calls
     )
-    vacation_days_tool, credential_store = _build_vacation_days_tool()
+    credential_store = _build_credential_store()
+    vacation_days_tool = _build_vacation_days_tool(credential_store)
     retrieval_tool = _build_retrieval_tool()
     tools: list[Tool] = [vacation_days_tool, retrieval_tool]
     orchestrator = ChatOrchestrator.create(
@@ -432,7 +434,7 @@ async def on_message(message: cl.Message) -> None:
                     credential_store = _get_session_credential_store()
                     creds = await _ask_login(event, lang=lang)
                     if creds is not None:
-                        credential_store.set_credentials(*creds)
+                        credential_store.set_credentials(event.credential_key, *creds)
                         event.credential_future.set_result(True)
                     else:
                         event.credential_future.set_result(False)
@@ -476,10 +478,10 @@ async def on_message(message: cl.Message) -> None:
     logger.info("session.message_handled", length=len(user_text))
 
 
-def _get_session_credential_store() -> VacationDaysCredentialStore:
+def _get_session_credential_store() -> InMemoryCredentialStore:
     raw = cl.user_session.get(_SESSION_CREDENTIAL_STORE)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    if not isinstance(raw, VacationDaysCredentialStore):
-        raise RuntimeError("VacationDaysCredentialStore is missing from session state")
+    if not isinstance(raw, InMemoryCredentialStore):
+        raise RuntimeError("InMemoryCredentialStore is missing from session state")
     return raw
 
 

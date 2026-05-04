@@ -39,6 +39,7 @@ class TestAskLogin:
         future: asyncio.Future[bool] = loop.create_future()
         return AuthRequiredEvent(
             tool_name="get_vacation_days",
+            credential_key="vacation_days",
             service_display_name=I18nMessage(key=VacationDaysCallKey.DISPLAY_NAME, args={}),
             credential_future=future,
         )

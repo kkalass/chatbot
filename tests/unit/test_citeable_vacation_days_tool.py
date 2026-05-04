@@ -6,8 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.chatbot.app.protocols import AuthRequiredException
-from src.chatbot.tools.vacation_days.auth import UsernamePasswordCredentials
+from src.chatbot.app.protocols import AuthRequiredException, UsernamePasswordCredentials
 from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
     VacationDaysInput,
@@ -17,14 +16,17 @@ from src.chatbot.tools.vacation_days.tool import VacationDaysTool
 
 
 @dataclass
-class _StubAuth:
+class _StubCredentialStore:
     creds: UsernamePasswordCredentials | None
     cleared: bool = False
 
-    def get_credentials(self) -> UsernamePasswordCredentials | None:
+    def get_credentials(self, key: str) -> UsernamePasswordCredentials | None:
         return self.creds
 
-    def clear_credentials(self) -> None:
+    def set_credentials(self, key: str, username: str, password: str) -> None:
+        self.creds = UsernamePasswordCredentials(username=username, password=password)
+
+    def clear_credentials(self, key: str) -> None:
         self.cleared = True
 
 
@@ -55,7 +57,7 @@ class TestExecute:
         service = _StubService(
             result=VacationDaysOutput(total_days=30, used_days=10, remaining_days=20)
         )
-        auth = _StubAuth(creds=UsernamePasswordCredentials(username="u", password="p"))
+        auth = _StubCredentialStore(creds=UsernamePasswordCredentials(username="u", password="p"))
         tool = VacationDaysTool(service, auth)
 
         result = await tool.execute({"year": 2026})
@@ -68,7 +70,7 @@ class TestExecute:
     async def test_invalid_arguments_return_error(self) -> None:
         tool = VacationDaysTool(
             _StubService(result=VacationDaysOutput(total_days=0, used_days=0, remaining_days=0)),
-            _StubAuth(creds=None),
+            _StubCredentialStore(creds=None),
         )
         result = await tool.execute({"year": "not-a-number"})
         assert "error" in result
@@ -77,14 +79,14 @@ class TestExecute:
     async def test_auth_required_raises(self) -> None:
         tool = VacationDaysTool(
             _StubService(result=VacationDaysOutput(total_days=0, used_days=0, remaining_days=0)),
-            _StubAuth(creds=None),
+            _StubCredentialStore(creds=None),
         )
         with pytest.raises(AuthRequiredException):
             await tool.execute({"year": 2026})
 
     @pytest.mark.asyncio
     async def test_auth_error_clears_credentials(self) -> None:
-        auth = _StubAuth(creds=UsernamePasswordCredentials(username="u", password="p"))
+        auth = _StubCredentialStore(creds=UsernamePasswordCredentials(username="u", password="p"))
         tool = VacationDaysTool(_StubService(raise_auth_error=True), auth)
 
         result = await tool.execute({"year": 2026})

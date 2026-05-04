@@ -409,6 +409,7 @@ class ChatOrchestrator:
                             )
                             yield AuthRequiredEvent(
                                 tool_name=tc.name,
+                                credential_key=exc.credential_key,
                                 service_display_name=exc.service_display_name,
                                 credential_future=future,
                             )
