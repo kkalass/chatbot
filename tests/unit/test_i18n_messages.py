@@ -80,7 +80,7 @@ class TestResolveMessage:
 
     def test_unsupported_lang_falls_back_to_english(self) -> None:
         msg = I18nMessage(key=VacationDaysCallKey.DISPLAY_NAME, args={})
-        assert resolve_message(msg, lang="fr") == "Vacation Days"
+        assert resolve_message(msg, lang="fr") == "Vacation Days Service"
 
     def test_unknown_key_returns_key_string(self) -> None:
         msg = I18nMessage(key="some.unknown.key", args={})

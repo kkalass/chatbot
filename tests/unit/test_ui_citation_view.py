@@ -73,7 +73,7 @@ class TestBuildCitationName:
             display_name=I18nMessage(key="vacation_days.display_name", args={}),
         )
         numbered = NumberedCitation(reference_number=2, citation=cit)
-        assert build_citation_name(numbered) == "Vacation Days"
+        assert build_citation_name(numbered) == "Vacation Days Service"
 
 
 class TestBuildCitationContent:
