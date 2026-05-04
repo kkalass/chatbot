@@ -27,13 +27,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         RetrievalCallKey.DISPLAY_NAME: "Document Search",
         RetrievalCallKey.SEARCHING: "Searching for: {query}",
-        VacationDaysCallKey.DISPLAY_NAME: "Vacation Days",
+        VacationDaysCallKey.DISPLAY_NAME: "Vacation Days Service",
         VacationDaysCallKey.QUERYING: "Querying vacation days for {year}",
     },
     "de": {
         RetrievalCallKey.DISPLAY_NAME: "Dokumentensuche",
         RetrievalCallKey.SEARCHING: "Suche nach: {query}",
-        VacationDaysCallKey.DISPLAY_NAME: "Urlaubstage",
+        VacationDaysCallKey.DISPLAY_NAME: "Urlaubstage-Dienst",
         VacationDaysCallKey.QUERYING: "Urlaubstage für {year} abfragen",
     },
 }

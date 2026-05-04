@@ -38,6 +38,7 @@ from src.chatbot.app.protocols import (
     HallucinatedCitation,
     NumberedCitation,
     ProcessEvent,
+    ThinkingContent,
     Tool,
     ToolCallFinished,
     ToolCallStarted,
@@ -430,6 +431,15 @@ async def on_message(message: cl.Message) -> None:
                     await response.stream_token(f"⚙️ {label}\n")
                 case ToolCallFinished():
                     logger.debug("session.tool_call_finished", tool=event.tool_name)
+                case ThinkingContent():
+                    # Thinking blocks are silently consumed for now; the model profile
+                    # decides whether thinking is enabled, and this match site is the
+                    # right place to add UI rendering (e.g. a collapsible Step) later.
+                    logger.debug(
+                        "session.thinking_content_received",
+                        chars=len(event.text),
+                        preview=event.text[:120] if event.text else "",
+                    )
                 case AuthRequiredEvent():
                     credential_store = _get_session_credential_store()
                     creds = await _ask_login(event, lang=lang)

@@ -40,8 +40,12 @@ Key variables (all have sensible defaults):
 
 | Variable | Default | Description |
 |---|---|---|
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `CHAT_MODEL` | `llama3.2` | Generation model |
+| `CHAT_MODEL_PROVIDER` | `ollama` | `ollama` or `openai_compatible` |
+| `CHAT_BASE_URL` | `http://localhost:11434` | Chat model endpoint — Ollama URL or OpenAI-compatible base URL (e.g. `https://api.groq.com/openai/v1`) |
+| `CHAT_API_KEY` | — | API key for `openai_compatible` providers (not used for Ollama) |
+| `CHAT_MODEL` | `llama3.2` | Generation model identifier — Ollama name or provider model id (e.g. `qwen3-32b`, `Qwen/Qwen3-235B-A22B`) |
+| `EMBEDDING_MODEL_PROVIDER` | `ollama` | Currently only `ollama` is supported |
+| `EMBEDDING_BASE_URL` | `http://localhost:11434` | Ollama server URL for embeddings |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model |
 | `QDRANT_HOST` | `localhost` | Qdrant hostname |
 | `QDRANT_PORT` | `6333` | Qdrant port |
@@ -69,6 +73,8 @@ ollama pull llama3.2
 ollama pull nomic-embed-text
 ```
 
+The embedding model always runs locally via Ollama. The chat model can alternatively run via a cloud provider — see [Using a cloud/remote chat model](#using-a-cloudremote-chat-model) below.
+
 ### 4. Start Qdrant
 
 ```bash
@@ -93,6 +99,30 @@ Docker Desktop is not always required. For many local-dev setups, Colima is the 
 - Use deterministic point IDs (`doc_id + chunk_index`) for idempotent re-indexing.
 - Persist data with a volume in real usage (not only ephemeral container state).
 - Treat retrieval params (`top_k`, score threshold, chunk size) as evaluation-controlled settings.
+
+### Using a cloud/remote chat model
+
+Set `CHAT_MODEL_PROVIDER=openai_compatible` to replace the local Ollama chat model with any OpenAI-API-compatible endpoint. Embeddings always remain local.
+
+**Groq** (free tier, fast):
+
+```bash
+CHAT_MODEL_PROVIDER=openai_compatible
+CHAT_BASE_URL=https://api.groq.com/openai/v1
+CHAT_API_KEY=gsk_...
+CHAT_MODEL=qwen3-32b
+```
+
+**Together AI** (pay-as-you-go, larger models):
+
+```bash
+CHAT_MODEL_PROVIDER=openai_compatible
+CHAT_BASE_URL=https://api.together.xyz/v1
+CHAT_API_KEY=...
+CHAT_MODEL=Qwen/Qwen3-235B-A22B
+```
+
+Any other provider with an OpenAI-compatible `/chat/completions` endpoint works the same way.
 
 ---
 
@@ -189,7 +219,7 @@ You can inspect the same traces in Phoenix (<http://localhost:6006>) and Jaeger 
 
 - Root UI span for each message (`chat.ui.on_message`)
 - Orchestrator spans (`chat.orchestrator.process_message`, `chat.orchestrator.round`)
-- Model call span (`chat.model.ollama.stream`) with request/response previews
+- Model call span (`chat.model.ollama.stream` or `chat.model.openai_compatible.stream`) with request/response previews
 - Tool spans (`chat.tool.search_documents`) with tool input and result summary
 - Retriever span (`chat.retriever.qdrant.retrieve`) with top-k result preview
 
@@ -324,7 +354,7 @@ Module boundaries use `Protocol`-based interfaces — orchestration code never i
 ## Known Limitations
 
 - **Single-user only**: Chainlit's WebSocket-based session model is inherently stateful and not designed for horizontal scaling. See `doc/05-delivery-plan.md` → *Multi-User and Stateless Architecture* for the production path.
-- **Local model quality variance**: Answer quality depends on the Ollama model chosen. Model pinning and benchmark-based acceptance gates mitigate regressions.
+- **Local model quality variance**: Answer quality depends on the model chosen. Model pinning and benchmark-based acceptance gates mitigate regressions.
 - **PDF extraction quality**: Complex layouts (tables, columns) may degrade extraction fidelity, which directly affects retrieval quality.
 - **No production IAM**: Auth is simulated via username/password at tool-call time. Session-scoped only; no OAuth2/OIDC integration.
 - **Password visible in chat**: Chainlit's `AskUserMessage` only supports plain-text input (`AskSpec.type = "text"`); there is no masked/password input in the current API. The user's password is therefore visible as plain text in the chat transcript. Resolution requires either a Chainlit custom element or a future API addition.

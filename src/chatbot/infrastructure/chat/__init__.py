@@ -17,6 +17,7 @@ from ._model_profile import (
     SmallModelProfile,
 )
 from ._ollama import build_ollama_chat_model
+from ._openai_compatible import build_openai_compatible_chat_model
 from ._text_tool_call_wrapper import TextToolCallParsingWrapper
 
 
@@ -30,13 +31,15 @@ class ChatModelConfig:
         temperature: Optional temperature override passed to the provider.
         seed: Optional deterministic seed passed to the provider.
         provider: Chat provider backend identifier.
+        api_key: API key for the provider (required for openai_compatible, unused for ollama).
     """
 
     base_url: str
     model: str
     temperature: float | None = None
     seed: int | None = None
-    provider: Literal["ollama"] = "ollama"
+    provider: Literal["ollama", "openai_compatible"] = "ollama"
+    api_key: str | None = None
 
 
 def build_chat_model_profile(config: ChatModelConfig) -> ModelProfile:
@@ -79,6 +82,14 @@ def build_chat_model(
             model = build_ollama_chat_model(
                 base_url=config.base_url,
                 model=config.model,
+                temperature=config.temperature,
+                seed=config.seed,
+            )
+        case "openai_compatible":
+            model = build_openai_compatible_chat_model(
+                base_url=config.base_url,
+                model=config.model,
+                api_key=config.api_key,
                 temperature=config.temperature,
                 seed=config.seed,
             )

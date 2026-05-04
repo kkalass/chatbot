@@ -11,7 +11,8 @@ class TestSettingsDefaults:
 
         with pytest.MonkeyPatch().context() as mp:
             for key in (
-                "OLLAMA_BASE_URL",
+                "CHAT_BASE_URL",
+                "EMBEDDING_BASE_URL",
                 "CHAT_MODEL",
                 "EMBEDDING_MODEL",
                 "QDRANT_HOST",
@@ -42,7 +43,8 @@ class TestSettingsDefaults:
             ):
                 mp.delenv(key, raising=False)
             settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
-        assert settings.ollama_base_url == "http://localhost:11434"
+        assert settings.chat_base_url == "http://localhost:11434"
+        assert settings.embedding_base_url == "http://localhost:11434"
         assert settings.chat_model == "llama3.2"
         assert settings.embedding_model == "nomic-embed-text"
         assert settings.qdrant_host == "localhost"

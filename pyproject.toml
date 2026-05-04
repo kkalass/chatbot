@@ -17,6 +17,7 @@ dependencies = [
     "haystack-ai>=2.0",
     "qdrant-haystack>=5.0",
     "ollama>=0.4",
+    "openai>=1.0",
     "pydantic-settings>=2.0",
     "structlog>=24.0",
     "ollama-haystack>=6.3.0",

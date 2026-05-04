@@ -24,6 +24,7 @@ SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH = "chat.orchestrator.tool_dispatch"
 
 # Model adapter spans
 SPAN_CHAT_MODEL_OLLAMA_STREAM = "chat.model.ollama.stream"
+SPAN_CHAT_MODEL_OPENAI_COMPATIBLE_STREAM = "chat.model.openai_compatible.stream"
 
 # Tool spans
 SPAN_CHAT_TOOL_SEARCH_DOCUMENTS = "chat.tool.search_documents"

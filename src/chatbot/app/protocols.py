@@ -173,7 +173,24 @@ class ToolSchema:
     parameters_schema: JsonObject  # JSON Schema object describing parameters
 
 
-type ChatStreamItem = str | list[ToolCallInfo]
+@dataclass(frozen=True)
+class ThinkingContent:
+    """A complete thinking/reasoning block emitted by a model with extended thinking enabled.
+
+    The adapter strips ``<think>...</think>`` tags from the response stream and
+    packages the accumulated content as a single ``ThinkingContent`` item.  The
+    orchestrator threads it through to callers as a ``ProcessEvent`` so that
+    each consumer (UI, logger, evaluator) can decide independently what to do
+    with it.
+
+    Args:
+        text: The raw thinking text between the opening and closing tags.
+    """
+
+    text: str
+
+
+type ChatStreamItem = str | list[ToolCallInfo] | ThinkingContent
 
 
 @runtime_checkable
@@ -453,4 +470,5 @@ type ProcessEvent = (
     | ToolCallStarted
     | ToolCallFinished
     | AuthRequiredEvent
+    | ThinkingContent
 )

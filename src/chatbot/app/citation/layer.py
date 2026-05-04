@@ -46,6 +46,7 @@ from src.chatbot.app.protocols import (
     I18nMessage,
     JsonObject,
     RawCitation,
+    ThinkingContent,
     Tool,
     ToolCallInfo,
     ToolCitation,
@@ -63,7 +64,12 @@ from src.chatbot.app.protocols_citeable_tool import (
 logger = structlog.get_logger(__name__)
 
 type CitationLayerStreamItem = (
-    str | list[ToolCallInfo] | Citation | HallucinatedCitation | UnsubstantiatedClaim
+    str
+    | list[ToolCallInfo]
+    | Citation
+    | HallucinatedCitation
+    | UnsubstantiatedClaim
+    | ThinkingContent
 )
 
 
@@ -362,6 +368,10 @@ The actual user message is:
                         parser.feed(item), token_index, citeable_by_name, plain_by_name
                     ):
                         yield event
+                    continue
+                if isinstance(item, ThinkingContent):
+                    # Thinking blocks are not citable text — pass through unchanged.
+                    yield item
                     continue
                 # tool_calls list — flush parser first to preserve order
                 for event in _emit_parsed(

@@ -31,18 +31,46 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Ollama ---
-    ollama_base_url: str = Field(
-        default="http://localhost:11434",
-        description="Base URL of the local Ollama server.",
-    )
+    # --- Chat model ---
     chat_model: str = Field(
         default="llama3.2",
-        description="Ollama model used for chat generation.",
+        description="Model identifier used for chat generation.",
     )
+    chat_model_provider: str = Field(
+        default="ollama",
+        description=(
+            "Chat model backend: 'ollama' for a local Ollama server, "
+            "'openai_compatible' for any OpenAI-API-compatible provider (e.g. Groq, Together AI)."
+        ),
+        pattern="^(ollama|openai_compatible)$",
+    )
+    chat_base_url: str = Field(
+        default="http://localhost:11434",
+        description=(
+            "Base URL for the chat model provider. "
+            "For 'ollama' this is the Ollama server URL. "
+            "For 'openai_compatible' set this to the provider endpoint "
+            "(e.g. https://api.groq.com/openai/v1)."
+        ),
+    )
+    chat_api_key: str | None = Field(
+        default=None,
+        description="API key for the chat model provider (required for openai_compatible).",
+    )
+
+    # --- Embedding model ---
     embedding_model: str = Field(
         default="nomic-embed-text",
         description="Ollama model used to produce embeddings.",
+    )
+    embedding_model_provider: str = Field(
+        default="ollama",
+        description="Embedding model backend. Currently only 'ollama' is supported.",
+        pattern="^(ollama)$",
+    )
+    embedding_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Base URL of the Ollama server used for embeddings.",
     )
 
     # --- Qdrant ---

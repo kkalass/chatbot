@@ -140,7 +140,7 @@ class TestOrchestratorWithCitationLayer:
         from src.settings import get_settings
 
         settings = get_settings()
-        config = ChatModelConfig(base_url=settings.ollama_base_url, model=settings.chat_model)
+        config = ChatModelConfig(base_url=settings.chat_base_url, model=settings.chat_model)
         model_profile = build_chat_model_profile(config)
         chat_model = build_chat_model(
             config, parse_text_tool_calls=model_profile.parse_text_tool_calls

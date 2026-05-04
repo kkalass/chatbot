@@ -25,7 +25,7 @@ def build_document_store_config(settings: Settings) -> DocumentStoreConfig:
 def build_document_embedder_config(settings: Settings) -> DocumentEmbedderConfig:
     """Map settings to :class:`~src.ingest.infrastructure.embeddings_document.DocumentEmbedderConfig`."""
     return DocumentEmbedderConfig(
-        url=settings.ollama_base_url,
+        url=settings.embedding_base_url,
         embedding_model=settings.embedding_model,
         provider="ollama",
     )

@@ -46,6 +46,7 @@ from src.chatbot.app.protocols import (
     ModelProfile,
     NumberedCitation,
     ProcessEvent,
+    ThinkingContent,
     Tool,
     ToolCallFinished,
     ToolCallInfo,
@@ -331,6 +332,9 @@ class ChatOrchestrator:
                             case str():
                                 text_chars += len(item)
                                 parts.append(item)
+                                yield item
+                            case ThinkingContent():
+                                # Thread through to the caller; consumed/logged at UI layer.
                                 yield item
                             case list():
                                 if not last_step:
