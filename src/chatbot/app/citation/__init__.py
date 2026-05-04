@@ -26,9 +26,9 @@ from src.chatbot.app.citation.messages import (
 )
 
 __all__ = [
-    "CitationModel",
     "CitationAssistantMessage",
     "CitationMessage",
+    "CitationModel",
     "CitationSystemMessage",
     "CitationToolMessage",
     "CitationUserMessage",

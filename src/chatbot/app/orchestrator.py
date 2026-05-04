@@ -31,8 +31,8 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.citation import (
-    CitationModel,
     CitationMessage,
+    CitationModel,
 )
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
