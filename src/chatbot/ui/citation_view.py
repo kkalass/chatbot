@@ -15,35 +15,45 @@ from textwrap import dedent
 from src.chatbot.app.protocols import (
     Citation,
     DocumentCitation,
+    I18nMessage,
     NumberedCitation,
     ToolCitation,
 )
-from src.chatbot.ui.i18n_messages import resolve_message
+from src.chatbot.ui.i18n_messages import CitationViewKey, resolve_message
 
 # -- Display labels ------------------------------------------------------
 
 
 def build_citation_name(numbered: NumberedCitation, *, lang: str = "en") -> str:
-    """Compact side-panel label."""
+    """Compact label for a citation, prefixed with the session-stable reference number."""
     citation = numbered.citation
     match citation:
         case DocumentCitation():
             name = _document_display_title(citation)
-            if citation.page:
-                return f"{name} (p. {citation.page})"
-            return name
+            base = f"{name} (p. {citation.page})" if citation.page else name
         case ToolCitation():
-            return _tool_display_label(citation, lang=lang)
+            base = _tool_display_label(citation, lang=lang)
+    return f"[{numbered.reference_number}] {base}"
+
+
+def build_side_panel_label(*, lang: str = "en") -> str:
+    """Localised title for the citations side panel."""
+    return resolve_message(I18nMessage(key=CitationViewKey.PANEL_TITLE, args={}), lang=lang)
 
 
 def build_citation_content(numbered: NumberedCitation, *, lang: str = "en") -> str:
-    """Structured Markdown for a side-panel element."""
+    """Structured Markdown for a citation entry in the side panel.
+
+    The section heading is prefixed with the session-stable reference number
+    so the entry is identifiable in the aggregated panel view.
+    """
     citation = numbered.citation
+    ref = numbered.reference_number
     match citation:
         case DocumentCitation():
-            return _build_document_content(citation)
+            return _build_document_content(citation, ref=ref)
         case ToolCitation():
-            return _build_tool_content(citation, lang=lang)
+            return _build_tool_content(citation, ref=ref, lang=lang)
 
 
 # -- Bubble appendix -----------------------------------------------------
@@ -77,9 +87,9 @@ def _document_display_title(citation: DocumentCitation) -> str:
     return citation.source
 
 
-def _build_document_content(citation: DocumentCitation) -> str:
+def _build_document_content(citation: DocumentCitation, *, ref: int) -> str:
     header = _link_or_text(_document_display_title(citation), citation.source_url)
-    lines = [f"### {header}", ""]
+    lines = [f"### [{ref}] {header}", ""]
     if citation.author:
         lines.append(f"**Author:** {citation.author}  ")
     if citation.publication_date:
@@ -118,10 +128,10 @@ def _build_document_appendix_item(citation: DocumentCitation) -> str:
 # -- Internal: ToolCitation ---------------------------------------------
 
 
-def _build_tool_content(citation: ToolCitation, *, lang: str = "en") -> str:
+def _build_tool_content(citation: ToolCitation, *, ref: int, lang: str = "en") -> str:
     """Render a tool result as a property list; only called for successful results."""
     heading = _tool_display_label(citation, lang=lang)
-    lines = [f"### {heading}", ""]
+    lines = [f"### [{ref}] {heading}", ""]
     for key, value in citation.result.items():
         if isinstance(value, (dict, list)):
             formatted = f"`{json.dumps(value, ensure_ascii=False)}`"

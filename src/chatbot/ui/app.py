@@ -17,7 +17,6 @@ Session state keys
 - ``"orchestrator"`` — the :class:`~src.chatbot.app.orchestrator.ChatOrchestrator`.
 """
 
-from collections import Counter, defaultdict
 from typing import assert_never, cast
 from uuid import uuid4
 
@@ -72,7 +71,7 @@ from src.chatbot.tools.vacation_days import (
 from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
-    build_citation_name,
+    build_side_panel_label,
 )
 from src.chatbot.ui.i18n_messages import detect_language, resolve_message
 from src.chatbot.ui.logging_config import configure_logging
@@ -170,24 +169,16 @@ def _format_citation_marker(
 
 
 def _build_side_elements(unique: list[NumberedCitation], *, lang: str) -> list[cl.Text]:
-    """Build sidebar elements with stable duplicate-label disambiguation."""
-    base_names = [build_citation_name(nc, lang=lang) for nc in unique]
-    total_counts = Counter(base_names)
-    seen_counts: defaultdict[str, int] = defaultdict(int)
-    elements: list[cl.Text] = []
-    for nc, base_name in zip(unique, base_names, strict=True):
-        seen_counts[base_name] += 1
-        display_name = base_name
-        if total_counts[base_name] > 1:
-            display_name = f"{base_name} ({seen_counts[base_name]}/{total_counts[base_name]})"
-        elements.append(
-            cl.Text(
-                name=display_name,
-                content=build_citation_content(nc, lang=lang),
-                display="side",
-            )
-        )
-    return elements
+    """Aggregate all citations into a single side-panel element.
+
+    One ``cl.Text`` element named with the localised panel title (e.g.
+    "Quellenangaben") is returned.  Each citation's content section begins
+    with a ``[N]``-prefixed heading so the reference numbers visible in the
+    answer text map directly to entries in the panel.
+    """
+    panel_title = build_side_panel_label(lang=lang)
+    content = "\n\n---\n\n".join(build_citation_content(nc, lang=lang) for nc in unique)
+    return [cl.Text(name=panel_title, content=content, display="side")]
 
 
 def _has_renderable_side_element(citation: Citation) -> bool:

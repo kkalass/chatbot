@@ -12,9 +12,18 @@ Adding a new tool requires:
 2. Adding one entry per key **and language** to :data:`TRANSLATIONS`.
 """
 
+from enum import StrEnum
+
 from src.chatbot.app.protocols import I18nMessage
 from src.chatbot.tools.retrieval.tool import RetrievalCallKey
 from src.chatbot.tools.vacation_days.keys import VacationDaysCallKey
+
+
+class CitationViewKey(StrEnum):
+    """Message keys for the citation side-panel UI."""
+
+    PANEL_TITLE = "citation_view.panel_title"
+
 
 # ---------------------------------------------------------------------------
 # Translation map
@@ -29,12 +38,14 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         RetrievalCallKey.SEARCHING: "Searching for: {query}",
         VacationDaysCallKey.DISPLAY_NAME: "Vacation Days Service",
         VacationDaysCallKey.QUERYING: "Querying vacation days for {year}",
+        CitationViewKey.PANEL_TITLE: "Sources",
     },
     "de": {
         RetrievalCallKey.DISPLAY_NAME: "Dokumentensuche",
         RetrievalCallKey.SEARCHING: "Suche nach: {query}",
         VacationDaysCallKey.DISPLAY_NAME: "Urlaubstage-Dienst",
         VacationDaysCallKey.QUERYING: "Urlaubstage für {year} abfragen",
+        CitationViewKey.PANEL_TITLE: "Quellenangaben",
     },
 }
 

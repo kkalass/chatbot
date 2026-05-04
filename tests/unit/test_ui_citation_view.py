@@ -38,21 +38,21 @@ def _doc(
 class TestBuildCitationName:
     def test_uses_title_when_present(self) -> None:
         citation = NumberedCitation(reference_number=3, citation=_doc(title="My Doc"))
-        assert build_citation_name(citation) == "My Doc"
+        assert build_citation_name(citation) == "[3] My Doc"
 
     def test_appends_page_when_present(self) -> None:
         citation = NumberedCitation(reference_number=3, citation=_doc(title="T", page="42"))
-        assert build_citation_name(citation) == "T (p. 42)"
+        assert build_citation_name(citation) == "[3] T (p. 42)"
 
     def test_falls_back_to_author_date_then_source(self) -> None:
         citation = NumberedCitation(
             reference_number=3,
             citation=_doc(author="A", publication_date="2024"),
         )
-        assert build_citation_name(citation) == "A - 2024"
+        assert build_citation_name(citation) == "[3] A - 2024"
 
         citation = NumberedCitation(reference_number=4, citation=_doc(source="x.md"))
-        assert build_citation_name(citation) == "x.md"
+        assert build_citation_name(citation) == "[4] x.md"
 
     def test_tool_citation_falls_back_to_tool_name(self) -> None:
         cit = ToolCitation(
@@ -62,7 +62,7 @@ class TestBuildCitationName:
             result={"days": 30},
         )
         numbered = NumberedCitation(reference_number=2, citation=cit)
-        assert build_citation_name(numbered) == "get_vacation_days"
+        assert build_citation_name(numbered) == "[2] get_vacation_days"
 
     def test_tool_citation_uses_display_name(self) -> None:
         cit = ToolCitation(
@@ -73,7 +73,7 @@ class TestBuildCitationName:
             display_name=I18nMessage(key="vacation_days.display_name", args={}),
         )
         numbered = NumberedCitation(reference_number=2, citation=cit)
-        assert build_citation_name(numbered) == "Vacation Days Service"
+        assert build_citation_name(numbered) == "[2] Vacation Days Service"
 
 
 class TestBuildCitationContent:
@@ -81,7 +81,7 @@ class TestBuildCitationContent:
         rendered = build_citation_content(
             NumberedCitation(reference_number=3, citation=_doc(title="T", content="hello world"))
         )
-        assert "### T" in rendered
+        assert "### [3] T" in rendered
         assert "hello world" in rendered
         assert "**Excerpt**" in rendered
 
@@ -92,7 +92,7 @@ class TestBuildCitationContent:
                 citation=_doc(title="T", source_url="https://e.com/d"),
             )
         )
-        assert "### [T](https://e.com/d)" in rendered
+        assert "### [3] [T](https://e.com/d)" in rendered
 
     def test_tool_citation_renders_property_list(self) -> None:
         cit = ToolCitation(
@@ -102,7 +102,7 @@ class TestBuildCitationContent:
             result={"total_days": 30, "remaining_days": 20},
         )
         rendered = build_citation_content(NumberedCitation(reference_number=2, citation=cit))
-        assert "### get_vacation_days" in rendered
+        assert "### [2] get_vacation_days" in rendered
         assert "**total_days:** 30" in rendered
         assert "**remaining_days:** 20" in rendered
 
