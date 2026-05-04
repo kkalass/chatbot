@@ -7,14 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.chatbot.app.citation import (
-    Citation,
-    CitationLayerMessage,
-    DocumentCitation,
-    HallucinatedCitation,
-    NumberedCitation,
-    RawCitation,
-)
+from src.chatbot.app.citation import CitationLayerMessage
 from src.chatbot.app.citation.layer import CitationLayerStreamItem
 from src.chatbot.app.citation.messages import (
     CitationLayerAssistantMessage,
@@ -22,10 +15,16 @@ from src.chatbot.app.citation.messages import (
     CitationLayerToolMessage,
     CitationLayerUserMessage,
 )
-from src.chatbot.app.orchestrator import ChatOrchestrator
+from src.chatbot.app.orchestrator import ChatOrchestrator, ToolCallFinished, ToolCallStarted
 from src.chatbot.app.protocols import (
+    Citation,
+    DocumentCitation,
+    HallucinatedCitation,
+    I18nMessage,
     JsonObject,
     ModelProfile,
+    NumberedCitation,
+    RawCitation,
     ToolCallInfo,
     ToolSchema,
 )
@@ -83,6 +82,17 @@ class _StubCitationLayer:
             tool_call_id=call_id, tool_name=name, result=result, llm_content=""
         )
 
+    def make_blocked_tool_response(self, tc: ToolCallInfo) -> CitationLayerToolMessage:
+        return CitationLayerToolMessage(
+            tool_call_id=tc.call_id,
+            tool_name=tc.name,
+            result={},
+            llm_content="[BLOCKED]",
+        )
+
+    def make_loop_escape_message(self, original_user_content: str) -> CitationLayerUserMessage:
+        return CitationLayerUserMessage(llm_content=f"[ESCAPE]{original_user_content}")
+
     def stream(
         self,
         history: Sequence[CitationLayerMessage],
@@ -104,8 +114,12 @@ class _StubCitationLayer:
 class _StubTool:
     def __init__(self, name: str, *, result: JsonObject) -> None:
         self.schema = ToolSchema(name=name, description="d", parameters_schema={"type": "object"})
+        self.display_name = I18nMessage(key="stub.tool", args={})
         self._result = result
         self.calls: list[JsonObject] = []
+
+    def describe_call(self, args: JsonObject) -> I18nMessage:
+        return I18nMessage(key="stub.call", args=dict(args))
 
     async def execute(self, args: JsonObject) -> JsonObject:
         self.calls.append(args)
@@ -115,7 +129,7 @@ class _StubTool:
 def _doc_citation(*, marker: str = "[M]", chunk_id: str = "c1") -> DocumentCitation:
     return DocumentCitation(
         raw_marker_text=marker,
-        tool_call_id="tc1",
+        citation_token=chunk_id,
         source="s",
         chunk_id=chunk_id,
         content="x",
@@ -167,7 +181,7 @@ class TestSingleTurn:
     @pytest.mark.asyncio
     async def test_passes_through_hallucinated_citation(self) -> None:
         h = HallucinatedCitation(
-            raw=RawCitation(tool_call_id="missing", raw_marker_text="<m>"),
+            raw=RawCitation(ref="missing", raw_marker_text="<m>"),
             reason="x",
         )
         layer = _StubCitationLayer([["a", h, "b"]])
@@ -199,6 +213,36 @@ class TestToolDispatchLoop:
         assert "thinking " in events
         assert "final answer" in events
         assert tool.calls == [{"year": 2026}]
+
+    @pytest.mark.asyncio
+    async def test_emits_tool_call_started_and_finished(self) -> None:
+        tc = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
+        tool = _StubTool("vac", result={"days": 30})
+        layer = _StubCitationLayer(
+            [
+                [[tc]],
+                ["final answer"],
+            ]
+        )
+        orch = ChatOrchestrator(
+            layer,  # type: ignore[arg-type]
+            model_profile=_profile(),
+            tools=[tool],
+        )
+
+        events = [e async for e in orch.process_message("how many days?")]
+
+        started = [e for e in events if isinstance(e, ToolCallStarted)]
+        finished = [e for e in events if isinstance(e, ToolCallFinished)]
+        assert len(started) == 1
+        assert started[0].tool_name == "vac"
+        assert started[0].call_id == "cid1"
+        assert started[0].call_description == I18nMessage(key="stub.call", args={"year": 2026})
+        assert len(finished) == 1
+        assert finished[0].tool_name == "vac"
+        assert finished[0].call_id == "cid1"
+        # Started must precede Finished in the event stream.
+        assert events.index(started[0]) < events.index(finished[0])
         # Second stream sees the tool result in history
         second_history = layer.received_histories[1]
         assert any(isinstance(m, CitationLayerToolMessage) for m in second_history)
@@ -228,3 +272,105 @@ class TestRepeatedToolCallSafety:
         assert "fallback answer" in events
         # Final stream should have been requested without tools.
         assert layer.received_tool_lists[-1] is None
+
+    @pytest.mark.asyncio
+    async def test_history_has_no_pending_tool_calls_at_fallback_step(self) -> None:
+        """The duplicate-detected assistant message must be followed by a blocked
+        tool response before the fallback step, so the history ends at a valid
+        tool-result boundary — never at an unanswered assistant tool-call."""
+        tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
+        tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
+        tool = _StubTool("vac", result={"days": 30})
+        layer = _StubCitationLayer(
+            [
+                [[tc1]],
+                [[tc2]],
+                ["fallback answer"],
+            ]
+        )
+        orch = ChatOrchestrator(
+            layer,  # type: ignore[arg-type]
+            model_profile=_profile(),
+            tools=[tool],
+        )
+
+        events = [e async for e in orch.process_message("hi")]
+        assert "fallback answer" in events
+
+        # The last message passed to the fallback stream must not be an assistant
+        # message with unanswered tool_calls. (An earlier assistant message with
+        # tool_calls is fine, provided a tool result follows it.)
+        final_history = layer.received_histories[-1]
+        # Skip system message (index 0), inspect the rest.
+        tail = [m for m in final_history if not isinstance(m, CitationLayerSystemMessage)]
+        assert tail, "History must not be empty"
+        assert not (
+            isinstance(tail[-1], CitationLayerAssistantMessage) and tail[-1].tool_calls is not None
+        ), "Last message in fallback-step history must not be an unanswered assistant tool-call."
+
+    @pytest.mark.asyncio
+    async def test_blocked_tool_response_appended_for_duplicate_calls(self) -> None:
+        """A synthetic blocked tool-result must be appended for every pending call
+        in the duplicate-detected step so the history ends at a tool-result."""
+        tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
+        tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
+        tool = _StubTool("vac", result={"days": 30})
+        layer = _StubCitationLayer(
+            [
+                [[tc1]],
+                [[tc2]],
+                ["fallback answer"],
+            ]
+        )
+        orch = ChatOrchestrator(
+            layer,  # type: ignore[arg-type]
+            model_profile=_profile(),
+            tools=[tool],
+        )
+
+        events = [e async for e in orch.process_message("hi")]
+        _ = events  # we care about history side-effects, not yielded events
+
+        # The fallback step history must contain a blocked tool-result for cid2.
+        final_history = layer.received_histories[-1]
+        blocked = [
+            m
+            for m in final_history
+            if isinstance(m, CitationLayerToolMessage) and m.llm_content == "[BLOCKED]"
+        ]
+        assert len(blocked) >= 1, "Blocked tool-result message must appear in fallback-step history"
+        assert blocked[-1].tool_call_id == "cid2"
+
+    @pytest.mark.asyncio
+    async def test_loop_escape_user_message_appended_after_blocked_responses(self) -> None:
+        """After blocked tool responses, a loop-escape user message must be
+        appended so the fallback step ends on a user turn — required by many
+        LLMs to trigger user-facing text generation."""
+        tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
+        tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2026})
+        tool = _StubTool("vac", result={"days": 30})
+        layer = _StubCitationLayer(
+            [
+                [[tc1]],
+                [[tc2]],
+                ["fallback answer"],
+            ]
+        )
+        orch = ChatOrchestrator(
+            layer,  # type: ignore[arg-type]
+            model_profile=_profile(),
+            tools=[tool],
+        )
+
+        events = [e async for e in orch.process_message("the question")]
+        _ = events
+
+        # The fallback step history must end with the loop-escape user message.
+        final_history = layer.received_histories[-1]
+        tail = [m for m in final_history if not isinstance(m, CitationLayerSystemMessage)]
+        assert tail and isinstance(tail[-1], CitationLayerUserMessage), (
+            "Fallback-step history must end with a user message"
+        )
+        assert tail[-1].llm_content.startswith("[ESCAPE]"), (
+            "Last message must be the loop-escape user message"
+        )

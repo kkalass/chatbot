@@ -27,18 +27,22 @@ from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferen
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from src.chatbot.app.citation import (
+from src.chatbot.app.orchestrator import ChatOrchestrator
+from src.chatbot.app.prompts import DEFAULT_PROMPTS
+from src.chatbot.app.protocols import (
+    AuthRequiredEvent,
     Citation,
     DocumentCitation,
     HallucinatedCitation,
     NumberedCitation,
+    ProcessEvent,
+    Tool,
+    ToolCallFinished,
+    ToolCallStarted,
     ToolCitation,
     UnsubstantiatedClaim,
     canonical_key,
 )
-from src.chatbot.app.orchestrator import ChatOrchestrator, ProcessEvent
-from src.chatbot.app.prompts import DEFAULT_PROMPTS
-from src.chatbot.app.protocols import Tool
 from src.chatbot.config import (
     build_chat_model_config,
     build_retriever_config,
@@ -59,8 +63,8 @@ from src.chatbot.observability.openinference import (
 from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
 from src.chatbot.tools.retrieval.tool import RetrievalTool
 from src.chatbot.tools.vacation_days import (
-    InteractiveVacationDaysAuthSession,
     SimulatedVacationDaysAdapter,
+    VacationDaysCredentialStore,
     VacationDaysTool,
 )
 from src.chatbot.ui.citation_view import (
@@ -68,11 +72,14 @@ from src.chatbot.ui.citation_view import (
     build_citation_markdown,
     build_citation_name,
 )
+from src.chatbot.ui.i18n_messages import detect_language, resolve_message
 from src.chatbot.ui.logging_config import configure_logging
 from src.settings import get_settings
 
 _SESSION_ORCHESTRATOR = "orchestrator"
 _SESSION_TRACE_ID = "trace_session_id"
+_SESSION_LANG = "lang"
+_SESSION_CREDENTIAL_STORE = "credential_store"
 _tracer = trace.get_tracer(__name__)
 
 # Configure logging at module import time (before any logger is used).
@@ -96,16 +103,19 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_EVAL_RUN_ID = _settings.eval_run_id if _settings.eval_run_id else str(uuid4())
 
 
-async def _ask_user(prompt: str) -> str | None:
-    """Prompt the user via Chainlit and return their response, or None on cancellation."""
-    response = await cl.AskUserMessage(
-        content=prompt,
-        timeout=120,
-    ).send()
-    if response is None:
-        return None
-    value: object = response.get("output", "")  # pyright: ignore[reportUnknownMemberType]
-    return str(value).strip() if value else None
+def _detect_session_lang() -> str:
+    """Derive a supported language tag from the Chainlit session.
+
+    ``WebsocketSession.language`` is set from the ``HTTP_ACCEPT_LANGUAGE``
+    WSGI environ key during socket handshake, e.g. ``"de-DE"`` or ``"en-US"``.
+    :func:`~src.chatbot.ui.i18n_messages.detect_language` maps that to a
+    supported primary subtag (``"de"``, ``"en"``, …).
+    """
+    try:
+        lang_header: str = cl.context.session.language  # pyright: ignore[reportAttributeAccessIssue, reportUnknownVariableType, reportUnknownMemberType, reportUnknownArgumentType]
+    except Exception:
+        return "en"
+    return detect_language(str(lang_header))  # pyright: ignore[reportUnknownArgumentType]
 
 
 def _collect_unique_numbered_citations(
@@ -157,9 +167,9 @@ def _format_citation_marker(
     return [f"[{nc.reference_number}]"], pending_whitespace
 
 
-def _build_side_elements(unique: list[NumberedCitation]) -> list[cl.Text]:
+def _build_side_elements(unique: list[NumberedCitation], *, lang: str) -> list[cl.Text]:
     """Build sidebar elements with stable duplicate-label disambiguation."""
-    base_names = [build_citation_name(nc) for nc in unique]
+    base_names = [build_citation_name(nc, lang=lang) for nc in unique]
     total_counts = Counter(base_names)
     seen_counts: defaultdict[str, int] = defaultdict(int)
     elements: list[cl.Text] = []
@@ -171,7 +181,7 @@ def _build_side_elements(unique: list[NumberedCitation]) -> list[cl.Text]:
         elements.append(
             cl.Text(
                 name=display_name,
-                content=build_citation_content(nc),
+                content=build_citation_content(nc, lang=lang),
                 display="side",
             )
         )
@@ -187,14 +197,15 @@ def _has_renderable_side_element(citation: Citation) -> bool:
             return "error" not in citation.result
 
 
-def _build_vacation_days_tool() -> VacationDaysTool:
-    """Create the vacation-days tool and bind its service/auth collaborators."""
+def _build_vacation_days_tool() -> tuple[VacationDaysTool, VacationDaysCredentialStore]:
+    """Create the vacation-days tool and its credential store.
+
+    Returns both so the composition root can store the store in the session
+    for use by the login handler.
+    """
     service = SimulatedVacationDaysAdapter()
-    auth = InteractiveVacationDaysAuthSession(
-        ask_user=_ask_user,
-        service_label="the vacation days service",
-    )
-    return VacationDaysTool(service=service, auth=auth)
+    credential_store = VacationDaysCredentialStore()
+    return VacationDaysTool(service=service, auth=credential_store), credential_store
 
 
 def _build_retrieval_tool() -> RetrievalTool:
@@ -208,7 +219,7 @@ def _build_retrieval_tool() -> RetrievalTool:
     return RetrievalTool(retriever=retriever)
 
 
-def _build_orchestrator() -> ChatOrchestrator:
+def _build_orchestrator() -> tuple[ChatOrchestrator, VacationDaysCredentialStore]:
     """Compose one session-scoped chat orchestrator instance."""
     chat_model_config = build_chat_model_config(_settings)
     model_profile = build_chat_model_profile(chat_model_config)
@@ -216,15 +227,16 @@ def _build_orchestrator() -> ChatOrchestrator:
     chat_model = build_chat_model(
         chat_model_config, parse_text_tool_calls=model_profile.parse_text_tool_calls
     )
-    vacation_days_tool = _build_vacation_days_tool()
+    vacation_days_tool, credential_store = _build_vacation_days_tool()
     retrieval_tool = _build_retrieval_tool()
     tools: list[Tool] = [vacation_days_tool, retrieval_tool]
-    return ChatOrchestrator.create(
+    orchestrator = ChatOrchestrator.create(
         chat_model,
         tools=tools,
         model_profile=model_profile,
         prompts=DEFAULT_PROMPTS,
     )
+    return orchestrator, credential_store
 
 
 def _trace_request(
@@ -300,27 +312,48 @@ def _trace_response(
 @cl.on_chat_start  # pyright: ignore[reportUnknownMemberType]  # chainlit decorators are dynamically typed
 async def on_chat_start() -> None:
     """Compose and store one :class:`ChatOrchestrator` per user session."""
-    orchestrator = _build_orchestrator()
+    lang = _detect_session_lang()
+    orchestrator, credential_store = _build_orchestrator()
     trace_session_id = str(uuid4())
 
     cl.user_session.set(_SESSION_ORCHESTRATOR, orchestrator)  # pyright: ignore[reportUnknownMemberType]
     cl.user_session.set(_SESSION_TRACE_ID, trace_session_id)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set(_SESSION_LANG, lang)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set(_SESSION_CREDENTIAL_STORE, credential_store)  # pyright: ignore[reportUnknownMemberType]
     logger.info(
         "session.started", chat_model=_settings.chat_model, trace_session_id=trace_session_id
     )
 
 
+async def _ask_login(event: AuthRequiredEvent, *, lang: str) -> tuple[str, str] | None:
+    """Show a masked login form and return ``(username, password)`` or ``None``.
+
+    Uses :class:`~chainlit.AskElementMessage` with ``LoginForm.jsx`` so the
+    password field renders as ``<input type="password">`` — credentials never
+    appear in plain text in the UI.
+    """
+    service_name = resolve_message(event.service_display_name, lang=lang)
+    element = cl.CustomElement(
+        name="LoginForm",
+        props={"service_name": service_name, "lang": lang},
+        display="inline",
+    )
+    res = await cl.AskElementMessage(content="", element=element, timeout=120).send()  # pyright: ignore[reportUnknownMemberType]
+    if not res:
+        return None
+    username = str(res.get("username", "")).strip()  # pyright: ignore[reportUnknownMemberType]
+    password = str(res.get("password", "")).strip()  # pyright: ignore[reportUnknownMemberType]
+    if not username or not password:
+        return None
+    return username, password
+
+
 @cl.on_message  # pyright: ignore[reportUnknownMemberType]  # chainlit decorators are dynamically typed
 async def on_message(message: cl.Message) -> None:
     """Forward the user message to the orchestrator and stream the response."""
-    raw_orchestrator: object | None = cl.user_session.get(_SESSION_ORCHESTRATOR)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    if not isinstance(raw_orchestrator, ChatOrchestrator):
-        raise RuntimeError("Chat orchestrator is missing from session state")
-    orchestrator = raw_orchestrator
-
-    raw_trace_session_id = cl.user_session.get(_SESSION_TRACE_ID)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    trace_session_id = cast(object | None, raw_trace_session_id)
-    trace_session = str(trace_session_id) if trace_session_id is not None else "unknown"
+    orchestrator = _get_session_orchestrator()
+    trace_session = _get_session_trace()
+    lang = _get_session_lang()
 
     user_text = str(message.content)
 
@@ -330,6 +363,7 @@ async def on_message(message: cl.Message) -> None:
     emitted_chars = 0
     emitted_chunks: list[str] = []
     pending_whitespace = ""
+    num_tool_call_messages = 0
 
     with (
         using_session_attributes(trace_session),
@@ -340,11 +374,15 @@ async def on_message(message: cl.Message) -> None:
         event: ProcessEvent
 
         async def _stream_response_token(token: str) -> None:
-            nonlocal response, emitted_chars
+            nonlocal response, emitted_chars, num_tool_call_messages
             if not token:
                 return
             emitted_chars += len(token)
             emitted_chunks.append(token)
+            if num_tool_call_messages > 0 and response is not None:
+                num_tool_call_messages = 0
+                await response.remove()
+                response = None
             if response is None:
                 response = cl.Message(content="")
                 await response.send()
@@ -371,13 +409,33 @@ async def on_message(message: cl.Message) -> None:
                     logger.info(
                         "session.hallucinated_citation",
                         reason=event.reason,
-                        tool_call_id=event.raw.tool_call_id,
+                        ref=event.raw.ref,
                     )
                 case UnsubstantiatedClaim():
                     # Emit inline (like a citation marker) — do not flush pending_whitespace
                     # so the marker stays attached to the preceding sentence without leading newlines.
                     await _stream_response_token(" ⚠️")
                     logger.debug("session.unsubstantiated_claim")
+                case ToolCallStarted():
+                    if response is not None:
+                        await response.remove()
+                        response = None
+
+                    response = cl.Message(content="")
+                    await response.send()
+                    num_tool_call_messages += 1
+                    label = resolve_message(event.call_description, lang=lang)
+                    await response.stream_token(f"⚙️ {label}\n")
+                case ToolCallFinished():
+                    logger.debug("session.tool_call_finished", tool=event.tool_name)
+                case AuthRequiredEvent():
+                    credential_store = _get_session_credential_store()
+                    creds = await _ask_login(event, lang=lang)
+                    if creds is not None:
+                        credential_store.set_credentials(*creds)
+                        event.credential_future.set_result(True)
+                    else:
+                        event.credential_future.set_result(False)
                 case _:
                     assert_never(event)
 
@@ -393,12 +451,12 @@ async def on_message(message: cl.Message) -> None:
             await response.send()
 
         if response is not None:
-            sources_markdown = build_citation_markdown(unique_numbered)
+            sources_markdown = build_citation_markdown(unique_numbered, lang=lang)
             if sources_markdown:
                 response.content = f"{response.content.rstrip()}\n\n{sources_markdown}"
 
             if renderable:
-                response.elements = _build_side_elements(renderable)  # pyright: ignore[reportAttributeAccessIssue]
+                response.elements = _build_side_elements(renderable, lang=lang)  # pyright: ignore[reportAttributeAccessIssue]
                 logger.info("session.sources_displayed", count=len(renderable))
 
             await response.update()
@@ -416,3 +474,31 @@ async def on_message(message: cl.Message) -> None:
         )
 
     logger.info("session.message_handled", length=len(user_text))
+
+
+def _get_session_credential_store() -> VacationDaysCredentialStore:
+    raw = cl.user_session.get(_SESSION_CREDENTIAL_STORE)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if not isinstance(raw, VacationDaysCredentialStore):
+        raise RuntimeError("VacationDaysCredentialStore is missing from session state")
+    return raw
+
+
+def _get_session_lang():
+    raw_lang = cl.user_session.get(_SESSION_LANG)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    lang = str(raw_lang) if isinstance(raw_lang, str) else "en"
+    return lang
+
+
+def _get_session_trace():
+    raw_trace_session_id = cl.user_session.get(_SESSION_TRACE_ID)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    trace_session_id = cast(object | None, raw_trace_session_id)
+    trace_session = str(trace_session_id) if trace_session_id is not None else "unknown"
+    return trace_session
+
+
+def _get_session_orchestrator():
+    raw_orchestrator: object | None = cl.user_session.get(_SESSION_ORCHESTRATOR)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if not isinstance(raw_orchestrator, ChatOrchestrator):
+        raise RuntimeError("Chat orchestrator is missing from session state")
+    orchestrator = raw_orchestrator
+    return orchestrator

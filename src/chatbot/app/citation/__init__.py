@@ -2,23 +2,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Citation layer: prompt augmentation, marker parsing, and validation.
 
-This package owns the entire citation concern. The orchestrator depends on
-:class:`~src.chatbot.app.citation.layer.CitationLayer` (a decorator around a
-:class:`~src.chatbot.app.protocols.ChatModel`) and never touches markers,
-parsers, or per-tool citation logic directly.
+This package owns the citation layer implementation. Its public API is
+deliberately narrow — only the types that are *produced* by this package
+and consumed by callers outside it:
 
-Public API:
-    - :class:`CitationLayer`
-    - :class:`CiteableTool`, :class:`CiteInstructions`
-    - :class:`CitationContext`
-    - :class:`RawCitation`
-    - :data:`Citation`, :class:`DocumentCitation`, :class:`ToolCitation`
-    - :class:`NumberedCitation`, :class:`HallucinatedCitation`, :class:`UnsubstantiatedClaim`
-    - :data:`CitationLayerMessage` and its variants
+- :class:`CitationLayer` — the main chat-model decorator
+- :data:`CitationLayerMessage` and its four concrete variants, which the
+  orchestrator and tests inspect
+
+Value objects (:class:`~src.chatbot.app.protocols.Citation`,
+:class:`~src.chatbot.app.protocols.RawCitation`, etc.) and the
+:class:`~src.chatbot.app.protocols_citeable_tool.CiteableTool` protocol live
+in their respective ``protocols*`` modules; import them from there directly.
 """
 
-from src.chatbot.app.citation.citeable_tool import CiteableTool, CiteInstructions
-from src.chatbot.app.citation.context import CitationContext, build_citation_context
 from src.chatbot.app.citation.layer import CitationLayer
 from src.chatbot.app.citation.messages import (
     CitationLayerAssistantMessage,
@@ -27,38 +24,12 @@ from src.chatbot.app.citation.messages import (
     CitationLayerToolMessage,
     CitationLayerUserMessage,
 )
-from src.chatbot.app.citation.models import (
-    QUOTE_END_MARKER,
-    QUOTE_START_MARKER,
-    Citation,
-    DocumentCitation,
-    HallucinatedCitation,
-    NumberedCitation,
-    RawCitation,
-    ToolCitation,
-    UnsubstantiatedClaim,
-    canonical_key,
-)
 
 __all__ = [
-    "QUOTE_END_MARKER",
-    "QUOTE_START_MARKER",
-    "Citation",
-    "CitationContext",
     "CitationLayer",
     "CitationLayerAssistantMessage",
     "CitationLayerMessage",
     "CitationLayerSystemMessage",
     "CitationLayerToolMessage",
     "CitationLayerUserMessage",
-    "CiteInstructions",
-    "CiteableTool",
-    "DocumentCitation",
-    "HallucinatedCitation",
-    "NumberedCitation",
-    "RawCitation",
-    "ToolCitation",
-    "UnsubstantiatedClaim",
-    "build_citation_context",
-    "canonical_key",
 ]

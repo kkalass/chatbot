@@ -78,7 +78,7 @@ def _trace_request(
     tools: Sequence[ToolSchema] | None,
     ollama_options: dict[str, object],
 ) -> None:
-    request_payload = {
+    request_payload: dict[str, object] = {
         "messages": [
             {
                 "role": message.role,

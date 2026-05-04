@@ -19,6 +19,7 @@ citation layer; the orchestrator only assigns stable per-turn reference numbers
 to validated citations and surfaces hallucinated ones.
 """
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
@@ -30,25 +31,29 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.citation import (
-    Citation,
     CitationLayer,
     CitationLayerMessage,
-    CiteableTool,
-    DocumentCitation,
-    HallucinatedCitation,
-    NumberedCitation,
-    ToolCitation,
-    UnsubstantiatedClaim,
-    canonical_key,
 )
 from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
 from src.chatbot.app.protocols import (
+    AuthRequiredEvent,
+    AuthRequiredException,
     ChatModel,
+    Citation,
+    DocumentCitation,
+    HallucinatedCitation,
     JsonObject,
     ModelProfile,
+    NumberedCitation,
+    ProcessEvent,
     Tool,
+    ToolCallFinished,
     ToolCallInfo,
+    ToolCallStarted,
+    ToolCitation,
     ToolSchema,
+    UnsubstantiatedClaim,
+    canonical_key,
 )
 from src.chatbot.observability import to_attribute_text
 from src.chatbot.observability.openinference import (
@@ -66,9 +71,6 @@ logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 _MAX_TOOL_STEPS = 10  # safety limit to prevent infinite agentic loops
-
-
-type ProcessEvent = str | NumberedCitation | HallucinatedCitation | UnsubstantiatedClaim
 
 
 def _tool_call_sequence_signature(tool_calls: list[ToolCallInfo]) -> tuple[tuple[str, str], ...]:
@@ -266,8 +268,7 @@ class ChatOrchestrator:
                 :data:`~src.chatbot.app.prompts.DEFAULT_PROMPTS`.
         """
         _tools = tools or []
-        citeable = [t for t in _tools if isinstance(t, CiteableTool)]
-        citation_layer = CitationLayer(model, citeable_tools=citeable)
+        citation_layer = CitationLayer(model, tools=_tools)
         return cls(citation_layer, tools=_tools, model_profile=model_profile, prompts=prompts)
 
     def process_message(self, user_text: str) -> AsyncIterator[ProcessEvent]:
@@ -292,6 +293,7 @@ class ChatOrchestrator:
         tool_schemas = self._tool_schemas
         tool_map = self._tool_map
         prompts = self._prompts
+        user_msg_content = user_msg.llm_content
 
         async def _gen() -> AsyncGenerator[ProcessEvent, None]:
             previous_tool_call_signature: tuple[tuple[str, str], ...] | None = None
@@ -371,6 +373,17 @@ class ChatOrchestrator:
                             step=step_num,
                             calls=[tc.name for tc in tool_calls],
                         )
+                        # Keep the duplicate assistant message so the conversation
+                        # structure is valid (tool_call must be followed by
+                        # tool_result). Append a synthetic blocked-tool response
+                        # for each pending call, then inject a user-turn message
+                        # that re-states the original question with citation
+                        # instructions. Many LLMs only generate user-facing text
+                        # in response to a user turn; ending at a tool result
+                        # causes them to produce empty output.
+                        for tc in tool_calls:
+                            history.append(citation_layer.make_blocked_tool_response(tc))
+                        history.append(citation_layer.make_loop_escape_message(user_msg_content))
                         last_step = True
                         continue
                     previous_tool_call_signature = current_signature
@@ -382,10 +395,32 @@ class ChatOrchestrator:
                         calls=[tc.name for tc in tool_calls],
                     )
                     for tc in tool_calls:
-                        result = await _dispatch(tc, tool_map)
+                        tool = tool_map[tc.name]
+                        yield ToolCallStarted(
+                            tool_name=tc.name,
+                            call_id=tc.call_id,
+                            call_description=tool.describe_call(tc.arguments),
+                        )
+                        try:
+                            result = await _dispatch(tc, tool_map)
+                        except AuthRequiredException as exc:
+                            future: asyncio.Future[bool] = (
+                                asyncio.get_running_loop().create_future()
+                            )
+                            yield AuthRequiredEvent(
+                                tool_name=tc.name,
+                                service_display_name=exc.service_display_name,
+                                credential_future=future,
+                            )
+                            success = await future
+                            if success:
+                                result = await _dispatch(tc, tool_map)
+                            else:
+                                result = {"error": "Authentication was canceled by the user."}
                         history.append(
                             citation_layer.make_tool_message(tc.call_id, tc.name, result)
                         )
+                        yield ToolCallFinished(tool_name=tc.name, call_id=tc.call_id)
 
             _trace_citation_counts(
                 validated=numberer.validated,
@@ -423,6 +458,8 @@ async def _dispatch(tc: ToolCallInfo, tool_map: dict[str, Tool]) -> JsonObject:
             result = await tool.execute(tc.arguments)
             _trace_tool_dispatch_response(span=span, result=result)
             return result
+        except AuthRequiredException:
+            raise  # propagate to the orchestrator's tool-call loop for UI handling
         except Exception as exc:
             logger.exception("orchestrator.tool_error", name=tc.name, exc=str(exc))
             _trace_tool_dispatch_error(span=span, error_msg=str(exc), exc=exc)

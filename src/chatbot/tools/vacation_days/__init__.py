@@ -9,10 +9,11 @@ auth contract.
 
 from src.chatbot.tools.vacation_days.adapter import SimulatedVacationDaysAdapter
 from src.chatbot.tools.vacation_days.auth import (
-    InteractiveVacationDaysAuthSession,
     UsernamePasswordCredentials,
     VacationDaysAuth,
+    VacationDaysCredentialStore,
 )
+from src.chatbot.tools.vacation_days.keys import VacationDaysCallKey
 from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
     VacationDaysInput,
@@ -22,11 +23,12 @@ from src.chatbot.tools.vacation_days.service import (
 from src.chatbot.tools.vacation_days.tool import VacationDaysTool
 
 __all__ = [
-    "InteractiveVacationDaysAuthSession",
     "SimulatedVacationDaysAdapter",
     "ToolAuthenticationError",
     "UsernamePasswordCredentials",
     "VacationDaysAuth",
+    "VacationDaysCallKey",
+    "VacationDaysCredentialStore",
     "VacationDaysInput",
     "VacationDaysOutput",
     "VacationDaysService",

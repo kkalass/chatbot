@@ -7,9 +7,12 @@ infrastructure (Ollama, HTTP clients, Chainlit).  All cross-module typed
 contracts that don't belong to a single subsystem live here.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, assert_never, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict
 
 from src.chatbot.app.prompts import Prompts
 
@@ -17,6 +20,30 @@ from src.chatbot.app.prompts import Prompts
 # protocol boundaries.  ``Any`` is intentional: I tried to use a recursive
 # type alias but that caused more trouble than it is worth (e.g. .get() calls on dicts were troublesome).
 type JsonObject = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class I18nMessage:
+    """Localizable message token — a key + interpolation args for UI rendering.
+
+    The ``key`` identifies a message template (defined by the tool as a
+    ``StrEnum`` constant); ``args`` carries the interpolation parameters.
+    The UI layer resolves ``key`` + ``args`` to a human-readable string —
+    keeping i18n concerns out of the tool and orchestrator layers entirely.
+
+    Reusable beyond tool calls — suitable for tool titles, status messages,
+    error descriptions, or any text that may need localisation later.
+
+    Args:
+        key: A namespaced message key defined by the producing component (e.g.
+            ``"retrieval.searching"``).  The UI translation map must contain
+            an entry for every key produced at runtime.
+        args: Interpolation arguments for the template (e.g.
+            ``{"query": "AI in vocational education"}``).
+    """
+
+    key: str
+    args: JsonObject
 
 
 @dataclass(frozen=True)
@@ -75,6 +102,23 @@ class ChatMessage:
     tool_call_id: str | None = None  # populated for role="tool" result messages
 
 
+class AuthRequiredException(Exception):
+    """Raised by a :class:`Tool` when credentials are required but not available.
+
+    The orchestrator catches this and yields an ``AuthRequiredEvent``, pausing
+    the tool-call loop until the UI collects credentials via the login form.
+    Any tool can raise this; it is not specific to vacation days.
+
+    Args:
+        service_display_name: Localizable name of the service requiring auth,
+            passed through to ``AuthRequiredEvent`` for UI display.
+    """
+
+    def __init__(self, service_display_name: I18nMessage) -> None:
+        super().__init__(str(service_display_name.key))
+        self.service_display_name = service_display_name
+
+
 @dataclass(frozen=True)
 class ToolSchema:
     """Information about a tool exposed to the model.
@@ -104,6 +148,17 @@ class Tool(Protocol):
     """
 
     schema: ToolSchema  # All metadata needed by the model (name, description, parameters)
+    display_name: I18nMessage  # Human-readable name for UI rendering (resolved via translation map)
+
+    def describe_call(self, args: JsonObject) -> I18nMessage:
+        """Return a localizable description of a call with *args* for UI display.
+
+        Implementations should extract the most user-relevant argument(s) and
+        return an :class:`I18nMessage` with a ``StrEnum``-defined key and
+        the interpolation args.  The UI translation layer resolves the key to
+        a human-readable string.
+        """
+        ...
 
     async def execute(self, args: JsonObject) -> JsonObject:
         """Execute the tool with *args* decoded from the LLM's tool_call.
@@ -184,3 +239,176 @@ class Retriever(Protocol):
     async def retrieve(self, query: str) -> list[SourceChunk]:
         """Return ranked, score-filtered chunks relevant to *query*."""
         ...
+
+
+@dataclass(frozen=True)
+class ToolCallStarted:
+    """Emitted just before a tool call is dispatched.
+
+    Allows the UI to open a progress indicator (e.g. a Chainlit Step) scoped
+    to exactly this invocation.  Paired with :class:`ToolCallFinished` which
+    carries the same ``call_id``.
+    """
+
+    tool_name: str
+    call_id: str
+    call_description: I18nMessage
+
+
+@dataclass(frozen=True)
+class ToolCallFinished:
+    """Emitted after a tool call has been dispatched and its result appended.
+
+    Paired with :class:`ToolCallStarted`; the ``call_id`` is identical so the
+    UI can close the matching progress indicator.
+    """
+
+    tool_name: str
+    call_id: str
+
+
+@dataclass
+class AuthRequiredEvent:
+    """Emitted when a tool raises :class:`AuthRequiredException`.
+
+    The orchestrator suspends the tool-call loop and awaits
+    :attr:`credential_future`. The UI is expected to:
+
+    1. Show a login form (e.g. :class:`~chainlit.AskElementMessage`).
+    2. Store the collected credentials in the session-scoped credential store.
+    3. Set ``credential_future.set_result(True)`` on success, or
+       ``set_result(False)`` on cancellation.
+
+    The generator then retries the tool call (on ``True``) or substitutes an
+    error result (on ``False``) and continues normally.
+    """
+
+    tool_name: str
+    service_display_name: I18nMessage
+    credential_future: asyncio.Future[bool]
+
+
+# ---------------------------------------------------------------------------
+# Citation vocabulary — public value objects emitted by the citation layer
+# and consumed by the orchestrator and UI.
+# ---------------------------------------------------------------------------
+
+
+class RawCitation(BaseModel):
+    """Marker payload emitted by the model.
+
+    ``ref`` is the citation token of a previously-emitted citable unit; it is
+    required for all regular citations. For unsubstantiated claims the model
+    emits ``{"kind": "unsubstantiated"}`` without a ``ref``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    ref: str | None = None
+    kind: str | None = None
+    raw_marker_text: str = ""
+
+
+@dataclass(frozen=True)
+class DocumentCitation:
+    """Validated citation backed by a retrieved document chunk."""
+
+    raw_marker_text: str
+    citation_token: str
+    source: str
+    chunk_id: str
+    content: str
+    score: float
+    title: str | None = None
+    author: str | None = None
+    publication_date: str | None = None
+    source_url: str | None = None
+    page: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolCitation:
+    """Validated citation backed by a non-document tool result."""
+
+    raw_marker_text: str
+    citation_token: str
+    tool_name: str
+    result: JsonObject
+    display_name: I18nMessage | None = None  # resolved by UI via translation map
+
+
+type Citation = DocumentCitation | ToolCitation
+
+
+@dataclass(frozen=True)
+class HallucinatedCitation:
+    """A ``RawCitation`` that failed validation by the responsible tool.
+
+    The UI decides how (or whether) to surface it. ``raw_marker_text`` is also
+    spliced back into the LLM-side history so that the model sees its own
+    output verbatim on subsequent turns.
+    """
+
+    raw: RawCitation
+    reason: str
+
+    @property
+    def raw_marker_text(self) -> str:
+        return self.raw.raw_marker_text
+
+
+@dataclass(frozen=True)
+class UnsubstantiatedClaim:
+    """A ``RawCitation`` with ``kind="unsubstantiated"`` — the model explicitly
+    signals that no tool output supports the preceding claim.
+
+    This is *not* a validation failure: it is correct, transparent model
+    behaviour. The UI renders it as ``_(unbelegt)_`` inline at the marker
+    position. ``raw_marker_text`` is spliced back into the LLM-side history
+    so the model sees its own signal on subsequent turns.
+    """
+
+    raw: RawCitation
+
+    @property
+    def raw_marker_text(self) -> str:
+        return self.raw.raw_marker_text
+
+
+@dataclass(frozen=True)
+class NumberedCitation:
+    """A ``Citation`` with a stable per-turn reference number assigned by the
+    orchestrator (``[N]`` in the rendered text). Reference numbers are reused
+    when the same canonical key appears more than once in a turn.
+    """
+
+    reference_number: int
+    citation: Citation
+
+
+def canonical_key(citation: Citation) -> str:
+    """Stable structural key for citation deduplication and reference reuse.
+
+    The ``citation_token`` is a content-derived hash (or otherwise unique
+    per-call identifier) that the model copied verbatim into ``ref``. Using
+    it directly as the canonical key makes deduplication trivially correct:
+    two citations are the same evidence iff their tokens match.
+    """
+    match citation:
+        case DocumentCitation():
+            return f"document:{citation.citation_token}"
+        case ToolCitation():
+            return f"tool:{citation.citation_token}"
+        case _:
+            assert_never(citation)
+
+
+type ProcessEvent = (
+    str
+    | NumberedCitation
+    | HallucinatedCitation
+    | UnsubstantiatedClaim
+    | ToolCallStarted
+    | ToolCallFinished
+    | AuthRequiredEvent
+)

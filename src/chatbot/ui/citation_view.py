@@ -12,17 +12,18 @@ import json
 from collections.abc import Sequence
 from textwrap import dedent
 
-from src.chatbot.app.citation import (
+from src.chatbot.app.protocols import (
     Citation,
     DocumentCitation,
     NumberedCitation,
     ToolCitation,
 )
+from src.chatbot.ui.i18n_messages import resolve_message
 
 # -- Display labels ------------------------------------------------------
 
 
-def build_citation_name(numbered: NumberedCitation) -> str:
+def build_citation_name(numbered: NumberedCitation, *, lang: str = "en") -> str:
     """Compact side-panel label."""
     citation = numbered.citation
     match citation:
@@ -32,23 +33,23 @@ def build_citation_name(numbered: NumberedCitation) -> str:
                 return f"{name} (p. {citation.page})"
             return name
         case ToolCitation():
-            return f"Tool: {citation.tool_name}"
+            return _tool_display_label(citation, lang=lang)
 
 
-def build_citation_content(numbered: NumberedCitation) -> str:
+def build_citation_content(numbered: NumberedCitation, *, lang: str = "en") -> str:
     """Structured Markdown for a side-panel element."""
     citation = numbered.citation
     match citation:
         case DocumentCitation():
             return _build_document_content(citation)
         case ToolCitation():
-            return _build_tool_content(citation)
+            return _build_tool_content(citation, lang=lang)
 
 
 # -- Bubble appendix -----------------------------------------------------
 
 
-def build_citation_markdown(numbered: Sequence[NumberedCitation]) -> str:
+def build_citation_markdown(numbered: Sequence[NumberedCitation], *, lang: str = "en") -> str:
     """Markdown source list for the answer bubble.
 
     Items are ordered by their assigned reference number, so the answer's
@@ -60,7 +61,7 @@ def build_citation_markdown(numbered: Sequence[NumberedCitation]) -> str:
     sorted_items = sorted(numbered, key=lambda nc: nc.reference_number)
     lines = ["---", "**Sources**", ""]
     for item in sorted_items:
-        lines.append(f"{item.reference_number}. {_build_appendix_item(item.citation)}")
+        lines.append(f"{item.reference_number}. {_build_appendix_item(item.citation, lang=lang)}")
     return "\n".join(lines)
 
 
@@ -117,9 +118,10 @@ def _build_document_appendix_item(citation: DocumentCitation) -> str:
 # -- Internal: ToolCitation ---------------------------------------------
 
 
-def _build_tool_content(citation: ToolCitation) -> str:
+def _build_tool_content(citation: ToolCitation, *, lang: str = "en") -> str:
     """Render a tool result as a property list; only called for successful results."""
-    lines = [f"### {citation.tool_name}", ""]
+    heading = _tool_display_label(citation, lang=lang)
+    lines = [f"### {heading}", ""]
     for key, value in citation.result.items():
         if isinstance(value, (dict, list)):
             formatted = f"`{json.dumps(value, ensure_ascii=False)}`"
@@ -132,12 +134,19 @@ def _build_tool_content(citation: ToolCitation) -> str:
 # -- Shared --------------------------------------------------------------
 
 
-def _build_appendix_item(citation: Citation) -> str:
+def _build_appendix_item(citation: Citation, *, lang: str = "en") -> str:
     match citation:
         case DocumentCitation():
             return _build_document_appendix_item(citation)
         case ToolCitation():
-            return citation.tool_name
+            return _tool_display_label(citation, lang=lang)
+
+
+def _tool_display_label(citation: ToolCitation, *, lang: str = "en") -> str:
+    """Resolve display name from I18nMessage if present, fall back to tool_name."""
+    if citation.display_name is not None:
+        return resolve_message(citation.display_name, lang=lang)
+    return citation.tool_name
 
 
 def _normalize_excerpt(content: str) -> str:

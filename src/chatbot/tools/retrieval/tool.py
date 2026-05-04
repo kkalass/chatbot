@@ -15,7 +15,7 @@ emitted by the model against its own past tool outputs.
 
 import html
 import re
-from collections.abc import Sequence
+from enum import StrEnum
 from typing import cast
 
 import structlog
@@ -24,20 +24,22 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 from pydantic import ValidationError
 
-from src.chatbot.app.citation import (
-    QUOTE_END_MARKER,
-    QUOTE_START_MARKER,
-    CitationContext,
-    CiteInstructions,
-    DocumentCitation,
-    RawCitation,
-)
-from src.chatbot.app.citation.models import Citation
 from src.chatbot.app.protocols import (
+    Citation,
+    DocumentCitation,
+    I18nMessage,
     JsonObject,
+    RawCitation,
     Retriever,
     SourceChunk,
     ToolSchema,
+)
+from src.chatbot.app.protocols_citeable_tool import (
+    QUOTE_END_MARKER,
+    QUOTE_START_MARKER,
+    CitableUnit,
+    CiteInstructions,
+    ToolHistoryRendering,
 )
 from src.chatbot.observability.openinference import (
     build_input_attributes,
@@ -54,55 +56,62 @@ tracer = trace.get_tracer(__name__)
 _TOOL_NAME = "search_documents"
 
 
+class RetrievalCallKey(StrEnum):
+    """Message keys for :meth:`RetrievalTool.describe_call` results and display name.
+
+    The UI translation map must contain an entry for every value defined here.
+    """
+
+    DISPLAY_NAME = "retrieval.display_name"
+    SEARCHING = "retrieval.searching"
+
+
 class _SearchInput(ToolInputModel):
     query: str
 
 
 _CITE_FRAGMENT = f"""#### {_TOOL_NAME}
 
-When a sentence is grounded in a chunk returned by `{_TOOL_NAME}`, emit
-immediately after that sentence a marker block of the form:
+`{_TOOL_NAME}` results are rendered as XML where each retrieved chunk
+carries a ``citation_token`` attribute:
 
-  {QUOTE_START_MARKER}{{"tool_call_id":"<id>","chunk_id":"<chunk_id>"}}{QUOTE_END_MARKER}
+    <chunk citation_token="<token>" page="...">
+      ...chunk content...
+    </chunk>
 
-Required fields (all strings, all copied **verbatim** from the conversation
-context — no re-formatting):
-  - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
-    that produced the supporting `{_TOOL_NAME}` result
-  - chunk_id: the `chunk_id` attribute of the specific `<chunk>` element
-    whose content supports the sentence
+To cite a chunk, copy that exact ``citation_token`` value into the marker
+``ref``:
 
-Do not invent IDs. If the exact `tool_call_id` or `chunk_id` is not visible
-in the conversation context, do not emit a marker for that sentence.
+    {QUOTE_START_MARKER}{{"ref":"<token>"}}{QUOTE_END_MARKER}
 
 Only cite a chunk if the claim is directly supported by the text in that
 chunk's inner content — do not cite a chunk whose text does not contain
 the information being stated. Read the chunk content first, then copy
-that chunk's `chunk_id`.
+that chunk's ``citation_token``.
 
-A common failure mode is to default to the first `<chunk>` of a source.
-Do not do this. The `chunk_id` must come from the specific `<chunk>`
-element whose inner text supports the sentence — not from the first chunk
-or a sibling chunk of the same `<source>`.
+A common failure mode is to default to the first ``<chunk>`` of a source.
+Do not do this. The token must come from the specific ``<chunk>`` element
+whose inner text supports the sentence — not from the first chunk or a
+sibling chunk of the same ``<source>``.
 
 Correct vs. incorrect attribution example:
 
-  Given:
-    <source ...>
-      <chunk chunk_id=\"AAA\">Job losses are likely in some sectors.</chunk>
-      <chunk chunk_id=\"BBB\">AI can also create new jobs and raise productivity.</chunk>
-    </source>
+    Given:
+        <source ...>
+            <chunk citation_token="AAA">Job losses are likely in some sectors.</chunk>
+            <chunk citation_token="BBB">AI can also create new jobs and raise productivity.</chunk>
+        </source>
 
-  CORRECT (claim about new jobs cites BBB, whose content supports it):
-    AI may create new jobs. {QUOTE_START_MARKER}{{"tool_call_id":"...","chunk_id":"BBB"}}{QUOTE_END_MARKER}
+    CORRECT (claim about new jobs cites BBB, whose content supports it):
+        AI may create new jobs. {QUOTE_START_MARKER}{{"ref":"BBB"}}{QUOTE_END_MARKER}
 
-  INCORRECT (claim about new jobs cites AAA, the first chunk, whose content is about job losses):
-    AI may create new jobs. {QUOTE_START_MARKER}{{"tool_call_id":"...","chunk_id":"AAA"}}{QUOTE_END_MARKER}"""
+    INCORRECT (claim about new jobs cites AAA, the first chunk, whose content is about job losses):
+        AI may create new jobs. {QUOTE_START_MARKER}{{"ref":"AAA"}}{QUOTE_END_MARKER}"""
 
 _CITE_REMINDER = (
     f"For {_TOOL_NAME}: only cite a chunk whose content actually contains the stated "
-    "information — verify the chunk text matches the claim before copying its chunk_id. "
-    "Do not default to the first chunk of a source."
+    "information — verify the chunk text matches the claim before copying its "
+    "citation_token. Do not default to the first chunk of a source."
 )
 
 
@@ -136,17 +145,20 @@ def _trace_response(*, span: trace.Span, validated_args: JsonObject, result: Jso
     span.set_attributes(build_output_attributes(result, mime_type=OpenInferenceMimeTypeValues.JSON))
 
 
-def _format_chunks_as_xml(content: JsonObject) -> str:
+def _render_chunks_as_xml(content: JsonObject) -> ToolHistoryRendering:
     """Render search-result chunks as structured XML for model consumption.
 
-    Placing ``chunk_id`` immediately adjacent to its content makes it
-    significantly easier for smaller models to correctly attribute claims to
-    the right chunk rather than picking the first chunk in the list.
+    Each ``<chunk>`` carries a ``citation_token`` attribute (the content-hashed
+    ``chunk_id``) immediately adjacent to its content, so smaller models can
+    correctly attribute claims to the right chunk rather than picking the
+    first chunk in the list. The same token is exposed as a
+    :class:`CitableUnit` so the citation layer can resolve a model-emitted
+    ``ref`` back to the originating :class:`SourceChunk`.
     """
     chunks_raw: object = content.get("chunks")
     if not isinstance(chunks_raw, list) or not chunks_raw:
         message: object = content.get("message", "No relevant documents found.")
-        return str(message)
+        return ToolHistoryRendering(llm_content=str(message), units=())
 
     grouped_by_source: dict[str, list[dict[str, object]]] = {}
     for raw_chunk in cast(list[object], chunks_raw):
@@ -157,6 +169,7 @@ def _format_chunks_as_xml(content: JsonObject) -> str:
         grouped_by_source.setdefault(source, []).append(chunk_data)
 
     parts: list[str] = ["<search_results>\n"]
+    units: list[CitableUnit] = []
     for source, source_chunks in grouped_by_source.items():
         title = source
         author: str | None = None
@@ -193,21 +206,23 @@ def _format_chunks_as_xml(content: JsonObject) -> str:
         )
 
         for chunk_data in source_chunks:
-            chunk_id = str(chunk_data.get("chunk_id", ""))
+            chunk = _json_to_source_chunk(chunk_data)
+            if not chunk.chunk_id:
+                continue
             page: object = chunk_data.get("page")
-            content_text = str(chunk_data.get("content", ""))
-            chunk_id_attr = html.escape(chunk_id, quote=True)
+            chunk_id_attr = html.escape(chunk.chunk_id, quote=True)
             page_attr = html.escape(str(page), quote=True) if page is not None else "unknown"
-            content_escaped = html.escape(content_text)
+            content_escaped = html.escape(chunk.content)
 
-            parts.append(f'    <chunk chunk_id="{chunk_id_attr}" page="{page_attr}">\n')
+            parts.append(f'    <chunk citation_token="{chunk_id_attr}" page="{page_attr}">\n')
             parts.append(f"      {content_escaped}\n")
             parts.append("    </chunk>\n")
+            units.append(CitableUnit(citation_token=chunk.chunk_id, payload=chunk))
 
         parts.append("  </source>\n")
 
     parts.append("</search_results>")
-    return "".join(parts)
+    return ToolHistoryRendering(llm_content="".join(parts), units=tuple(units))
 
 
 def _json_to_source_chunk(data: dict[str, object]) -> SourceChunk:
@@ -231,37 +246,6 @@ def _json_to_source_chunk(data: dict[str, object]) -> SourceChunk:
     )
 
 
-def _collect_chunks(
-    tool_results: Sequence[JsonObject],
-) -> dict[str, SourceChunk]:
-    """Build ``chunk_id -> SourceChunk`` from prior search results,
-    keeping the highest-scoring chunk on duplicates."""
-    chunks: dict[str, SourceChunk] = {}
-    for result in tool_results:
-        raw_chunks: object = result.get("chunks")
-        if not isinstance(raw_chunks, list):
-            continue
-        for item in cast(list[object], raw_chunks):
-            if not isinstance(item, dict):
-                continue
-            item_dict = cast(dict[str, object], item)
-            chunk = _json_to_source_chunk(item_dict)
-            if not chunk.chunk_id:
-                continue
-            if chunk.chunk_id not in chunks or chunk.score > chunks[chunk.chunk_id].score:
-                chunks[chunk.chunk_id] = chunk
-    return chunks
-
-
-def _resolve_chunk(
-    raw: RawCitation,
-    chunks: dict[str, SourceChunk],
-) -> SourceChunk | None:
-    if raw.chunk_id is None:
-        return None
-    return chunks.get(raw.chunk_id)
-
-
 class RetrievalTool:
     """LLM-callable, citeable tool wrapping the document retrieval layer.
 
@@ -276,6 +260,7 @@ class RetrievalTool:
 
     def __init__(self, retriever: Retriever) -> None:
         self._retriever = retriever
+        self.display_name = I18nMessage(key=RetrievalCallKey.DISPLAY_NAME, args={})
         self.schema = ToolSchema(
             name=_TOOL_NAME,
             description="""Search the document corpus for information relevant to a query.
@@ -334,26 +319,26 @@ Note that the search is an embedding based vector search, not a keyword search.
 
     # --- CiteableTool ------------------------------------------------
 
+    def describe_call(self, args: JsonObject) -> I18nMessage:
+        query = str(args.get("query", ""))
+        return I18nMessage(key=RetrievalCallKey.SEARCHING, args={"query": query})
+
     def cite_instructions(self) -> CiteInstructions:
         return CiteInstructions(prompt_fragment=_CITE_FRAGMENT, reminder_fragment=_CITE_REMINDER)
 
-    def format_for_history(self, result: JsonObject) -> str:
-        return _format_chunks_as_xml(result)
+    def render_for_history(self, result: JsonObject) -> ToolHistoryRendering:
+        return _render_chunks_as_xml(result)
 
-    def validate_and_enrich(
-        self,
-        raw: RawCitation,
-        context: CitationContext,
-    ) -> Citation | None:
-        if raw.chunk_id is None:
-            return None
-        chunks = _collect_chunks(context.tool_results_for(_TOOL_NAME))
-        chunk = _resolve_chunk(raw, chunks)
-        if chunk is None:
-            return None
+    def enrich(self, raw: RawCitation, unit: CitableUnit) -> Citation:
+        chunk = unit.payload
+        # The citation layer guarantees ``unit`` was produced by this tool's
+        # ``render_for_history`` and therefore carries a SourceChunk payload.
+        assert isinstance(chunk, SourceChunk), (
+            "RetrievalTool only produces CitableUnits with SourceChunk payloads"
+        )
         return DocumentCitation(
             raw_marker_text=raw.raw_marker_text,
-            tool_call_id=raw.tool_call_id,
+            citation_token=unit.citation_token,
             source=chunk.source,
             chunk_id=chunk.chunk_id,
             content=chunk.content,

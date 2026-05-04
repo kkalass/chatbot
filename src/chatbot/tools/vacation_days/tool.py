@@ -9,8 +9,9 @@ session-specific dependencies are injected at construction time.
 import structlog
 from pydantic import ValidationError
 
-from src.chatbot.app.protocols import JsonObject, ToolSchema
+from src.chatbot.app.protocols import AuthRequiredException, I18nMessage, JsonObject, ToolSchema
 from src.chatbot.tools.vacation_days.auth import VacationDaysAuth
+from src.chatbot.tools.vacation_days.keys import VacationDaysCallKey
 from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
     VacationDaysInput,
@@ -46,6 +47,7 @@ class VacationDaysTool:
     ) -> None:
         self._service = service
         self._auth = auth
+        self.display_name = I18nMessage(key=VacationDaysCallKey.DISPLAY_NAME, args={})
         self.schema = ToolSchema(
             name=_TOOL_NAME,
             description="""Retrieve the vacation day balance (Urlaubstage / Resturlaub) for the current employee directly from the HR system.
@@ -57,16 +59,26 @@ Returns: total_days (annual entitlement), used_days, remaining_days.""",
             parameters_schema=VacationDaysInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
 
+    def describe_call(self, args: JsonObject) -> I18nMessage:
+        year = str(args.get("year", ""))
+        return I18nMessage(key=VacationDaysCallKey.QUERYING, args={"year": year})
+
     async def execute(self, args: JsonObject) -> JsonObject:
-        """Validate *args*, collect credentials if needed, and call the adapter."""
+        """Validate *args*, check credentials, and call the adapter.
+
+        Raises:
+            AuthRequiredException: When no credentials are stored. The
+                orchestrator catches this and yields an ``AuthRequiredEvent``
+                so the UI can collect credentials without involving the LLM.
+        """
         try:
             tool_input = VacationDaysInput.model_validate(args)
         except ValidationError as exc:
             return {"error": f"Invalid arguments: {exc}"}
 
-        credentials = await self._auth.get_credentials()
+        credentials = self._auth.get_credentials()
         if credentials is None:
-            return {"error": "Credential collection was canceled by the user."}
+            raise AuthRequiredException(service_display_name=self.display_name)
 
         try:
             result = await self._service.get_vacation_days(

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from src.chatbot.app.protocols import AuthRequiredException
 from src.chatbot.tools.vacation_days.auth import UsernamePasswordCredentials
 from src.chatbot.tools.vacation_days.service import (
     ToolAuthenticationError,
@@ -20,7 +21,7 @@ class _StubAuth:
     creds: UsernamePasswordCredentials | None
     cleared: bool = False
 
-    async def get_credentials(self) -> UsernamePasswordCredentials | None:
+    def get_credentials(self) -> UsernamePasswordCredentials | None:
         return self.creds
 
     def clear_credentials(self) -> None:
@@ -73,13 +74,13 @@ class TestExecute:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_credential_cancellation_returns_error(self) -> None:
+    async def test_auth_required_raises(self) -> None:
         tool = VacationDaysTool(
             _StubService(result=VacationDaysOutput(total_days=0, used_days=0, remaining_days=0)),
             _StubAuth(creds=None),
         )
-        result = await tool.execute({"year": 2026})
-        assert "canceled" in str(result.get("error", "")).lower()
+        with pytest.raises(AuthRequiredException):
+            await tool.execute({"year": 2026})
 
     @pytest.mark.asyncio
     async def test_auth_error_clears_credentials(self) -> None:

@@ -2,28 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the citeable :class:`RetrievalTool`."""
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-
 import pytest
 
-from src.chatbot.app.citation import (
-    DocumentCitation,
-    RawCitation,
-)
-from src.chatbot.app.protocols import JsonObject, SourceChunk
+from src.chatbot.app.protocols import DocumentCitation, JsonObject, RawCitation, SourceChunk
+from src.chatbot.app.protocols_citeable_tool import CitableUnit
 from src.chatbot.tools.retrieval.tool import RetrievalTool
-
-
-@dataclass(frozen=True)
-class _StaticContext:
-    results: tuple[JsonObject, ...]
-
-    def tool_result_for(self, tool_call_id: str) -> JsonObject | None:
-        return None  # not used by retrieval validation
-
-    def tool_results_for(self, tool_name: str) -> Sequence[JsonObject]:
-        return self.results
 
 
 class _StubRetriever:
@@ -110,103 +93,57 @@ class TestCiteInstructions:
         fragment = tool.cite_instructions().prompt_fragment
 
         assert "search_documents" in fragment
-        assert "tool_call_id" in fragment
-        assert "chunk_id" in fragment
+        assert "citation_token" in fragment
+        assert '"ref"' in fragment
 
 
-class TestFormatForHistory:
-    def test_renders_xml_with_chunk_metadata(self) -> None:
+class TestRenderForHistory:
+    def test_renders_xml_with_chunk_metadata_and_units(self) -> None:
         tool = RetrievalTool(_StubRetriever([]))
         result = _result_with(_chunk(source="s.md", chunk_id="c1", content="hello"))
 
-        rendered = tool.format_for_history(result)
+        rendering = tool.render_for_history(result)
 
-        assert "<search_results>" in rendered
-        assert 'source_path="s.md"' in rendered
-        assert 'chunk_id="c1"' in rendered
-        assert "hello" in rendered
+        assert "<search_results>" in rendering.llm_content
+        assert 'source_path="s.md"' in rendering.llm_content
+        assert 'citation_token="c1"' in rendering.llm_content
+        assert "hello" in rendering.llm_content
+        assert len(rendering.units) == 1
+        unit = rendering.units[0]
+        assert unit.citation_token == "c1"
+        assert isinstance(unit.payload, SourceChunk)
+        assert unit.payload.chunk_id == "c1"
 
     def test_renders_no_chunks_message(self) -> None:
         tool = RetrievalTool(_StubRetriever([]))
-        rendered = tool.format_for_history(
+        rendering = tool.render_for_history(
             {"chunks": [], "message": "No relevant documents found."}
         )
-        assert rendered == "No relevant documents found."
+        assert rendering.llm_content == "No relevant documents found."
+        assert rendering.units == ()
 
 
-class TestValidateAndEnrich:
-    def _tool(self) -> RetrievalTool:
-        return RetrievalTool(_StubRetriever([]))
+class TestEnrich:
+    def test_builds_document_citation_from_unit(self) -> None:
+        tool = RetrievalTool(_StubRetriever([]))
+        chunk = _chunk(source="docs/a.md", chunk_id="c1", content="X", score=0.7)
+        unit = CitableUnit(citation_token="c1", payload=chunk)
+        raw = RawCitation(ref="c1", raw_marker_text="m")
 
-    def test_returns_none_when_chunk_id_missing(self) -> None:
-        tool = self._tool()
-        raw = RawCitation(tool_call_id="tc1", raw_marker_text="m")
-        ctx = _StaticContext(results=())
+        citation = tool.enrich(raw, unit)
 
-        assert tool.validate_and_enrich(raw, ctx) is None
+        assert isinstance(citation, DocumentCitation)
+        assert citation.source == "docs/a.md"
+        assert citation.chunk_id == "c1"
+        assert citation.content == "X"
+        assert citation.score == 0.7
+        assert citation.raw_marker_text == "m"
+        assert citation.citation_token == "c1"
 
-    def test_exact_match_returns_document_citation(self) -> None:
-        tool = self._tool()
-        ctx = _StaticContext(
-            results=(
-                _result_with(_chunk(source="docs/a.md", chunk_id="c1", content="X", score=0.7)),
-            )
-        )
-        raw = RawCitation(
-            tool_call_id="tc1",
-            chunk_id="c1",
-            raw_marker_text="m",
-        )
+    def test_payload_must_be_source_chunk(self) -> None:
+        tool = RetrievalTool(_StubRetriever([]))
+        unit = CitableUnit(citation_token="c1", payload={"not": "a chunk"})
+        raw = RawCitation(ref="c1", raw_marker_text="m")
 
-        result = tool.validate_and_enrich(raw, ctx)
-
-        assert isinstance(result, DocumentCitation)
-        assert result.source == "docs/a.md"
-        assert result.chunk_id == "c1"
-        assert result.content == "X"
-        assert result.score == 0.7
-        assert result.raw_marker_text == "m"
-
-    def test_chunk_id_resolves_regardless_of_source(self) -> None:
-        """chunk_id is a content hash — authoritative source is resolved from stored results."""
-        tool = self._tool()
-        ctx = _StaticContext(
-            results=(_result_with(_chunk(source="docs/a.md", chunk_id="unique-hash")),),
-        )
-        raw = RawCitation(
-            tool_call_id="tc1",
-            chunk_id="unique-hash",
-            raw_marker_text="m",
-        )
-
-        result = tool.validate_and_enrich(raw, ctx)
-        assert isinstance(result, DocumentCitation)
-        assert result.source == "docs/a.md"
-
-    def test_unknown_chunk_id_returns_none(self) -> None:
-        tool = self._tool()
-        ctx = _StaticContext(
-            results=(_result_with(_chunk(source="docs/a.md", chunk_id="known")),),
-        )
-        raw = RawCitation(tool_call_id="tc1", chunk_id="unknown", raw_marker_text="m")
-        assert tool.validate_and_enrich(raw, ctx) is None
-
-    def test_no_search_results_returns_none(self) -> None:
-        tool = self._tool()
-        ctx = _StaticContext(results=())
-        raw = RawCitation(tool_call_id="tc1", chunk_id="y", raw_marker_text="m")
-        assert tool.validate_and_enrich(raw, ctx) is None
-
-    def test_higher_scoring_duplicate_wins(self) -> None:
-        tool = self._tool()
-        ctx = _StaticContext(
-            results=(
-                _result_with(_chunk(source="s", chunk_id="c", content="low", score=0.1)),
-                _result_with(_chunk(source="s", chunk_id="c", content="high", score=0.9)),
-            )
-        )
-        raw = RawCitation(tool_call_id="tc1", chunk_id="c", raw_marker_text="m")
-        result = tool.validate_and_enrich(raw, ctx)
-        assert isinstance(result, DocumentCitation)
-        assert result.content == "high"
-        assert result.score == 0.9
+        with pytest.raises(AssertionError):
+            tool.enrich(raw, unit)

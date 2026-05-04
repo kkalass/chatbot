@@ -4,7 +4,7 @@
 
 # pyright: reportPrivateUsage=false
 
-from src.chatbot.app.citation import NumberedCitation, ToolCitation
+from src.chatbot.app.protocols import NumberedCitation, ToolCitation
 from src.chatbot.ui.app import (
     _format_citation_marker,
     _format_text_chunk,
@@ -14,7 +14,7 @@ from src.chatbot.ui.app import (
 def _numbered(reference_number: int) -> NumberedCitation:
     citation = ToolCitation(
         raw_marker_text="<marker>",
-        tool_call_id="tc1",
+        citation_token="tok1",
         tool_name="search_documents",
         result={"ok": True},
     )

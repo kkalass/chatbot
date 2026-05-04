@@ -17,11 +17,8 @@ from typing import cast
 import structlog
 from pydantic import ValidationError
 
-from src.chatbot.app.citation.models import (
-    QUOTE_END_MARKER,
-    QUOTE_START_MARKER,
-    RawCitation,
-)
+from src.chatbot.app.protocols import RawCitation
+from src.chatbot.app.protocols_citeable_tool import QUOTE_END_MARKER, QUOTE_START_MARKER
 
 logger = structlog.get_logger(__name__)
 
@@ -38,8 +35,7 @@ def _preview_text(text: str) -> str:
 def _parse_quote_block(raw_block: str) -> RawCitation | None:
     """Parse one complete marker block (incl. tokens) into a typed RawCitation.
 
-    Returns ``None`` on malformed JSON, missing ``tool_call_id``, or schema
-    mismatch. Unknown fields (e.g. legacy ``kind``) are silently ignored.
+    Returns ``None`` on malformed JSON or non-object payload.
     """
     json_payload = raw_block[len(QUOTE_START_MARKER) : -len(QUOTE_END_MARKER)]
     try:
@@ -57,11 +53,6 @@ def _parse_quote_block(raw_block: str) -> RawCitation | None:
         # raw_marker_text is filled by the layer; never trust the model for it.
         parsed_payload.pop("raw_marker_text", None)
         parsed_payload["raw_marker_text"] = raw_block
-
-        # Unsubstantiated claims carry no tool_call_id; provide sentinel so
-        # model_validate succeeds — _validate() short-circuits on kind first.
-        if parsed_payload.get("kind") == "unsubstantiated" and "tool_call_id" not in parsed_payload:
-            parsed_payload["tool_call_id"] = ""
 
         return RawCitation.model_validate(parsed_payload)
     except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:

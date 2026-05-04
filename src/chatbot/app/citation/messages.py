@@ -9,8 +9,14 @@ messages — see :mod:`src.chatbot.app.citation.layer`.
 
 from dataclasses import dataclass
 
-from src.chatbot.app.citation.models import Citation, HallucinatedCitation, UnsubstantiatedClaim
-from src.chatbot.app.protocols import JsonObject, ToolCallInfo
+from src.chatbot.app.protocols import (
+    Citation,
+    HallucinatedCitation,
+    JsonObject,
+    ToolCallInfo,
+    UnsubstantiatedClaim,
+)
+from src.chatbot.app.protocols_citeable_tool import CitableUnit
 
 
 @dataclass(frozen=True)
@@ -54,14 +60,19 @@ class CitationLayerToolMessage:
 
     ``llm_content`` is pre-computed via the responsible
     :class:`~src.chatbot.app.citation.citeable_tool.CiteableTool`'s
-    ``format_for_history`` (or default JSON serialisation when no such tool is
-    registered).
+    ``render_for_history`` (or the layer's generic wrapper when no such tool
+    is registered).
+
+    ``units`` carries the citable units embedded in ``llm_content`` so the
+    citation layer can rebuild its global token → unit index for any
+    historical assistant turn.
     """
 
     tool_call_id: str
     tool_name: str
     result: JsonObject
     llm_content: str
+    units: tuple[CitableUnit, ...] = ()
 
 
 type CitationLayerMessage = (

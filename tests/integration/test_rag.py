@@ -124,13 +124,13 @@ class TestOrchestratorWithCitationLayer:
     async def test_grounded_query_completes_and_surfaces_citations(
         self, ingested_store: None
     ) -> None:
-        from src.chatbot.app.citation import (
-            CitationLayer,
+        from src.chatbot.app.citation import CitationLayer
+        from src.chatbot.app.orchestrator import ChatOrchestrator
+        from src.chatbot.app.protocols import (
             HallucinatedCitation,
             NumberedCitation,
             UnsubstantiatedClaim,
         )
-        from src.chatbot.app.orchestrator import ChatOrchestrator
         from src.chatbot.infrastructure.chat import (
             ChatModelConfig,
             build_chat_model,
@@ -150,7 +150,7 @@ class TestOrchestratorWithCitationLayer:
             text_embedder=build_text_embedder(_TEXT_EMBEDDER_CONFIG),
         )
         retrieval_tool = RetrievalTool(retriever=retriever)
-        citation_layer = CitationLayer(chat_model, citeable_tools=[retrieval_tool])
+        citation_layer = CitationLayer(chat_model, tools=[retrieval_tool])
 
         orchestrator = ChatOrchestrator(
             citation_layer,
@@ -169,7 +169,7 @@ class TestOrchestratorWithCitationLayer:
                 numbered.append(event)
             elif isinstance(event, UnsubstantiatedClaim):
                 unsubstantiated.append(event)
-            else:
+            elif isinstance(event, HallucinatedCitation):
                 hallucinated.append(event)
 
         assert response, "Expected a non-empty response from the model"

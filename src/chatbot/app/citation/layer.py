@@ -3,13 +3,16 @@
 """``CitationLayer`` — decorator around ``ChatModel`` owning all citation concerns.
 
 Three responsibilities:
-1. Augment the system prompt with citation instructions assembled from the
-    default tool-call contract plus registered ``CiteableTool`` specializations.
+1. Augment the system prompt with a single, tool-agnostic citation
+   instruction (``{"ref": "<token>"}``) plus any per-tool fragments
+   contributed by registered ``CiteableTool``\\ s.
 2. Parse marker blocks from the inner model's text stream into typed
    :class:`RawCitation`\\ s.
-3. Validate each parsed ``RawCitation`` via default tool-call handling or
-    specialized ``CiteableTool`` logic and yield :class:`Citation` (success) or
-   :class:`HallucinatedCitation` (failure) to the caller.
+3. Resolve each ``RawCitation.ref`` against a global token index built from
+   all prior tool results in the conversation. Resolved units are enriched
+   into typed :class:`Citation`\\ s by the owning tool (or a generic
+   :class:`ToolCitation` for plain ``Tool``\\ s); unresolved tokens yield a
+   :class:`HallucinatedCitation`.
 
 The orchestrator depends on ``CitationLayer`` (not on the underlying
 ``ChatModel``) and consumes a stream of
@@ -18,7 +21,8 @@ The orchestrator depends on ``CitationLayer`` (not on the underlying
 
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Sequence
-from typing import assert_never
+from typing import assert_never, cast
+from uuid import uuid4
 
 import structlog
 from opentelemetry import trace
@@ -27,8 +31,6 @@ from src.chatbot.app.citation._parser import (
     DEFAULT_MAX_QUOTE_BLOCK_CHARS,
     CitationStreamParser,
 )
-from src.chatbot.app.citation.citeable_tool import CiteableTool
-from src.chatbot.app.citation.context import CitationContext, build_citation_context
 from src.chatbot.app.citation.messages import (
     CitationLayerAssistantMessage,
     CitationLayerMessage,
@@ -36,21 +38,26 @@ from src.chatbot.app.citation.messages import (
     CitationLayerToolMessage,
     CitationLayerUserMessage,
 )
-from src.chatbot.app.citation.models import (
-    QUOTE_END_MARKER,
-    QUOTE_START_MARKER,
-    Citation,
-    HallucinatedCitation,
-    RawCitation,
-    ToolCitation,
-    UnsubstantiatedClaim,
-)
 from src.chatbot.app.protocols import (
     ChatMessage,
     ChatModel,
+    Citation,
+    HallucinatedCitation,
+    I18nMessage,
     JsonObject,
+    RawCitation,
+    Tool,
     ToolCallInfo,
+    ToolCitation,
     ToolSchema,
+    UnsubstantiatedClaim,
+)
+from src.chatbot.app.protocols_citeable_tool import (
+    QUOTE_END_MARKER,
+    QUOTE_START_MARKER,
+    CitableUnit,
+    CiteableTool,
+    ToolHistoryRendering,
 )
 
 logger = structlog.get_logger(__name__)
@@ -60,9 +67,8 @@ type CitationLayerStreamItem = (
 )
 
 
-_REASON_NO_TOOL_CALL = "no prior tool call with that tool_call_id"
-_REASON_NO_TOOL_RESULT = "no prior tool result with that tool_call_id"
-_REASON_TOOL_REJECTED = "validate_and_enrich returned None"
+_REASON_MISSING_REF = "marker payload has no ref"
+_REASON_UNKNOWN_REF = "ref does not match any prior tool-result token"
 
 
 def _to_chat_message(msg: CitationLayerMessage) -> ChatMessage:
@@ -105,13 +111,17 @@ class CitationLayer:
     """Citation decorator around a :class:`~src.chatbot.app.protocols.ChatModel`.
 
     Composition: instantiate once per session with the inner ``ChatModel`` and
-    the explicit list of ``CiteableTool``s that need custom behavior.
+    all registered tools.  ``CiteableTool`` instances receive custom rendering
+    and enrichment; plain ``Tool`` instances are auto-wrapped by the generic
+    path so that every tool result is citeable.
 
     Args:
         model: Inner chat model that produces text and tool calls; must not
             interpret marker tokens itself.
-        citeable_tools: ``CiteableTool``s requiring custom citation behavior.
-            Names must be unique.
+        tools: All registered tools.  ``CiteableTool`` instances are detected
+            via ``isinstance`` and forwarded to the custom citation path;
+            plain ``Tool`` instances go through the generic wrapper.
+            Tool names must be unique.
         max_quote_block_chars: Safety limit on a single marker block so a
             runaway model cannot exhaust memory.
     """
@@ -120,17 +130,21 @@ class CitationLayer:
         self,
         model: ChatModel,
         *,
-        citeable_tools: Sequence[CiteableTool],
+        tools: Sequence[Tool],
         max_quote_block_chars: int = DEFAULT_MAX_QUOTE_BLOCK_CHARS,
     ) -> None:
         self._model = model
         self._max_quote_block_chars = max_quote_block_chars
-        self._tools_by_name: dict[str, CiteableTool] = {}
-        for tool in citeable_tools:
+        self._citeable_by_name: dict[str, CiteableTool] = {}
+        self._plain_by_name: dict[str, Tool] = {}
+        for tool in tools:
             name = tool.schema.name
-            if name in self._tools_by_name:
-                raise ValueError(f"Duplicate CiteableTool name: {name!r}")
-            self._tools_by_name[name] = tool
+            if name in self._citeable_by_name or name in self._plain_by_name:
+                raise ValueError(f"Duplicate tool name: {name!r}")
+            if isinstance(tool, CiteableTool):
+                self._citeable_by_name[name] = tool
+            else:
+                self._plain_by_name[name] = tool
 
     # ------------------------------------------------------------------
     # Factory methods — orchestrator calls these to build history entries.
@@ -139,64 +153,52 @@ class CitationLayer:
     def make_system_message(self, adjusted_base_prompt: str) -> CitationLayerSystemMessage:
         """Append citation instructions to the orchestrator-supplied base prompt."""
         joined_fragments = "\n\n".join(
-            tool.cite_instructions().prompt_fragment for tool in self._tools_by_name.values()
+            tool.cite_instructions().prompt_fragment for tool in self._citeable_by_name.values()
         )
         if joined_fragments:
-            joined_fragments = "\n" + joined_fragments
+            joined_fragments = "\n\n### Per-tool citation guidance\n\n" + joined_fragments
 
         prompt = f"""{adjusted_base_prompt}
 
 ## Inline Citations
 
 Whenever a statement in your answer is supported by a specific tool output,
-emit a structured citation object **immediately after** that statement using
-the exact marker tokens below. The markers must not appear anywhere else in
-your response.
+emit a structured citation marker **immediately after** that statement using
+the exact tokens below. The tokens must not appear anywhere else in your
+response.
 
 Marker tokens (use exactly):
 - start: {QUOTE_START_MARKER}
 - end:   {QUOTE_END_MARKER}
 
-Each marker block contains exactly one strict JSON object describing which
-prior tool result supports the immediately preceding sentence.
+Each marker block contains exactly one strict JSON object of the form:
 
-### Per-tool citation formats
+    {QUOTE_START_MARKER}{{"ref":"<citation_token>"}}{QUOTE_END_MARKER}
 
-#### Generic tool result citation
-
-When a sentence is grounded in the result of any tool call, emit
-immediately after that sentence a marker block of the form:
-
-    {QUOTE_START_MARKER}{{"tool_call_id":"<id>"}}{QUOTE_END_MARKER}
-
-Required fields (all strings, copied **verbatim** from the conversation
-context):
-    - tool_call_id: the `tool_call_id` attribute of the assistant's tool call
-        that produced the supporting tool result
-
-Do not invent IDs. If the exact `tool_call_id` is not visible in the
-conversation context, do not emit a marker for that sentence.
-{joined_fragments}
+Where ``<citation_token>`` is the value of a ``citation_token`` attribute
+that appears verbatim inside a prior tool result (e.g. as
+``<chunk citation_token="...">`` or ``<tool_result citation_token="...">``).
+Copy the token exactly — character for character — from the element whose
+inner content actually supports your sentence. Never invent, reformat,
+truncate, or compose tokens.{joined_fragments}
 
 ### General rules
-- Emit a citation marker **after every individual sentence** whose content is
-  grounded — do not summarise multiple sentences into a single end-of-paragraph
+- Emit a marker **after every individual sentence** whose content is
+  grounded — do not summarise multiple sentences into a single trailing
   marker.
 - Emit exactly one JSON object per marker block.
-- Only use values (tool_call_id, chunk_id where applicable) that appear verbatim
-  in prior assistant tool calls and tool results in the conversation context.
-- Never invent IDs (no timestamps, suffixes, prefixes, or reformatted variants).
-- If an exact tool_call_id is not visible in the conversation context, do not
-  emit a marker.
-- Logical inferences and transitions derived from cited material do not require
-  their own marker — only direct factual claims do.
-- If you make a factual claim that you cannot back with a citation marker,
-  emit a marker block immediately after the claim:
+- Only use ``citation_token`` values that appear verbatim in prior tool
+  results in the conversation context.
+- If no exact ``citation_token`` is visible for a claim, do NOT invent one
+  — see the unsubstantiated marker below.
+- Logical inferences and transitions derived from cited material do not
+  require their own marker — only direct factual claims do.
+- If you make a factual claim that no tool result supports, emit immediately
+  after that claim:
     {QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}
-- Do NOT emit an unsubstantiated marker when you explicitly decline to make a
-  claim (e.g. "the documents do not contain information about X" or "I cannot
-  make a substantiated statement about Y"). Those sentences are transparent
-  refusals, not assertions, and need no marker.
+- Do NOT emit an unsubstantiated marker when you explicitly decline to make
+  a claim (e.g. "the documents do not contain information about X"). Those
+  sentences are transparent refusals, not assertions, and need no marker.
 - Keep all normal user-facing answer text outside the markers.
 """
         return CitationLayerSystemMessage(llm_content=prompt)
@@ -211,7 +213,7 @@ conversation context, do not emit a marker for that sentence.
         tool_reminders = "\n".join(
             [
                 instr.reminder_fragment
-                for tool in self._tools_by_name.values()
+                for tool in self._citeable_by_name.values()
                 if (instr := tool.cite_instructions()).reminder_fragment is not None
             ]
         )
@@ -219,27 +221,29 @@ conversation context, do not emit a marker for that sentence.
 citation markers immediately after the supported sentence — one marker per
 sentence, not one per paragraph. Use exactly the marker tokens
 {QUOTE_START_MARKER} and {QUOTE_END_MARKER}; do not use any marker variants.
-Copy tool_call_id and chunk_id values exactly from prior tool calls
-and tool results in the conversation context. Never invent IDs or append
-suffixes. If the exact ID is not visible, emit no marker.
-Never emit a standalone marker list block. A marker is only valid if it appears
-immediately after the exact sentence it supports.
+The marker payload is always {{"ref":"<citation_token>"}} — copy the
+``citation_token`` attribute value verbatim from the exact element whose
+inner content supports the sentence. Never invent tokens or append suffixes.
+If no exact token is visible, emit the unsubstantiated marker instead.
+Never emit a standalone marker list block. A marker is only valid if it
+appears immediately after the exact sentence it supports.
 
 {tool_reminders}
 
 !!!IMPORTANT!!!
 Every factual claim in your answer must either:
-  (a) be immediately followed by a citation marker referencing the exact tool
-      output whose content supports it, OR
+  (a) be immediately followed by a citation marker referencing the
+      ``citation_token`` of the exact element whose content supports it, OR
   (b) be followed by an unsubstantiated marker if no tool output contains
       the information: {QUOTE_START_MARKER}{{"kind":"unsubstantiated"}}{QUOTE_END_MARKER}
-There is no third option: do not state facts without a citation marker or an
-unsubstantiated marker. Logical inferences and transitional sentences derived
-from cited material are exempt.
+There is no third option: do not state facts without one of these two
+markers. Logical inferences and transitional sentences derived from cited
+material are exempt.
 IMPORTANT EXCEPTION: if you explicitly decline to make a claim — e.g. you
-explain that the retrieved documents do not contain the requested information
-and therefore you cannot answer — that is a transparent refusal, not an
-assertion. Do NOT append an unsubstantiated marker to a refusal sentence.
+explain that the retrieved documents do not contain the requested
+information and therefore you cannot answer — that is a transparent
+refusal, not an assertion. Do NOT append an unsubstantiated marker to a
+refusal sentence.
 Do not append markers in a separate trailing citation section. Place each
 marker at the point of use, directly after the supported sentence.
 
@@ -268,18 +272,68 @@ The actual user message is:
         tool_name: str,
         result: JsonObject,
     ) -> CitationLayerToolMessage:
-        """Build a tool-result message; uses ``CiteableTool.format_for_history`` when available."""
-        tool = self._tools_by_name.get(tool_name)
-        if tool is not None:
-            llm_content = tool.format_for_history(result)
+        """Build a tool-result message via the tool's renderer or the generic wrapper.
+
+        Registered ``CiteableTool``s render themselves; plain ``Tool``s are
+        rendered by :func:`_generic_render_for_history` which embeds a single
+        UUID ``citation_token`` so that the result is still citeable.
+        """
+        citeable = self._citeable_by_name.get(tool_name)
+        if citeable is not None:
+            rendering = citeable.render_for_history(result)
         else:
-            llm_content = json.dumps(result, ensure_ascii=False)
+            rendering = _generic_render_for_history(result)
         return CitationLayerToolMessage(
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             result=result,
-            llm_content=llm_content,
+            llm_content=rendering.llm_content,
+            units=rendering.units,
         )
+
+    def make_blocked_tool_response(self, tc: ToolCallInfo) -> CitationLayerToolMessage:
+        """Build a synthetic tool-result that terminates a stuck tool-call loop.
+
+        Called when the orchestrator detects a repeated tool-call sequence.
+        The message completes the ``tool_call → tool_result`` protocol so the
+        conversation history remains structurally valid, and its content
+        signals that the call was blocked.
+        """
+        llm_content = (
+            f"[BLOCKED: Tool call '{tc.name}' was not executed because you already "
+            f"called this tool with identical arguments in this turn.]"
+        )
+        return CitationLayerToolMessage(
+            tool_call_id=tc.call_id,
+            tool_name=tc.name,
+            result={},
+            llm_content=llm_content,
+            units=(),
+        )
+
+    def make_loop_escape_message(self, original_user_content: str) -> CitationLayerUserMessage:
+        """Build a user-turn message that forces text generation after a blocked loop.
+
+        After blocked tool responses the history ends at a ``tool`` role,
+        which is insufficient for many LLMs to trigger a user-facing text
+        response. This user-turn message re-states the original question with
+        the citation reminder so the model has a clear, protocol-valid prompt
+        to reply to.
+
+        ``original_user_content`` must be the *already-rendered* LLM content
+        of the current turn's user message (i.e. the ``llm_content`` of the
+        :class:`~src.chatbot.app.citation.messages.CitationLayerUserMessage`
+        produced by :meth:`make_user_message` for this turn).  Passing it
+        through avoids duplicating the citation-reminder assembly logic.
+        """
+        content = (
+            f"[IMPORTANT: Your previous tool call was blocked because it was an "
+            f"exact repeat. No further tool calls are available. "
+            f"You MUST now synthesize a complete answer from the tool results "
+            f"already in the conversation above. Do NOT call any tools.]\n\n"
+            f"{original_user_content}"
+        )
+        return CitationLayerUserMessage(llm_content=content)
 
     # ------------------------------------------------------------------
     # Streaming.
@@ -296,25 +350,29 @@ The actual user message is:
         history_tuple = tuple(history)
         upstream = self._model.stream(chat_messages, tools)
         parser = CitationStreamParser(max_quote_block_chars=self._max_quote_block_chars)
-        tools_by_name = self._tools_by_name
+        citeable_by_name = self._citeable_by_name
+        plain_by_name = self._plain_by_name
 
         async def _gen() -> AsyncGenerator[CitationLayerStreamItem, None]:
-            ctx = build_citation_context(history_tuple)
-            tool_call_lookup = _build_tool_call_lookup(history_tuple)
+            token_index = _build_token_index(history_tuple)
 
             async for item in upstream:
                 if isinstance(item, str):
                     for event in _emit_parsed(
-                        parser.feed(item), tool_call_lookup, tools_by_name, ctx
+                        parser.feed(item), token_index, citeable_by_name, plain_by_name
                     ):
                         yield event
                     continue
                 # tool_calls list — flush parser first to preserve order
-                for event in _emit_parsed(parser.finish(), tool_call_lookup, tools_by_name, ctx):
+                for event in _emit_parsed(
+                    parser.finish(), token_index, citeable_by_name, plain_by_name
+                ):
                     yield event
                 yield item
 
-            for event in _emit_parsed(parser.finish(), tool_call_lookup, tools_by_name, ctx):
+            for event in _emit_parsed(
+                parser.finish(), token_index, citeable_by_name, plain_by_name
+            ):
                 yield event
 
             span = trace.get_current_span()
@@ -324,11 +382,31 @@ The actual user message is:
         return _gen()
 
 
+# Token index entry: (owning tool_name, citable unit emitted by that tool).
+type _TokenIndex = dict[str, tuple[str, CitableUnit]]
+
+
+def _build_token_index(history: Sequence[CitationLayerMessage]) -> _TokenIndex:
+    """Index every ``CitableUnit`` ever rendered for the LLM by its token.
+
+    Tokens that collide across tool results overwrite earlier entries; this
+    is harmless when tokens are content-derived (later occurrences carry the
+    same payload), and acceptable in the rare UUID-collision pathological
+    case.
+    """
+    index: _TokenIndex = {}
+    for msg in history:
+        if isinstance(msg, CitationLayerToolMessage):
+            for unit in msg.units:
+                index[unit.citation_token] = (msg.tool_name, unit)
+    return index
+
+
 def _emit_parsed(
     parsed_items: Iterable[str | RawCitation],
-    tool_call_lookup: dict[str, str],
-    tools_by_name: dict[str, CiteableTool],
-    ctx: CitationContext,
+    token_index: _TokenIndex,
+    citeable_by_name: dict[str, CiteableTool],
+    plain_by_name: dict[str, Tool],
 ) -> Iterator[CitationLayerStreamItem]:
     """Validate and yield each item produced by the stream parser."""
     for parsed in parsed_items:
@@ -336,53 +414,64 @@ def _emit_parsed(
             if parsed:
                 yield parsed
         else:
-            yield _validate(parsed, tool_call_lookup, tools_by_name, ctx)
-
-
-def _build_tool_call_lookup(
-    history: Sequence[CitationLayerMessage],
-) -> dict[str, str]:
-    """Map ``tool_call_id`` to ``tool_name`` from prior tool messages in history."""
-    lookup: dict[str, str] = {}
-    for msg in history:
-        if isinstance(msg, CitationLayerToolMessage):
-            lookup[msg.tool_call_id] = msg.tool_name
-    return lookup
+            yield _validate(parsed, token_index, citeable_by_name, plain_by_name)
 
 
 def _validate(
     raw: RawCitation,
-    tool_call_lookup: dict[str, str],
-    tools_by_name: dict[str, CiteableTool],
-    ctx: CitationContext,
+    token_index: _TokenIndex,
+    citeable_by_name: dict[str, CiteableTool],
+    plain_by_name: dict[str, Tool],
 ) -> Citation | HallucinatedCitation | UnsubstantiatedClaim:
-    """Route to the registered CiteableTool or fall back to a generic ToolCitation."""
+    """Resolve ``raw.ref`` against the global token index and enrich the unit."""
     if raw.kind == "unsubstantiated":
         return UnsubstantiatedClaim(raw=raw)
-    tool_call_id = raw.tool_call_id
-    tool_name = tool_call_lookup.get(tool_call_id)
-    if tool_name is None:
-        return HallucinatedCitation(raw=raw, reason=_REASON_NO_TOOL_CALL)
+    if not raw.ref:
+        return HallucinatedCitation(raw=raw, reason=_REASON_MISSING_REF)
 
-    tool = tools_by_name.get(tool_name)
-    if tool is None:
-        # Generic tool — no custom citation logic registered.
-        result = _tool_result_for(ctx, tool_call_id)
-        if result is None:
-            return HallucinatedCitation(raw=raw, reason=_REASON_NO_TOOL_RESULT)
-        return ToolCitation(
-            raw_marker_text=raw.raw_marker_text,
-            tool_call_id=raw.tool_call_id,
-            tool_name=tool_name,
-            result=result,
-        )
+    entry = token_index.get(raw.ref)
+    if entry is None:
+        return HallucinatedCitation(raw=raw, reason=_REASON_UNKNOWN_REF)
 
-    citation = tool.validate_and_enrich(raw, ctx)
-    if citation is None:
-        return HallucinatedCitation(raw=raw, reason=_REASON_TOOL_REJECTED)
-    return citation
+    tool_name, unit = entry
+    citeable = citeable_by_name.get(tool_name)
+    if citeable is not None:
+        return citeable.enrich(raw, unit)
+    # Generic wrapper path — look up display_name from the plain tool if registered.
+    plain = plain_by_name.get(tool_name)
+    display_name = plain.display_name if plain is not None else None
+    return _generic_enrich(raw, unit, tool_name, display_name)
 
 
-def _tool_result_for(ctx: CitationContext, tool_call_id: str) -> JsonObject | None:
-    """Return the prior tool result for *tool_call_id*."""
-    return ctx.tool_result_for(tool_call_id)
+def _generic_render_for_history(result: JsonObject) -> ToolHistoryRendering:
+    """Generic fallback rendering: wrap the JSON result in a citeable element.
+
+    Embeds a fresh UUID as ``citation_token`` so the model can cite the
+    result even though the tool itself is not citation-aware.
+    """
+    token = str(uuid4())
+    encoded = json.dumps(result, ensure_ascii=False)
+    llm_content = f'<tool_result citation_token="{token}">{encoded}</tool_result>'
+    unit = CitableUnit(citation_token=token, payload=result)
+    return ToolHistoryRendering(llm_content=llm_content, units=(unit,))
+
+
+def _generic_enrich(
+    raw: RawCitation, unit: CitableUnit, tool_name: str, display_name: I18nMessage | None
+) -> Citation:
+    """Materialise a generic :class:`ToolCitation` from a wrapper-emitted unit."""
+    payload = unit.payload
+    # The generic wrapper always stores the original tool result JSON as
+    # payload; the runtime check below makes that explicit and is satisfied
+    # by every code path that reaches this function.
+    if isinstance(payload, dict):
+        result: JsonObject = cast(JsonObject, payload)
+    else:
+        result = {}
+    return ToolCitation(
+        raw_marker_text=raw.raw_marker_text,
+        citation_token=unit.citation_token,
+        tool_name=tool_name,
+        result=result,
+        display_name=display_name,
+    )

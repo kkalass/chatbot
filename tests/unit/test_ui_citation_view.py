@@ -2,11 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the Chainlit citation rendering helpers."""
 
-from src.chatbot.app.citation import (
-    DocumentCitation,
-    NumberedCitation,
-    ToolCitation,
-)
+from src.chatbot.app.protocols import DocumentCitation, I18nMessage, NumberedCitation, ToolCitation
 from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
@@ -26,7 +22,7 @@ def _doc(
 ) -> DocumentCitation:
     return DocumentCitation(
         raw_marker_text="<m>",
-        tool_call_id="tc1",
+        citation_token="c1",
         source=source,
         chunk_id="c1",
         content=content,
@@ -58,15 +54,26 @@ class TestBuildCitationName:
         citation = NumberedCitation(reference_number=4, citation=_doc(source="x.md"))
         assert build_citation_name(citation) == "x.md"
 
-    def test_tool_citation_uses_tool_name(self) -> None:
+    def test_tool_citation_falls_back_to_tool_name(self) -> None:
         cit = ToolCitation(
             raw_marker_text="<m>",
-            tool_call_id="tc1",
+            citation_token="tok-vac-1",
             tool_name="get_vacation_days",
             result={"days": 30},
         )
         numbered = NumberedCitation(reference_number=2, citation=cit)
-        assert build_citation_name(numbered) == "Tool: get_vacation_days"
+        assert build_citation_name(numbered) == "get_vacation_days"
+
+    def test_tool_citation_uses_display_name(self) -> None:
+        cit = ToolCitation(
+            raw_marker_text="<m>",
+            citation_token="tok-vac-1",
+            tool_name="get_vacation_days",
+            result={"days": 30},
+            display_name=I18nMessage(key="vacation_days.display_name", args={}),
+        )
+        numbered = NumberedCitation(reference_number=2, citation=cit)
+        assert build_citation_name(numbered) == "Vacation Days"
 
 
 class TestBuildCitationContent:
@@ -90,7 +97,7 @@ class TestBuildCitationContent:
     def test_tool_citation_renders_property_list(self) -> None:
         cit = ToolCitation(
             raw_marker_text="<m>",
-            tool_call_id="tc1",
+            citation_token="tok-vac-2",
             tool_name="get_vacation_days",
             result={"total_days": 30, "remaining_days": 20},
         )
@@ -118,7 +125,7 @@ class TestBuildCitationMarkdown:
     def test_tool_citation_appendix_uses_tool_name(self) -> None:
         cit = ToolCitation(
             raw_marker_text="<m>",
-            tool_call_id="tc1",
+            citation_token="tok-vac-3",
             tool_name="get_vacation_days",
             result={"days": 30},
         )
