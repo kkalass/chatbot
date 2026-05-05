@@ -12,3 +12,4 @@ build/
 .venv/
 .chainlit/translations/
 .files/
+eval/results/

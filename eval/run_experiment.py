@@ -532,20 +532,6 @@ def _build_document_relevance_evaluator(
             return cast(list[dict[str, Any]], docs)
         return []
 
-    def _collect(query: str, docs: list[dict[str, Any]], scores: list[float]) -> None:
-        records = [
-            {
-                "query": query,
-                "document_text": str(doc.get("content", "")),
-                "document_source": str(doc.get("source", "")),
-                "relevance_score": score,
-                "relevance_label": "relevant" if score >= 0.5 else "unrelated",
-            }
-            for doc, score in zip(docs, scores, strict=False)
-        ]
-        with _lock:
-            collector.extend(records)
-
     @create_evaluator(name="mean_document_relevance", kind="code", direction="maximize")
     def mean_document_relevance(
         input: dict[str, Any],  # name bound by Phoenix parameter matching
@@ -562,10 +548,25 @@ def _build_document_relevance_evaluator(
                 {"input": query, "document_text": str(doc.get("content", ""))}
             )
             score_obj = result[0] if result else None
-            if score_obj is not None and score_obj.score is not None:
-                scores.append(float(score_obj.score))
-        if scores:
-            _collect(query, valid_docs[: len(scores)], scores)
+            score: float | None = (
+                float(score_obj.score)
+                if score_obj is not None and score_obj.score is not None
+                else None
+            )
+            if score is not None:
+                scores.append(score)
+            with _lock:
+                collector.append(
+                    {
+                        "query": query,
+                        "document_text": str(doc.get("content", "")),
+                        "document_source": str(doc.get("source", "")),
+                        "relevance_score": score,
+                        "relevance_label": (
+                            "relevant" if score is not None and score >= 0.5 else "unrelated"
+                        ),
+                    }
+                )
         mean = sum(scores) / len(scores) if scores else 0.0
         logger.info(
             "document_relevance.evaluated",
@@ -720,10 +721,12 @@ def main() -> None:
 
     # Configure tracing so experiment spans are forwarded to Phoenix.
     # Jaeger export is disabled here — experiment spans belong in Phoenix only.
+    # Use a dedicated "-eval" project so experiment traces don't pollute the
+    # live chatbot project in the Phoenix UI.
     configure_tracing(
         enabled=_settings.otel_enabled,
         service_name=_settings.otel_service_name,
-        project_name=_settings.phoenix_project_name,
+        project_name=f"{_settings.phoenix_project_name}-eval",
         deployment_environment=_settings.otel_deployment_environment,
         phoenix_otlp_endpoint=_settings.otel_phoenix_otlp_endpoint,
         phoenix_export=_settings.otel_export_phoenix,
