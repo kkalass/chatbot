@@ -465,6 +465,245 @@ def _build_correctness_evaluator(settings: Settings) -> Any:
     return _CorrectnessEvaluator()
 
 
+def _extract_document_texts_from_span(span_row: Any) -> list[str]:
+    """Extract retrieval document content strings from a Phoenix spans-DataFrame row.
+
+    OpenInference emits indexed span attributes:
+    ``retrieval.documents.0.document.content``,
+    ``retrieval.documents.1.document.content``, …
+    Phoenix flattens these into DataFrame columns prefixed with ``attributes.``.
+    """
+    texts: list[str] = []
+    i = 0
+    while True:
+        col = f"attributes.retrieval.documents.{i}.document.content"
+        if col not in span_row.index:
+            break
+        val = span_row.get(col)
+        if isinstance(val, str) and val.strip():
+            texts.append(val)
+        i += 1
+    return texts
+
+
+def _build_document_relevance_evaluator(settings: Settings) -> Any:
+    """Construct a per-document relevance evaluator with span-level annotation.
+
+    For each task execution identified by ``trace_id``:
+
+    1. Fetches the retriever span from Phoenix for that trace.
+    2. Calls ``DocumentRelevanceEvaluator`` once per retrieved document.
+    3. Logs a ``document_relevance`` annotation on the retriever span in Phoenix
+       (mean relevance of all its documents, ``relevant``/``unrelated`` label).
+    4. Returns ``mean_document_relevance`` (0..1) as the experiment-level scalar.
+
+    Requires the experiment runner to export spans to Phoenix
+    (``phoenix_export=True`` in ``configure_tracing``) so that retriever spans
+    are available for querying before evaluators run.  The retriever span
+    emits ``retrieval.documents.*`` attributes (OpenInference standard) via
+    ``build_retriever_attributes`` in ``_qdrant.py`` — no additional
+    instrumentation is required.
+
+    Args:
+        settings: Application settings carrying ``eval_judge_*`` and
+            ``phoenix_project_name`` fields.
+    """
+    from phoenix.evals.metrics import DocumentRelevanceEvaluator  # type: ignore[import-not-found]
+
+    llm = _build_eval_judge_llm(settings)
+    doc_evaluator = DocumentRelevanceEvaluator(llm=llm)
+    project_name = settings.phoenix_project_name
+    # Span name constant kept inline to avoid coupling to the infra module.
+    _RETRIEVER_SPAN_NAME = "chat.retriever.qdrant.retrieve"
+
+    class _DocumentRelevanceEvaluator:
+        """Wraps ``DocumentRelevanceEvaluator`` for per-span retrieval evaluation.
+
+        Fetches retriever spans for the current trace from Phoenix, evaluates
+        each retrieved document, annotates the retriever span with the per-span
+        mean relevance score, and returns the trace-level mean as the
+        experiment evaluation scalar.
+        """
+
+        name: str = "mean_document_relevance"
+        direction: str = "maximize"
+        source: str = "LLM"
+        input_schema: Any = None  # no schema — handled via trace_id and span query
+
+        @staticmethod
+        def _fetch_retriever_spans(client: Any, trace_id: str) -> Any:
+            """Return the RETRIEVER spans DataFrame for ``trace_id``, or ``None``."""
+            try:
+                spans_df = client.spans.get_spans_dataframe(project_name=project_name)
+            except Exception as exc:
+                logger.warning("document_relevance.spans_fetch_failed", error=str(exc))
+                return None
+
+            if spans_df is None or spans_df.empty:
+                logger.warning("document_relevance.no_spans", trace_id=trace_id)
+                return None
+
+            if "context.trace_id" in spans_df.columns:
+                spans_df = spans_df[spans_df["context.trace_id"] == trace_id]
+            if "name" in spans_df.columns:
+                spans_df = spans_df[spans_df["name"] == _RETRIEVER_SPAN_NAME]
+
+            if spans_df.empty:
+                logger.warning("document_relevance.no_retriever_spans", trace_id=trace_id)
+                return None
+            return spans_df
+
+        @staticmethod
+        def _log_span_annotations(client: Any, annotation_rows: list[dict[str, Any]]) -> None:
+            """Log per-span ``document_relevance`` annotations back to Phoenix."""
+            import pandas as pd  # eval-group dependency; imported lazily
+
+            try:
+                ann_df: Any = pd.DataFrame(annotation_rows).set_index("context.span_id")  # type: ignore[reportUnknownMemberType]
+                client.spans.log_span_annotations_dataframe(
+                    dataframe=ann_df,
+                    annotation_name="document_relevance",
+                    annotator_kind="LLM",
+                )
+                logger.info("document_relevance.annotations_logged", count=len(annotation_rows))
+            except Exception as exc:
+                logger.warning("document_relevance.annotation_failed", error=str(exc))
+
+        @staticmethod
+        def _extract_query(input: dict[str, Any]) -> str:
+            dataset_input = input.get("input", {})
+            return (
+                cast(dict[str, Any], dataset_input).get("query", "")
+                if isinstance(dataset_input, dict)
+                else str(dataset_input)
+            )
+
+        def evaluate(self, input: dict[str, Any]) -> Any:
+            from phoenix.client import Client  # type: ignore[import-not-found]
+
+            trace_id: str | None = cast(str | None, input.get("trace_id"))
+            if not trace_id:
+                logger.warning("document_relevance.no_trace_id")
+                return None
+
+            query = self._extract_query(input)
+            client = Client()
+            spans_df = self._fetch_retriever_spans(client, trace_id)
+            if spans_df is None:
+                return None
+
+            all_scores: list[float] = []
+            annotation_rows: list[dict[str, Any]] = []
+
+            for _, span_row in spans_df.iterrows():
+                span_id = span_row.get("context.span_id") or (
+                    span_row.name if isinstance(span_row.name, str) else None
+                )
+                doc_texts = _extract_document_texts_from_span(span_row)
+                if not doc_texts:
+                    continue
+
+                span_scores: list[float] = []
+                for doc_text in doc_texts:
+                    result = doc_evaluator.evaluate({"input": query, "document_text": doc_text})
+                    score_obj = result[0] if result else None
+                    if score_obj is not None and score_obj.score is not None:
+                        score = float(score_obj.score)
+                        all_scores.append(score)
+                        span_scores.append(score)
+
+                if span_id and span_scores:
+                    mean_span = sum(span_scores) / len(span_scores)
+                    annotation_rows.append(
+                        {
+                            "context.span_id": span_id,
+                            "score": mean_span,
+                            "label": "relevant" if mean_span >= 0.5 else "unrelated",
+                        }
+                    )
+
+            if annotation_rows:
+                self._log_span_annotations(client, annotation_rows)
+
+            if not all_scores:
+                return None
+
+            mean_score = sum(all_scores) / len(all_scores)
+            logger.info(
+                "document_relevance.complete",
+                mean_score=round(mean_score, 4),
+                doc_count=len(all_scores),
+            )
+            return mean_score
+
+        async def async_evaluate(self, input: dict[str, Any]) -> Any:
+            from phoenix.client import Client  # type: ignore[import-not-found]
+
+            trace_id: str | None = cast(str | None, input.get("trace_id"))
+            if not trace_id:
+                logger.warning("document_relevance.no_trace_id")
+                return None
+
+            query = self._extract_query(input)
+            client = Client()
+            spans_df = self._fetch_retriever_spans(client, trace_id)
+            if spans_df is None:
+                return None
+
+            all_scores: list[float] = []
+            annotation_rows: list[dict[str, Any]] = []
+
+            for _, span_row in spans_df.iterrows():
+                span_id = span_row.get("context.span_id") or (
+                    span_row.name if isinstance(span_row.name, str) else None
+                )
+                doc_texts = _extract_document_texts_from_span(span_row)
+                if not doc_texts:
+                    continue
+
+                # Evaluate all documents for this span in parallel.
+                results = await asyncio.gather(
+                    *[
+                        doc_evaluator.async_evaluate({"input": query, "document_text": text})
+                        for text in doc_texts
+                    ]
+                )
+
+                span_scores: list[float] = []
+                for result in results:
+                    score_obj = result[0] if result else None
+                    if score_obj is not None and score_obj.score is not None:
+                        score = float(score_obj.score)
+                        all_scores.append(score)
+                        span_scores.append(score)
+
+                if span_id and span_scores:
+                    mean_span = sum(span_scores) / len(span_scores)
+                    annotation_rows.append(
+                        {
+                            "context.span_id": span_id,
+                            "score": mean_span,
+                            "label": "relevant" if mean_span >= 0.5 else "unrelated",
+                        }
+                    )
+
+            if annotation_rows:
+                self._log_span_annotations(client, annotation_rows)
+
+            if not all_scores:
+                return None
+
+            mean_score = sum(all_scores) / len(all_scores)
+            logger.info(
+                "document_relevance.complete",
+                mean_score=round(mean_score, 4),
+                doc_count=len(all_scores),
+            )
+            return mean_score
+
+    return _DocumentRelevanceEvaluator()
+
+
 # ---------------------------------------------------------------------------
 # Dataset helpers
 # ---------------------------------------------------------------------------
@@ -576,7 +815,10 @@ def main() -> None:
         project_name=_settings.phoenix_project_name,
         deployment_environment=_settings.otel_deployment_environment,
         phoenix_otlp_endpoint=_settings.otel_phoenix_otlp_endpoint,
-        phoenix_export=_settings.otel_export_phoenix,
+        # Always export to Phoenix in the experiment runner: the
+        # DocumentRelevanceEvaluator queries retriever spans from Phoenix
+        # by trace_id after each task completes.
+        phoenix_export=True,
         jaeger_otlp_endpoint=_settings.otel_jaeger_otlp_endpoint,
         jaeger_export=False,
         sample_rate=1.0,  # always sample all eval spans
@@ -593,6 +835,7 @@ def main() -> None:
         *_build_code_evaluators(),
         _build_faithfulness_evaluator(_settings),
         _build_correctness_evaluator(_settings),
+        _build_document_relevance_evaluator(_settings),
     ]
 
     metadata = _collect_experiment_metadata(_settings)
