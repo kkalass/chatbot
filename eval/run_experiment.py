@@ -31,6 +31,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never, cast
 from uuid import uuid4
@@ -115,6 +116,26 @@ def _collect_experiment_metadata(settings: Settings) -> dict[str, Any]:
         "eval_judge_provider": settings.eval_judge_provider,
         "git_commit": _git_commit_hash(),
     }
+
+
+def _build_experiment_description(settings: Settings) -> str:
+    """Build a concise one-line description for the Phoenix experiment UI.
+
+    Surfaces the most important configuration at a glance:
+    ``chat: <model> (<provider>) | embed: <model> | judge: <model> | <git_hash>``
+
+    Complements the full metadata dict which carries all fields but requires
+    clicking into the experiment detail to read.
+    """
+    parts = [
+        f"chat: {settings.chat_model} ({settings.chat_model_provider})",
+        f"embed: {settings.embedding_model}",
+        f"judge: {settings.eval_judge_model}",
+    ]
+    commit = _git_commit_hash()
+    if commit:
+        parts.append(commit)
+    return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +242,7 @@ async def task(input: dict[str, str]) -> dict[str, object]:
     hallucinated_citation_count: int = 0
     unsubstantiated_claim_count: int = 0
     context_parts: list[str] = []
+    retrieved_documents: list[dict[str, object]] = []
     async for event in orchestrator.process_message(query):
         match event:
             case str():
@@ -237,6 +259,9 @@ async def task(input: dict[str, str]) -> dict[str, object]:
             case ToolCallFinished():
                 if event.result is not None:
                     context_parts.append(json.dumps(event.result))
+                    _chunks = event.result.get("chunks")
+                    if isinstance(_chunks, list):
+                        retrieved_documents.extend(cast(list[dict[str, object]], _chunks))
             case ToolCallStarted() | ThinkingContent() | AuthRequiredEvent():
                 pass
             case _ as unreachable:
@@ -259,6 +284,7 @@ async def task(input: dict[str, str]) -> dict[str, object]:
         "context": "\n\n".join(context_parts),
         "hallucinated_citation_count": hallucinated_citation_count,
         "unsubstantiated_claim_count": unsubstantiated_claim_count,
+        "retrieved_documents": retrieved_documents,
     }
 
 
@@ -465,243 +491,128 @@ def _build_correctness_evaluator(settings: Settings) -> Any:
     return _CorrectnessEvaluator()
 
 
-def _extract_document_texts_from_span(span_row: Any) -> list[str]:
-    """Extract retrieval document content strings from a Phoenix spans-DataFrame row.
+def _build_document_relevance_evaluator(
+    settings: Settings,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Construct a per-document relevance evaluator and a shared result collector.
 
-    OpenInference emits indexed span attributes:
-    ``retrieval.documents.0.document.content``,
-    ``retrieval.documents.1.document.content``, …
-    Phoenix flattens these into DataFrame columns prefixed with ``attributes.``.
-    """
-    texts: list[str] = []
-    i = 0
-    while True:
-        col = f"attributes.retrieval.documents.{i}.document.content"
-        if col not in span_row.index:
-            break
-        val = span_row.get(col)
-        if isinstance(val, str) and val.strip():
-            texts.append(val)
-        i += 1
-    return texts
+    Returns a ``(evaluator, collector)`` tuple.  The evaluator is passed to
+    ``run_experiment``; the collector accumulates one record per evaluated
+    document and is written to a JSONL file after the experiment completes.
 
+    Uses ``create_evaluator(kind="code")`` rather than a custom class so that
+    Phoenix routes the scalar return value through the correct code-evaluator
+    path — the custom-class path expects a ``list[Score]`` and crashes with
+    ``TypeError: 'float' object is not subscriptable`` on scalar returns.
 
-def _build_document_relevance_evaluator(settings: Settings) -> Any:
-    """Construct a per-document relevance evaluator with span-level annotation.
+    For each task execution the evaluator:
 
-    For each task execution identified by ``trace_id``:
-
-    1. Fetches the retriever span from Phoenix for that trace.
-    2. Calls ``DocumentRelevanceEvaluator`` once per retrieved document.
-    3. Logs a ``document_relevance`` annotation on the retriever span in Phoenix
-       (mean relevance of all its documents, ``relevant``/``unrelated`` label).
-    4. Returns ``mean_document_relevance`` (0..1) as the experiment-level scalar.
-
-    Requires the experiment runner to export spans to Phoenix
-    (``phoenix_export=True`` in ``configure_tracing``) so that retriever spans
-    are available for querying before evaluators run.  The retriever span
-    emits ``retrieval.documents.*`` attributes (OpenInference standard) via
-    ``build_retriever_attributes`` in ``_qdrant.py`` — no additional
-    instrumentation is required.
+    1. Receives ``input`` (dataset input: ``{"query": ...}``) and ``output``
+       (task output: ``{"retrieved_documents": [...], ...}``) via Phoenix
+       parameter binding by name.
+    2. Calls ``DocumentRelevanceEvaluator`` once per document.
+    3. Appends per-document records to the thread-safe *collector*.
+    4. Returns ``mean_document_relevance`` (0.0-1.0) as the experiment scalar.
 
     Args:
-        settings: Application settings carrying ``eval_judge_*`` and
-            ``phoenix_project_name`` fields.
+        settings: Application settings carrying ``eval_judge_*`` fields.
     """
+    from phoenix.evals import create_evaluator  # type: ignore[import-not-found]
     from phoenix.evals.metrics import DocumentRelevanceEvaluator  # type: ignore[import-not-found]
 
     llm = _build_eval_judge_llm(settings)
     doc_evaluator = DocumentRelevanceEvaluator(llm=llm)
-    project_name = settings.phoenix_project_name
-    # Span name constant kept inline to avoid coupling to the infra module.
-    _RETRIEVER_SPAN_NAME = "chat.retriever.qdrant.retrieve"
 
-    class _DocumentRelevanceEvaluator:
-        """Wraps ``DocumentRelevanceEvaluator`` for per-span retrieval evaluation.
+    collector: list[dict[str, Any]] = []
+    _lock = threading.Lock()
 
-        Fetches retriever spans for the current trace from Phoenix, evaluates
-        each retrieved document, annotates the retriever span with the per-span
-        mean relevance score, and returns the trace-level mean as the
-        experiment evaluation scalar.
-        """
+    def _docs_from(output: dict[str, Any]) -> list[dict[str, Any]]:
+        docs = output.get("retrieved_documents", [])
+        if isinstance(docs, list):
+            return cast(list[dict[str, Any]], docs)
+        return []
 
-        name: str = "mean_document_relevance"
-        direction: str = "maximize"
-        source: str = "LLM"
-        input_schema: Any = None  # no schema — handled via trace_id and span query
+    def _collect(query: str, docs: list[dict[str, Any]], scores: list[float]) -> None:
+        records = [
+            {
+                "query": query,
+                "document_text": str(doc.get("content", "")),
+                "document_source": str(doc.get("source", "")),
+                "relevance_score": score,
+                "relevance_label": "relevant" if score >= 0.5 else "unrelated",
+            }
+            for doc, score in zip(docs, scores, strict=False)
+        ]
+        with _lock:
+            collector.extend(records)
 
-        @staticmethod
-        def _fetch_retriever_spans(client: Any, trace_id: str) -> Any:
-            """Return the RETRIEVER spans DataFrame for ``trace_id``, or ``None``."""
-            try:
-                spans_df = client.spans.get_spans_dataframe(project_name=project_name)
-            except Exception as exc:
-                logger.warning("document_relevance.spans_fetch_failed", error=str(exc))
-                return None
-
-            if spans_df is None or spans_df.empty:
-                logger.warning("document_relevance.no_spans", trace_id=trace_id)
-                return None
-
-            if "context.trace_id" in spans_df.columns:
-                spans_df = spans_df[spans_df["context.trace_id"] == trace_id]
-            if "name" in spans_df.columns:
-                spans_df = spans_df[spans_df["name"] == _RETRIEVER_SPAN_NAME]
-
-            if spans_df.empty:
-                logger.warning("document_relevance.no_retriever_spans", trace_id=trace_id)
-                return None
-            return spans_df
-
-        @staticmethod
-        def _log_span_annotations(client: Any, annotation_rows: list[dict[str, Any]]) -> None:
-            """Log per-span ``document_relevance`` annotations back to Phoenix."""
-            import pandas as pd  # eval-group dependency; imported lazily
-
-            try:
-                ann_df: Any = pd.DataFrame(annotation_rows).set_index("context.span_id")  # type: ignore[reportUnknownMemberType]
-                client.spans.log_span_annotations_dataframe(
-                    dataframe=ann_df,
-                    annotation_name="document_relevance",
-                    annotator_kind="LLM",
-                )
-                logger.info("document_relevance.annotations_logged", count=len(annotation_rows))
-            except Exception as exc:
-                logger.warning("document_relevance.annotation_failed", error=str(exc))
-
-        @staticmethod
-        def _extract_query(input: dict[str, Any]) -> str:
-            dataset_input = input.get("input", {})
-            return (
-                cast(dict[str, Any], dataset_input).get("query", "")
-                if isinstance(dataset_input, dict)
-                else str(dataset_input)
+    @create_evaluator(name="mean_document_relevance", kind="code", direction="maximize")
+    def mean_document_relevance(
+        input: dict[str, Any],  # name bound by Phoenix parameter matching
+        output: dict[str, Any],
+    ) -> float:
+        """Evaluate mean relevance of all retrieved documents for this example."""
+        query = str(input.get("query", ""))
+        valid_docs = [d for d in _docs_from(output) if str(d.get("content", "")).strip()]
+        if not valid_docs:
+            return 0.0
+        scores: list[float] = []
+        for doc in valid_docs:
+            result = doc_evaluator.evaluate(
+                {"input": query, "document_text": str(doc.get("content", ""))}
             )
+            score_obj = result[0] if result else None
+            if score_obj is not None and score_obj.score is not None:
+                scores.append(float(score_obj.score))
+        if scores:
+            _collect(query, valid_docs[: len(scores)], scores)
+        mean = sum(scores) / len(scores) if scores else 0.0
+        logger.info(
+            "document_relevance.evaluated",
+            mean=round(mean, 4),
+            doc_count=len(scores),
+        )
+        return mean
 
-        def evaluate(self, input: dict[str, Any]) -> Any:
-            from phoenix.client import Client  # type: ignore[import-not-found]
+    return mean_document_relevance, collector
 
-            trace_id: str | None = cast(str | None, input.get("trace_id"))
-            if not trace_id:
-                logger.warning("document_relevance.no_trace_id")
-                return None
 
-            query = self._extract_query(input)
-            client = Client()
-            spans_df = self._fetch_retriever_spans(client, trace_id)
-            if spans_df is None:
-                return None
+# ---------------------------------------------------------------------------
+# Per-document results export
+# ---------------------------------------------------------------------------
 
-            all_scores: list[float] = []
-            annotation_rows: list[dict[str, Any]] = []
 
-            for _, span_row in spans_df.iterrows():
-                span_id = span_row.get("context.span_id") or (
-                    span_row.name if isinstance(span_row.name, str) else None
-                )
-                doc_texts = _extract_document_texts_from_span(span_row)
-                if not doc_texts:
-                    continue
+def _write_per_document_results(
+    records: list[dict[str, Any]],
+    experiment_name: str,
+) -> None:
+    """Write per-document relevance records to ``eval/results/{name}-perdoc.jsonl``.
 
-                span_scores: list[float] = []
-                for doc_text in doc_texts:
-                    result = doc_evaluator.evaluate({"input": query, "document_text": doc_text})
-                    score_obj = result[0] if result else None
-                    if score_obj is not None and score_obj.score is not None:
-                        score = float(score_obj.score)
-                        all_scores.append(score)
-                        span_scores.append(score)
+    Each line is a JSON object with the fields populated by the document
+    relevance evaluator's collector:
+    ``query``, ``document_text``, ``document_source``,
+    ``relevance_score``, ``relevance_label``.
 
-                if span_id and span_scores:
-                    mean_span = sum(span_scores) / len(span_scores)
-                    annotation_rows.append(
-                        {
-                            "context.span_id": span_id,
-                            "score": mean_span,
-                            "label": "relevant" if mean_span >= 0.5 else "unrelated",
-                        }
-                    )
+    Exporting to a local file rather than a secondary Phoenix experiment avoids
+    the dataset-granularity mismatch (per-doc rows mixed with per-question
+    experiments in the same Phoenix dataset view).  The JSONL can be loaded
+    directly into a notebook or spreadsheet for deep-dive analysis.
 
-            if annotation_rows:
-                self._log_span_annotations(client, annotation_rows)
-
-            if not all_scores:
-                return None
-
-            mean_score = sum(all_scores) / len(all_scores)
-            logger.info(
-                "document_relevance.complete",
-                mean_score=round(mean_score, 4),
-                doc_count=len(all_scores),
-            )
-            return mean_score
-
-        async def async_evaluate(self, input: dict[str, Any]) -> Any:
-            from phoenix.client import Client  # type: ignore[import-not-found]
-
-            trace_id: str | None = cast(str | None, input.get("trace_id"))
-            if not trace_id:
-                logger.warning("document_relevance.no_trace_id")
-                return None
-
-            query = self._extract_query(input)
-            client = Client()
-            spans_df = self._fetch_retriever_spans(client, trace_id)
-            if spans_df is None:
-                return None
-
-            all_scores: list[float] = []
-            annotation_rows: list[dict[str, Any]] = []
-
-            for _, span_row in spans_df.iterrows():
-                span_id = span_row.get("context.span_id") or (
-                    span_row.name if isinstance(span_row.name, str) else None
-                )
-                doc_texts = _extract_document_texts_from_span(span_row)
-                if not doc_texts:
-                    continue
-
-                # Evaluate all documents for this span in parallel.
-                results = await asyncio.gather(
-                    *[
-                        doc_evaluator.async_evaluate({"input": query, "document_text": text})
-                        for text in doc_texts
-                    ]
-                )
-
-                span_scores: list[float] = []
-                for result in results:
-                    score_obj = result[0] if result else None
-                    if score_obj is not None and score_obj.score is not None:
-                        score = float(score_obj.score)
-                        all_scores.append(score)
-                        span_scores.append(score)
-
-                if span_id and span_scores:
-                    mean_span = sum(span_scores) / len(span_scores)
-                    annotation_rows.append(
-                        {
-                            "context.span_id": span_id,
-                            "score": mean_span,
-                            "label": "relevant" if mean_span >= 0.5 else "unrelated",
-                        }
-                    )
-
-            if annotation_rows:
-                self._log_span_annotations(client, annotation_rows)
-
-            if not all_scores:
-                return None
-
-            mean_score = sum(all_scores) / len(all_scores)
-            logger.info(
-                "document_relevance.complete",
-                mean_score=round(mean_score, 4),
-                doc_count=len(all_scores),
-            )
-            return mean_score
-
-    return _DocumentRelevanceEvaluator()
+    Args:
+        records:         Per-document dicts from the evaluator collector.
+        experiment_name: Used to derive the output file name.
+    """
+    out_dir = Path("eval/results")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{experiment_name}-perdoc.jsonl"
+    with out_path.open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    logger.info(
+        "per_document_results.written",
+        path=str(out_path),
+        rows=len(records),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -815,10 +726,7 @@ def main() -> None:
         project_name=_settings.phoenix_project_name,
         deployment_environment=_settings.otel_deployment_environment,
         phoenix_otlp_endpoint=_settings.otel_phoenix_otlp_endpoint,
-        # Always export to Phoenix in the experiment runner: the
-        # DocumentRelevanceEvaluator queries retriever spans from Phoenix
-        # by trace_id after each task completes.
-        phoenix_export=True,
+        phoenix_export=_settings.otel_export_phoenix,
         jaeger_otlp_endpoint=_settings.otel_jaeger_otlp_endpoint,
         jaeger_export=False,
         sample_rate=1.0,  # always sample all eval spans
@@ -831,14 +739,16 @@ def main() -> None:
     from phoenix.client import Client  # type: ignore[import-not-found]
 
     client: Client = Client()
+    doc_relevance_eval, doc_records = _build_document_relevance_evaluator(_settings)
     evaluators = [
         *_build_code_evaluators(),
         _build_faithfulness_evaluator(_settings),
         _build_correctness_evaluator(_settings),
-        _build_document_relevance_evaluator(_settings),
+        doc_relevance_eval,
     ]
 
     metadata = _collect_experiment_metadata(_settings)
+    description = _build_experiment_description(_settings)
 
     if args.dry_run:
         logger.info("dry_run.start", **metadata)
@@ -847,6 +757,7 @@ def main() -> None:
             task=_sync_task,
             evaluators=evaluators,
             experiment_metadata=metadata,
+            experiment_description=description,
             dry_run=1,
         )
         logger.info("dry_run.complete", experiment=str(experiment))
@@ -863,6 +774,8 @@ def main() -> None:
             "evaluate_only.complete",
             experiment_id=getattr(result, "id", str(result)),
         )
+        if doc_records:
+            _write_per_document_results(doc_records, f"eval-{args.experiment_id}")
         return
 
     experiment_name: str = args.experiment_name or f"chatbot-eval-{uuid4().hex[:8]}"
@@ -875,8 +788,11 @@ def main() -> None:
         evaluators=evaluators,
         experiment_name=experiment_name,
         experiment_metadata=metadata,
+        experiment_description=description,
     )
     logger.info("experiment.complete", experiment_id=getattr(experiment, "id", str(experiment)))
+    if doc_records:
+        _write_per_document_results(doc_records, experiment_name)
 
 
 if __name__ == "__main__":
