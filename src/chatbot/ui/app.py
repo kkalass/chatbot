@@ -343,6 +343,52 @@ async def _ask_login(event: AuthRequiredEvent, *, lang: str) -> tuple[str, str] 
     return username, password
 
 
+class ResponseController:
+    """Helper for managing the response message lifecycle within the event loop.
+
+    The orchestrator may emit events that require the current response message to
+    be removed (e.g. when a tool call starts) or updated with new content and
+    elements.  This controller encapsulates that logic so the event loop can
+    focus on formatting and observability.
+    """
+
+    def __init__(self):
+        self._response: cl.Message | None = None
+        self._num_tool_call_messages = 0
+
+    def content(self) -> str:
+        return self._response.content if self._response is not None else ""
+
+    async def stream_token(self, token: str) -> None:
+        if not token:
+            return
+        if self._num_tool_call_messages > 0 and self._response is not None:
+            await self._response.remove()
+            self._response = None
+            self._num_tool_call_messages = 0
+        if self._response is None:
+            self._response = cl.Message(content="")
+            await self._response.send()
+        await self._response.stream_token(token)
+
+    async def start_tool_call(self, tool_call_description: str) -> None:
+        if self._response is not None:
+            await self._response.remove()
+            self._response = None
+        self._response = cl.Message(content="")
+        await self._response.send()
+        await self._response.stream_token(f"⚙️ {tool_call_description}\n")
+        self._num_tool_call_messages += 1
+
+    async def update_content_and_elements(self, content: str, elements: list[cl.Text]) -> None:
+        if self._response is None:
+            self._response = cl.Message(content="")
+            await self._response.send()
+        self._response.content = content
+        self._response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
+        await self._response.update()
+
+
 @cl.on_message  # pyright: ignore[reportUnknownMemberType]  # chainlit decorators are dynamically typed
 async def on_message(message: cl.Message) -> None:
     """Forward the user message to the orchestrator and stream the response."""
@@ -352,13 +398,12 @@ async def on_message(message: cl.Message) -> None:
 
     user_text = str(message.content)
 
-    response: cl.Message | None = None
+    response: ResponseController = ResponseController()
     numbered: list[NumberedCitation] = []
     hallucinated: list[HallucinatedCitation] = []
     emitted_chars = 0
     emitted_chunks: list[str] = []
     pending_whitespace = ""
-    num_tool_call_messages = 0
 
     with (
         using_session_attributes(trace_session),
@@ -369,18 +414,11 @@ async def on_message(message: cl.Message) -> None:
         event: ProcessEvent
 
         async def _stream_response_token(token: str) -> None:
-            nonlocal response, emitted_chars, num_tool_call_messages
+            nonlocal emitted_chars
             if not token:
                 return
             emitted_chars += len(token)
             emitted_chunks.append(token)
-            if num_tool_call_messages > 0 and response is not None:
-                num_tool_call_messages = 0
-                await response.remove()
-                response = None
-            if response is None:
-                response = cl.Message(content="")
-                await response.send()
             await response.stream_token(token)
 
         async for event in orchestrator.process_message(user_text):
@@ -412,15 +450,8 @@ async def on_message(message: cl.Message) -> None:
                     await _stream_response_token(" ⚠️")
                     logger.debug("session.unsubstantiated_claim")
                 case ToolCallStarted():
-                    if response is not None:
-                        await response.remove()
-                        response = None
-
-                    response = cl.Message(content="")
-                    await response.send()
-                    num_tool_call_messages += 1
-                    label = resolve_message(event.call_description, lang=lang)
-                    await response.stream_token(f"⚙️ {label}\n")
+                    tool_call_description = resolve_message(event.call_description, lang=lang)
+                    await response.start_tool_call(tool_call_description)
                 case ToolCallFinished():
                     logger.debug("session.tool_call_finished", tool=event.tool_name)
                 case ThinkingContent():
@@ -452,28 +483,23 @@ async def on_message(message: cl.Message) -> None:
         shown_refs = _get_session_shown_sidebar_refs()
         new_renderable = [nc for nc in renderable if nc.reference_number not in shown_refs]
 
-        if unique_numbered and response is None:
-            response = cl.Message(content="")
-            await response.send()
-
-        if response is not None:
+        if unique_numbered:
             sources_markdown = build_citation_markdown(unique_numbered, lang=lang)
-            if sources_markdown:
-                response.content = f"{response.content.rstrip()}\n\n{sources_markdown}"
-
+            elements: list[cl.Text]
             if new_renderable:
-                response.elements = _build_side_elements(new_renderable, lang=lang)  # pyright: ignore[reportAttributeAccessIssue]
+                elements = _build_side_elements(new_renderable, lang=lang)  # pyright: ignore[reportAttributeAccessIssue]
                 cl.user_session.set(  # pyright: ignore[reportUnknownMemberType]
                     _SESSION_SHOWN_SIDEBAR_REFS,
                     shown_refs | {nc.reference_number for nc in new_renderable},
                 )
                 logger.info("session.sources_displayed", count=len(new_renderable))
+            else:
+                elements = []
+            await response.update_content_and_elements(
+                content=f"{response.content().rstrip()}\n\n{sources_markdown}", elements=elements
+            )
 
-            await response.update()
-
-        trace_final_response_text = (
-            response.content if response is not None else "".join(emitted_chunks)
-        )
+        trace_final_response_text = response.content()
         _trace_response(
             span=span,
             final_response_text=trace_final_response_text,
