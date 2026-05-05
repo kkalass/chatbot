@@ -76,8 +76,5 @@ class CitationToolMessage:
 
 
 type CitationMessage = (
-    CitationSystemMessage
-    | CitationUserMessage
-    | CitationAssistantMessage
-    | CitationToolMessage
+    CitationSystemMessage | CitationUserMessage | CitationAssistantMessage | CitationToolMessage
 )

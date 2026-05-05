@@ -426,7 +426,7 @@ class ChatOrchestrator:
                         history.append(
                             citation_layer.make_tool_message(tc.call_id, tc.name, result)
                         )
-                        yield ToolCallFinished(tool_name=tc.name, call_id=tc.call_id)
+                        yield ToolCallFinished(tool_name=tc.name, call_id=tc.call_id, result=result)
 
             _trace_citation_counts(
                 validated=numberer.validated,

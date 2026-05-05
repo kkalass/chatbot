@@ -1,0 +1,147 @@
+# Evaluation
+
+This directory contains scripts and datasets for offline evaluation of the RAG chatbot
+using [Arize Phoenix](https://phoenix.arize.com).
+
+---
+
+## Phoenix Feature Landscape
+
+Phoenix offers several overlapping features. Here is how they relate:
+
+### Tracing (already active)
+Live spans from the running chatbot are sent to Phoenix via OTLP. Every production
+conversation is visible under **Traces** in the Phoenix UI. This is the observation
+layer — it shows what happened, but does not systematically score it.
+
+### Experiments (primary eval workflow)
+Experiments are the systematic, offline evaluation workflow:
+
+1. **Dataset** — a curated table of `{input, expected_output}` examples.
+2. **Task** — a function that runs the system against one input and returns an output.
+3. **Evaluators** — functions that score the task output (code-based or LLM-as-judge).
+
+`client.experiments.run_experiment(dataset, task, evaluators)` runs the full matrix
+and records results in Phoenix. Multiple experiment runs against the same dataset are
+compared side-by-side in the UI. This is the main tool for measuring whether a code,
+prompt, or retrieval change improved quality.
+
+→ **Start here.** See `run_experiment.py`.
+
+### Annotations
+Annotations are labels (scores, categories, notes) attached to existing spans/traces.
+They can be created:
+- **Manually in the UI** — reviewers click thumbs-up/down or add notes to live traces.
+- **Programmatically** — `client.annotations.add_span_annotation(...)` for automated
+  post-hoc LLM-as-judge scoring of production traffic.
+- **From the UI: "Add to Dataset"** — select a span in the trace view and export it
+  directly into a dataset. This is the primary way to grow your evaluation dataset
+  from real conversations.
+
+Use annotations to curate your dataset over time, not for primary experiment runs.
+
+### Evaluations (arize-phoenix-evals SDK)
+`arize-phoenix-evals` provides **LLM-as-judge** templates for metrics like
+*faithfulness*, *relevance*, *Q&A correctness*, *toxicity*, etc. These can be used:
+- As evaluator functions passed to `run_experiment()` (most useful here).
+- Post-hoc on exported trace DataFrames via `run_evals(df, ...)`.
+
+They are a library, not a Phoenix UI feature. Use them as evaluators inside experiments.
+
+### Prompt Hub (Prompts)
+Phoenix can store and version prompt templates centrally. You pull a prompt version
+via `client.prompts.get_prompt(name, tag="production")` and inject it at runtime.
+Useful if you want to manage prompt versions in Phoenix rather than in Git.
+
+→ **Not needed for this project** — prompts live in `src/chatbot/app/prompts.py`
+and are versioned via Git. Consider using Prompt Hub only if you want to run A/B
+prompt experiments directly from the Phoenix Playground.
+
+### Prompt Playground
+The interactive web UI for testing prompt templates against a dataset without code.
+Great for quick iteration on the system prompt phrasing. It cannot easily drive the
+full RAG pipeline (Qdrant retrieval + tool calling), so it is not the primary eval
+surface for this chatbot.
+
+→ **Optional / future use.** Useful for isolated prompt fragment testing.
+
+---
+
+## Setup
+
+Install the eval dependency group:
+
+```sh
+uv sync --group eval
+```
+
+Make sure Phoenix is running locally (started alongside the chatbot):
+
+```sh
+# If not already running via docker-compose, start manually:
+uv tool run --from arize-phoenix python -m phoenix.server.main serve
+```
+
+Configure `.env` to enable tracing and point to Phoenix:
+
+```dotenv
+OTEL_ENABLED=true
+OTEL_EXPORT_PHOENIX=true
+OTEL_PHOENIX_OTLP_ENDPOINT=http://localhost:6006/v1/traces
+PHOENIX_BASE_URL=http://localhost:6006
+```
+
+The experiment runner reads the same `.env` as the application.
+
+---
+
+## Running an Experiment
+
+```sh
+# Default: loads eval/datasets/rag_questions.jsonl
+uv run --group eval python eval/run_experiment.py
+
+# Custom dataset file and name
+uv run --group eval python eval/run_experiment.py \
+  --dataset-file eval/datasets/rag_questions.jsonl \
+  --dataset-name rag-questions-v1 \
+  --experiment-name "retrieval-top-k-5"
+
+# Dry run (sanity-check task function against 1 example, no Phoenix upload)
+uv run --group eval python eval/run_experiment.py --dry-run
+```
+
+After the run, open the Phoenix UI at `http://localhost:6006` and navigate to
+**Datasets → rag-questions-v1** to compare experiment runs.
+
+---
+
+## Dataset Format
+
+The JSONL format has one JSON object per line:
+
+```jsonc
+{"query": "...", "reference_answer": "..."}   // with reference answer
+{"query": "..."}                               // without (evaluators are code-only)
+```
+
+`query` is the required input key. `reference_answer` is optional; use it for
+evaluators that compare output against a ground-truth string.
+
+---
+
+## Adding Evaluators
+
+Edit `run_experiment.py` and add evaluator functions to the `evaluators` list in
+`main()`. Evaluators receive the task output dict and return a `bool | float`:
+
+```python
+def has_citations(output: dict[str, str]) -> bool:
+    """Check that the answer contains at least one citation marker [N]."""
+    return bool(re.search(r"\[\d+\]", output.get("answer", "")))
+```
+
+For LLM-as-judge evaluators, see `arize-phoenix-evals`:
+- `phoenix.evals.run_evals` for faithfulness, Q&A correctness, etc.
+- Wire them up via `evaluate_experiment()` after the run if you prefer to separate
+  the task run from the scoring step.

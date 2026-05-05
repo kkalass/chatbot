@@ -239,6 +239,7 @@ class TestToolDispatchLoop:
         assert len(finished) == 1
         assert finished[0].tool_name == "vac"
         assert finished[0].call_id == "cid1"
+        assert finished[0].result == {"days": 30}
         # Started must precede Finished in the event stream.
         assert events.index(started[0]) < events.index(finished[0])
         # Second stream sees the tool result in history

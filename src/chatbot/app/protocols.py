@@ -318,10 +318,15 @@ class ToolCallFinished:
 
     Paired with :class:`ToolCallStarted`; the ``call_id`` is identical so the
     UI can close the matching progress indicator.
+
+    ``result`` carries the raw tool return value serialized as JSON.  It is
+    ``None`` when dispatch failed (error path).  Consumers like the eval runner
+    use this to build a faithfulness context without re-querying infrastructure.
     """
 
     tool_name: str
     call_id: str
+    result: JsonObject | None = None
 
 
 @dataclass

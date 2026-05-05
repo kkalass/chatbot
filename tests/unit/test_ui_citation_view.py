@@ -8,6 +8,11 @@ from src.chatbot.ui.citation_view import (
     build_citation_markdown,
     build_citation_name,
 )
+from src.chatbot.ui.i18n_messages import resolve_message
+
+
+def _translate_en(msg: I18nMessage) -> str:
+    return resolve_message(msg, lang="en")
 
 
 def _doc(
@@ -38,21 +43,21 @@ def _doc(
 class TestBuildCitationName:
     def test_uses_title_when_present(self) -> None:
         citation = NumberedCitation(reference_number=3, citation=_doc(title="My Doc"))
-        assert build_citation_name(citation) == "[3] My Doc"
+        assert build_citation_name(citation, translate=_translate_en) == "[3] My Doc"
 
     def test_appends_page_when_present(self) -> None:
         citation = NumberedCitation(reference_number=3, citation=_doc(title="T", page="42"))
-        assert build_citation_name(citation) == "[3] T (p. 42)"
+        assert build_citation_name(citation, translate=_translate_en) == "[3] T (p. 42)"
 
     def test_falls_back_to_author_date_then_source(self) -> None:
         citation = NumberedCitation(
             reference_number=3,
             citation=_doc(author="A", publication_date="2024"),
         )
-        assert build_citation_name(citation) == "[3] A - 2024"
+        assert build_citation_name(citation, translate=_translate_en) == "[3] A - 2024"
 
         citation = NumberedCitation(reference_number=4, citation=_doc(source="x.md"))
-        assert build_citation_name(citation) == "[4] x.md"
+        assert build_citation_name(citation, translate=_translate_en) == "[4] x.md"
 
     def test_tool_citation_falls_back_to_tool_name(self) -> None:
         cit = ToolCitation(
@@ -62,7 +67,7 @@ class TestBuildCitationName:
             result={"days": 30},
         )
         numbered = NumberedCitation(reference_number=2, citation=cit)
-        assert build_citation_name(numbered) == "[2] get_vacation_days"
+        assert build_citation_name(numbered, translate=_translate_en) == "[2] get_vacation_days"
 
     def test_tool_citation_uses_display_name(self) -> None:
         cit = ToolCitation(
@@ -73,13 +78,14 @@ class TestBuildCitationName:
             display_name=I18nMessage(key="vacation_days.display_name", args={}),
         )
         numbered = NumberedCitation(reference_number=2, citation=cit)
-        assert build_citation_name(numbered) == "[2] Vacation Days Service"
+        assert build_citation_name(numbered, translate=_translate_en) == "[2] Vacation Days Service"
 
 
 class TestBuildCitationContent:
     def test_document_includes_excerpt(self) -> None:
         rendered = build_citation_content(
-            NumberedCitation(reference_number=3, citation=_doc(title="T", content="hello world"))
+            NumberedCitation(reference_number=3, citation=_doc(title="T", content="hello world")),
+            translate=_translate_en,
         )
         assert "### [3] T" in rendered
         assert "hello world" in rendered
@@ -90,7 +96,8 @@ class TestBuildCitationContent:
             NumberedCitation(
                 reference_number=3,
                 citation=_doc(title="T", source_url="https://e.com/d"),
-            )
+            ),
+            translate=_translate_en,
         )
         assert "### [3] [T](https://e.com/d)" in rendered
 
@@ -101,7 +108,9 @@ class TestBuildCitationContent:
             tool_name="get_vacation_days",
             result={"total_days": 30, "remaining_days": 20},
         )
-        rendered = build_citation_content(NumberedCitation(reference_number=2, citation=cit))
+        rendered = build_citation_content(
+            NumberedCitation(reference_number=2, citation=cit), translate=_translate_en
+        )
         assert "### [2] get_vacation_days" in rendered
         assert "**total_days:** 30" in rendered
         assert "**remaining_days:** 20" in rendered
@@ -109,13 +118,13 @@ class TestBuildCitationContent:
 
 class TestBuildCitationMarkdown:
     def test_empty_returns_empty_string(self) -> None:
-        assert build_citation_markdown([]) == ""
+        assert build_citation_markdown([], translate=_translate_en) == ""
 
     def test_orders_by_reference_number(self) -> None:
         a = NumberedCitation(reference_number=2, citation=_doc(title="A"))
         b = NumberedCitation(reference_number=1, citation=_doc(title="B"))
 
-        rendered = build_citation_markdown([a, b])
+        rendered = build_citation_markdown([a, b], translate=_translate_en)
 
         idx_a = rendered.find("A")
         idx_b = rendered.find("B")
@@ -129,5 +138,7 @@ class TestBuildCitationMarkdown:
             tool_name="get_vacation_days",
             result={"days": 30},
         )
-        rendered = build_citation_markdown([NumberedCitation(reference_number=1, citation=cit)])
+        rendered = build_citation_markdown(
+            [NumberedCitation(reference_number=1, citation=cit)], translate=_translate_en
+        )
         assert "1. get_vacation_days" in rendered

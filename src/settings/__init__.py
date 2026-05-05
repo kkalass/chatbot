@@ -221,6 +221,33 @@ class Settings(BaseSettings):
         description="Dataset snapshot/version identifier for experiment runs.",
     )
 
+    # --- Evaluation LLM Judge ---
+    eval_judge_model: str = Field(
+        default="llama3.2",
+        description="Model identifier for the LLM judge used in eval evaluators (e.g. FaithfulnessEvaluator).",
+    )
+    eval_judge_provider: str = Field(
+        default="ollama",
+        description=(
+            "LLM judge backend: 'ollama' for a local Ollama server, "
+            "'openai_compatible' for any OpenAI-API-compatible provider (e.g. Groq, OpenAI)."
+        ),
+        pattern="^(ollama|openai_compatible)$",
+    )
+    eval_judge_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL for the LLM judge provider. "
+            "Defaults to http://localhost:11434 for 'ollama'. "
+            "For 'openai_compatible' set this to the provider endpoint "
+            "(e.g. https://api.groq.com/openai/v1)."
+        ),
+    )
+    eval_judge_api_key: str | None = Field(
+        default=None,
+        description="API key for the LLM judge provider (required for openai_compatible).",
+    )
+
 
 def get_settings() -> Settings:
     """Construct and return a validated :class:`Settings` instance.

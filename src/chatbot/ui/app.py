@@ -72,6 +72,8 @@ from src.chatbot.ui.citation_view import (
     build_citation_content,
     build_citation_markdown,
     build_side_panel_label,
+    format_citation_marker,
+    format_text_chunk,
 )
 from src.chatbot.ui.i18n_messages import detect_language, resolve_message
 from src.chatbot.ui.logging_config import configure_logging
@@ -134,41 +136,6 @@ def _collect_unique_numbered_citations(
     return unique
 
 
-def _format_text_chunk(
-    chunk: str,
-    pending_whitespace: str,
-) -> tuple[list[str], str]:
-    """Return stream tokens for a text chunk while buffering trailing whitespace.
-
-    Trailing whitespace is held back so a following ``[N]`` reference can be
-    rendered directly after the preceding sentence without an inserted newline.
-    """
-    stripped = chunk.rstrip(" \t\r\n")
-    if not stripped:
-        return [], f"{pending_whitespace}{chunk}"
-
-    tokens: list[str] = []
-    if pending_whitespace:
-        tokens.append(pending_whitespace)
-
-    trailing_whitespace = chunk[len(stripped) :]
-    tokens.append(stripped)
-
-    return tokens, trailing_whitespace
-
-
-def _format_citation_marker(
-    nc: NumberedCitation,
-    pending_whitespace: str,
-) -> tuple[list[str], str]:
-    """Return a ``[n]`` token while keeping trailing whitespace buffered.
-
-    This avoids inserting blank lines between consecutive citation references
-    when the model emits multiple marker blocks separated by newlines.
-    """
-    return [f"[{nc.reference_number}]"], pending_whitespace
-
-
 def _build_side_elements(unique: list[NumberedCitation], *, lang: str) -> list[cl.Text]:
     """Aggregate all citations into a single side-panel element.
 
@@ -177,8 +144,11 @@ def _build_side_elements(unique: list[NumberedCitation], *, lang: str) -> list[c
     with a ``[N]``-prefixed heading so the reference numbers visible in the
     answer text map directly to entries in the panel.
     """
-    panel_title = build_side_panel_label(lang=lang)
-    content = "\n\n---\n\n".join(build_citation_content(nc, lang=lang) for nc in unique)
+    panel_title = build_side_panel_label(translate=lambda msg: resolve_message(msg, lang=lang))
+    content = "\n\n---\n\n".join(
+        build_citation_content(nc, translate=lambda msg: resolve_message(msg, lang=lang))
+        for nc in unique
+    )
     return [cl.Text(name=panel_title, content=content, display="side")]
 
 
@@ -428,12 +398,12 @@ async def on_message(message: cl.Message) -> None:
         async for event in orchestrator.process_message(user_text):
             match event:
                 case str():
-                    tokens, pending_whitespace = _format_text_chunk(event, pending_whitespace)
+                    tokens, pending_whitespace = format_text_chunk(event, pending_whitespace)
                     for token in tokens:
                         await response.stream_token(token)
                 case NumberedCitation():
                     numbered.append(event)
-                    tokens, pending_whitespace = _format_citation_marker(event, pending_whitespace)
+                    tokens, pending_whitespace = format_citation_marker(event, pending_whitespace)
                     for token in tokens:
                         await response.stream_token(token)
                     logger.debug(
@@ -489,7 +459,9 @@ async def on_message(message: cl.Message) -> None:
         new_renderable = [nc for nc in renderable if nc.reference_number not in shown_refs]
 
         if unique_numbered:
-            sources_markdown = build_citation_markdown(unique_numbered, lang=lang)
+            sources_markdown = build_citation_markdown(
+                unique_numbered, translate=lambda msg: resolve_message(msg, lang=lang)
+            )
             elements: list[cl.Text]
             if new_renderable:
                 elements = _build_side_elements(new_renderable, lang=lang)  # pyright: ignore[reportAttributeAccessIssue]

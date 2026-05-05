@@ -12,18 +12,10 @@ Adding a new tool requires:
 2. Adding one entry per key **and language** to :data:`TRANSLATIONS`.
 """
 
-from enum import StrEnum
-
 from src.chatbot.app.protocols import I18nMessage
 from src.chatbot.tools.retrieval.tool import RetrievalCallKey
 from src.chatbot.tools.vacation_days.keys import VacationDaysCallKey
-
-
-class CitationViewKey(StrEnum):
-    """Message keys for the citation side-panel UI."""
-
-    PANEL_TITLE = "citation_view.panel_title"
-
+from src.chatbot.ui.citation_view import CitationViewKey
 
 # ---------------------------------------------------------------------------
 # Translation map
@@ -39,6 +31,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         VacationDaysCallKey.DISPLAY_NAME: "Vacation Days Service",
         VacationDaysCallKey.QUERYING: "Querying vacation days for {year}",
         CitationViewKey.PANEL_TITLE: "Sources",
+        CitationViewKey.PAGE_ABBREVIATION: "p. {page}",
+        CitationViewKey.AUTHOR_LABEL: "Author:",
+        CitationViewKey.DATE_LABEL: "Date:",
+        CitationViewKey.PAGE_LABEL: "Page:",
+        CitationViewKey.SOURCE_LABEL: "Source:",
+        CitationViewKey.EXCERPT_LABEL: "Excerpt",
     },
     "de": {
         RetrievalCallKey.DISPLAY_NAME: "Dokumentensuche",
@@ -46,6 +44,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         VacationDaysCallKey.DISPLAY_NAME: "Urlaubstage-Dienst",
         VacationDaysCallKey.QUERYING: "Urlaubstage für {year} abfragen",
         CitationViewKey.PANEL_TITLE: "Quellenangaben",
+        CitationViewKey.PAGE_ABBREVIATION: "S. {page}",
+        CitationViewKey.AUTHOR_LABEL: "Autor:",
+        CitationViewKey.DATE_LABEL: "Datum:",
+        CitationViewKey.PAGE_LABEL: "Seite:",
+        CitationViewKey.SOURCE_LABEL: "Quelle:",
+        CitationViewKey.EXCERPT_LABEL: "Auszug",
     },
 }
 

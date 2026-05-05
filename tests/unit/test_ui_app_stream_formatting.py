@@ -7,11 +7,8 @@
 import pytest
 
 from src.chatbot.app.protocols import NumberedCitation, ToolCitation
-from src.chatbot.ui.app import (
-    ResponseManager,
-    _format_citation_marker,
-    _format_text_chunk,
-)
+from src.chatbot.ui.app import ResponseManager
+from src.chatbot.ui.citation_view import format_citation_marker, format_text_chunk
 
 
 def _numbered(reference_number: int) -> NumberedCitation:
@@ -26,7 +23,7 @@ def _numbered(reference_number: int) -> NumberedCitation:
 
 class TestCitationMarkerFormatting:
     def test_marker_keeps_pending_whitespace_buffered(self) -> None:
-        tokens, pending = _format_citation_marker(_numbered(1), "\n\n")
+        tokens, pending = format_citation_marker(_numbered(1), "\n\n")
 
         assert tokens == ["[1]"]
         assert pending == "\n\n"
@@ -36,7 +33,7 @@ class TestCitationMarkerFormatting:
         rendered: list[str] = []
 
         for ref in (1, 2, 3):
-            tokens, pending = _format_citation_marker(_numbered(ref), pending)
+            tokens, pending = format_citation_marker(_numbered(ref), pending)
             rendered.extend(tokens)
 
         # Pending whitespace is flushed once at the end of the marker run.
@@ -46,8 +43,8 @@ class TestCitationMarkerFormatting:
 
     def test_pending_whitespace_is_reinserted_before_following_text(self) -> None:
         pending = "\n\n"
-        marker_tokens, pending = _format_citation_marker(_numbered(1), pending)
-        text_tokens, pending = _format_text_chunk("Next paragraph", pending)
+        marker_tokens, pending = format_citation_marker(_numbered(1), pending)
+        text_tokens, pending = format_text_chunk("Next paragraph", pending)
 
         assert marker_tokens == ["[1]"]
         assert text_tokens == ["\n\n", "Next paragraph"]
