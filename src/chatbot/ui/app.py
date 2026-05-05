@@ -81,6 +81,7 @@ _SESSION_ORCHESTRATOR = "orchestrator"
 _SESSION_TRACE_ID = "trace_session_id"
 _SESSION_LANG = "lang"
 _SESSION_CREDENTIAL_STORE = "credential_store"
+_SESSION_SHOWN_SIDEBAR_REFS = "shown_sidebar_refs"
 _tracer = trace.get_tracer(__name__)
 
 # Configure logging at module import time (before any logger is used).
@@ -448,6 +449,8 @@ async def on_message(message: cl.Message) -> None:
 
         unique_numbered = _collect_unique_numbered_citations(numbered)
         renderable = [nc for nc in unique_numbered if _has_renderable_side_element(nc.citation)]
+        shown_refs = _get_session_shown_sidebar_refs()
+        new_renderable = [nc for nc in renderable if nc.reference_number not in shown_refs]
 
         if unique_numbered and response is None:
             response = cl.Message(content="")
@@ -458,9 +461,13 @@ async def on_message(message: cl.Message) -> None:
             if sources_markdown:
                 response.content = f"{response.content.rstrip()}\n\n{sources_markdown}"
 
-            if renderable:
-                response.elements = _build_side_elements(renderable, lang=lang)  # pyright: ignore[reportAttributeAccessIssue]
-                logger.info("session.sources_displayed", count=len(renderable))
+            if new_renderable:
+                response.elements = _build_side_elements(new_renderable, lang=lang)  # pyright: ignore[reportAttributeAccessIssue]
+                cl.user_session.set(  # pyright: ignore[reportUnknownMemberType]
+                    _SESSION_SHOWN_SIDEBAR_REFS,
+                    shown_refs | {nc.reference_number for nc in new_renderable},
+                )
+                logger.info("session.sources_displayed", count=len(new_renderable))
 
             await response.update()
 
@@ -505,3 +512,8 @@ def _get_session_orchestrator():
         raise RuntimeError("Chat orchestrator is missing from session state")
     orchestrator = raw_orchestrator
     return orchestrator
+
+
+def _get_session_shown_sidebar_refs() -> set[int]:
+    raw = cl.user_session.get(_SESSION_SHOWN_SIDEBAR_REFS)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return raw if isinstance(raw, set) else set()  # type: ignore[return-value]  # Chainlit session is untyped; set[int] guaranteed by _set call
