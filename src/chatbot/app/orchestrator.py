@@ -305,9 +305,16 @@ class ChatOrchestrator:
             for step_num in range(_MAX_TOOL_STEPS + 1):
                 with tracer.start_as_current_span(SPAN_CHAT_ORCHESTRATOR_STEP) as step_span:
                     # Force a final no-tools step once the safety limit is reached.
+                    # The history at this point ends on a `tool` role; many LLMs
+                    # then emit empty completions. Inject a user-turn escape
+                    # message that re-states the question and forbids further
+                    # tool calls — same rationale as the repeated-call path.
                     if not last_step and step_num == _MAX_TOOL_STEPS:
                         logger.warning(
                             "orchestrator.max_tool_steps_exceeded", limit=_MAX_TOOL_STEPS
+                        )
+                        history.append(
+                            citation_layer.make_max_steps_escape_message(user_msg_content)
                         )
                         last_step = True
 

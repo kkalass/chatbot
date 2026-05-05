@@ -91,6 +91,9 @@ class _StubCitationModel:
     def make_loop_escape_message(self, original_user_content: str) -> CitationUserMessage:
         return CitationUserMessage(llm_content=f"[ESCAPE]{original_user_content}")
 
+    def make_max_steps_escape_message(self, original_user_content: str) -> CitationUserMessage:
+        return CitationUserMessage(llm_content=f"[MAXSTEPS]{original_user_content}")
+
     def stream(
         self,
         history: Sequence[CitationMessage],
@@ -373,6 +376,50 @@ class TestRepeatedToolCallSafety:
         assert tail[-1].llm_content.startswith("[ESCAPE]"), (
             "Last message must be the loop-escape user message"
         )
+
+    @pytest.mark.asyncio
+    async def test_max_steps_escape_user_message_appended_before_final_step(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the agentic loop hits its safety limit, a max-steps escape user
+        message must be appended before the forced no-tools final step. Without
+        it the history would end on a ``tool`` role and many LLMs emit empty
+        completions."""
+        # Shrink the limit so the test exercises the path quickly.
+        from src.chatbot.app import orchestrator as orch_mod
+
+        monkeypatch.setattr(orch_mod, "_MAX_TOOL_STEPS", 2)
+
+        # Each step except the final one produces a fresh, non-repeating tool
+        # call so the loop-detection path is not triggered.
+        tc1 = ToolCallInfo(call_id="cid1", name="vac", arguments={"year": 2026})
+        tc2 = ToolCallInfo(call_id="cid2", name="vac", arguments={"year": 2027})
+        tool = _StubTool("vac", result={"days": 30})
+        layer = _StubCitationModel(
+            [
+                [[tc1]],
+                [[tc2]],
+                ["final answer after max steps"],
+            ]
+        )
+        orch = ChatOrchestrator(
+            layer,  # type: ignore[arg-type]
+            model_profile=_profile(),
+            tools=[tool],
+        )
+
+        _ = [e async for e in orch.process_message("the question")]
+
+        final_history = layer.received_histories[-1]
+        tail = [m for m in final_history if not isinstance(m, CitationSystemMessage)]
+        assert tail and isinstance(tail[-1], CitationUserMessage), (
+            "Final-step history must end with a user message"
+        )
+        assert tail[-1].llm_content.startswith("[MAXSTEPS]"), (
+            "Last message must be the max-steps escape user message"
+        )
+        # The forced final step must not advertise any tools.
+        assert layer.received_tool_lists[-1] is None
 
 
 class TestSessionStableNumbering:

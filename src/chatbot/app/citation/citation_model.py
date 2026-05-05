@@ -350,6 +350,29 @@ The actual user message is:
         )
         return CitationUserMessage(llm_content=content)
 
+    def make_max_steps_escape_message(self, original_user_content: str) -> CitationUserMessage:
+        """Build a user-turn message that forces text generation after the tool-step limit.
+
+        When the orchestrator hits its agentic-loop safety limit it forces a
+        final no-tools step. At that point the history typically ends on a
+        ``tool`` role, which many LLMs treat as insufficient to emit a
+        user-facing reply (resulting in empty completions). This message
+        re-states the original question with explicit instructions to
+        synthesise an answer from the existing tool results.
+
+        ``original_user_content`` must be the *already-rendered* LLM content
+        of the current turn's user message — see
+        :meth:`make_loop_escape_message` for the rationale.
+        """
+        content = (
+            f"[IMPORTANT: The maximum number of tool calls for this turn has been "
+            f"reached. No further tool calls are available. "
+            f"You MUST now synthesize a complete answer from the tool results "
+            f"already in the conversation above. Do NOT call any tools.]\n\n"
+            f"{original_user_content}"
+        )
+        return CitationUserMessage(llm_content=content)
+
     # ------------------------------------------------------------------
     # Streaming.
     # ------------------------------------------------------------------
