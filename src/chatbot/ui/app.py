@@ -279,8 +279,6 @@ def _trace_response(
     *,
     span: trace.Span,
     final_response_text: str,
-    emitted_chars: int,
-    emitted_chunks: list[str],
     numbered: list[NumberedCitation],
     hallucinated: list[HallucinatedCitation],
 ) -> None:
@@ -294,10 +292,6 @@ def _trace_response(
                 "hallucinated_citations": len(hallucinated),
             }
         )
-    )
-    span.set_attribute("chat.response.emitted_chars", emitted_chars)
-    span.set_attribute(
-        "chat.response.preview", to_attribute_text("".join(emitted_chunks), max_chars=600)
     )
     span.set_attribute("chat.response.numbered_citations", len(numbered))
     span.set_attribute("chat.response.hallucinated_citations", len(hallucinated))
@@ -343,50 +337,70 @@ async def _ask_login(event: AuthRequiredEvent, *, lang: str) -> tuple[str, str] 
     return username, password
 
 
-class ResponseController:
+class ResponseManager:
     """Helper for managing the response message lifecycle within the event loop.
 
     The orchestrator may emit events that require the current response message to
     be removed (e.g. when a tool call starts) or updated with new content and
-    elements.  This controller encapsulates that logic so the event loop can
+    elements.  This manager encapsulates that logic so the event loop can
     focus on formatting and observability.
     """
 
     def __init__(self):
-        self._response: cl.Message | None = None
-        self._num_tool_call_messages = 0
+        self._message: cl.Message | None = None
+        self._message_is_transient = False
 
+    @property
     def content(self) -> str:
-        return self._response.content if self._response is not None else ""
+        return self._message.content if self._message is not None else ""
+
+    async def _get_or_create_message(self, *, create_transient: bool = False) -> cl.Message:
+        if self._message is None:
+            self._message = cl.Message(content="")
+            await self._message.send()
+            self._message_is_transient = create_transient
+        return self._message
 
     async def stream_token(self, token: str) -> None:
         if not token:
             return
-        if self._num_tool_call_messages > 0 and self._response is not None:
-            await self._response.remove()
-            self._response = None
-            self._num_tool_call_messages = 0
-        if self._response is None:
-            self._response = cl.Message(content="")
-            await self._response.send()
-        await self._response.stream_token(token)
+
+        if self._message_is_transient:
+            # While we do want to append to an ongoing normal response, if the current response
+            # is marked as transient, we need to get rid of it and start a fresh message.
+            await self.remove_message()
+
+        msg = await self._get_or_create_message()
+
+        await msg.stream_token(token)
 
     async def start_tool_call(self, tool_call_description: str) -> None:
-        if self._response is not None:
-            await self._response.remove()
-            self._response = None
-        self._response = cl.Message(content="")
-        await self._response.send()
-        await self._response.stream_token(f"⚙️ {tool_call_description}\n")
-        self._num_tool_call_messages += 1
+        # flush pending content and remove dangling empty message if any
+        await self.finalize_current_message()
+        msg = await self._get_or_create_message(create_transient=True)
+        await msg.stream_token(f"⚙️ {tool_call_description}\n")
 
-    async def update_content_and_elements(self, content: str, elements: list[cl.Text]) -> None:
-        if self._response is None:
-            self._response = cl.Message(content="")
-            await self._response.send()
-        self._response.content = content
-        self._response.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
-        await self._response.update()
+    async def remove_message(self):
+        if self._message is not None:
+            await self._message.remove()
+            self._message = None
+        self._message_is_transient = False
+
+    async def finalize_current_message(self):
+        if self._message_is_transient:
+            await self.remove_message()
+        if self._message is not None and not self._message.content.strip():
+            # empty, dangling message — replace it entirely.
+            await self.remove_message()
+        if self._message is not None:
+            await self._message.update()  # send accumulated content immediately
+            self._message = None
+
+    async def set_content(self, content: str, elements: list[cl.Text]) -> None:
+        msg = await self._get_or_create_message()
+        msg.content = content
+        msg.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
+        await msg.update()
 
 
 @cl.on_message  # pyright: ignore[reportUnknownMemberType]  # chainlit decorators are dynamically typed
@@ -398,11 +412,9 @@ async def on_message(message: cl.Message) -> None:
 
     user_text = str(message.content)
 
-    response: ResponseController = ResponseController()
+    response: ResponseManager = ResponseManager()
     numbered: list[NumberedCitation] = []
     hallucinated: list[HallucinatedCitation] = []
-    emitted_chars = 0
-    emitted_chunks: list[str] = []
     pending_whitespace = ""
 
     with (
@@ -413,25 +425,17 @@ async def on_message(message: cl.Message) -> None:
 
         event: ProcessEvent
 
-        async def _stream_response_token(token: str) -> None:
-            nonlocal emitted_chars
-            if not token:
-                return
-            emitted_chars += len(token)
-            emitted_chunks.append(token)
-            await response.stream_token(token)
-
         async for event in orchestrator.process_message(user_text):
             match event:
                 case str():
                     tokens, pending_whitespace = _format_text_chunk(event, pending_whitespace)
                     for token in tokens:
-                        await _stream_response_token(token)
+                        await response.stream_token(token)
                 case NumberedCitation():
                     numbered.append(event)
                     tokens, pending_whitespace = _format_citation_marker(event, pending_whitespace)
                     for token in tokens:
-                        await _stream_response_token(token)
+                        await response.stream_token(token)
                     logger.debug(
                         "session.numbered_citation_rendered",
                         reference_number=event.reference_number,
@@ -447,7 +451,7 @@ async def on_message(message: cl.Message) -> None:
                 case UnsubstantiatedClaim():
                     # Emit inline (like a citation marker) — do not flush pending_whitespace
                     # so the marker stays attached to the preceding sentence without leading newlines.
-                    await _stream_response_token(" ⚠️")
+                    await response.stream_token(" ⚠️")
                     logger.debug("session.unsubstantiated_claim")
                 case ToolCallStarted():
                     tool_call_description = resolve_message(event.call_description, lang=lang)
@@ -465,6 +469,7 @@ async def on_message(message: cl.Message) -> None:
                     )
                 case AuthRequiredEvent():
                     credential_store = _get_session_credential_store()
+                    await response.finalize_current_message()  # flush pending content and remove dangling empty message before the blocking login flow
                     creds = await _ask_login(event, lang=lang)
                     if creds is not None:
                         credential_store.set_credentials(event.credential_key, *creds)
@@ -475,7 +480,7 @@ async def on_message(message: cl.Message) -> None:
                     assert_never(event)
 
         if pending_whitespace:
-            await _stream_response_token(pending_whitespace)
+            await response.stream_token(pending_whitespace)
             pending_whitespace = ""
 
         unique_numbered = _collect_unique_numbered_citations(numbered)
@@ -495,16 +500,13 @@ async def on_message(message: cl.Message) -> None:
                 logger.info("session.sources_displayed", count=len(new_renderable))
             else:
                 elements = []
-            await response.update_content_and_elements(
-                content=f"{response.content().rstrip()}\n\n{sources_markdown}", elements=elements
+            await response.set_content(
+                content=f"{response.content.rstrip()}\n\n{sources_markdown}", elements=elements
             )
 
-        trace_final_response_text = response.content()
         _trace_response(
             span=span,
-            final_response_text=trace_final_response_text,
-            emitted_chars=emitted_chars,
-            emitted_chunks=emitted_chunks,
+            final_response_text=response.content,
             numbered=unique_numbered,
             hallucinated=hallucinated,
         )
