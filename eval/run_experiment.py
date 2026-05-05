@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never, cast
@@ -73,6 +74,47 @@ from src.settings import Settings, get_settings
 logger = structlog.get_logger(__name__)
 
 _settings = get_settings()
+
+
+# ---------------------------------------------------------------------------
+# Experiment metadata
+# ---------------------------------------------------------------------------
+
+
+def _git_commit_hash() -> str | None:
+    """Return the short HEAD commit hash, or ``None`` if git is unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip() or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def _collect_experiment_metadata(settings: Settings) -> dict[str, Any]:
+    """Assemble a metadata dict describing the full configuration of this run.
+
+    Attached to every Phoenix experiment so that runs with different model
+    configurations can be filtered and compared in the UI.  Includes:
+
+    - ``chat_model`` / ``chat_model_provider``: the generation model
+    - ``embedding_model`` / ``embedding_model_provider``: the retrieval embedding
+    - ``eval_judge_model`` / ``eval_judge_provider``: the LLM-as-judge model
+    - ``git_commit``: short HEAD hash (``None`` when git is unavailable)
+    """
+    return {
+        "chat_model": settings.chat_model,
+        "chat_model_provider": settings.chat_model_provider,
+        "embedding_model": settings.embedding_model,
+        "embedding_model_provider": settings.embedding_model_provider,
+        "eval_judge_model": settings.eval_judge_model,
+        "eval_judge_provider": settings.eval_judge_provider,
+        "git_commit": _git_commit_hash(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +172,8 @@ def _build_eval_judge_llm(settings: Settings) -> Any:
     from phoenix.evals import LLM  # type: ignore[import-not-found]
 
     if settings.eval_judge_provider == "ollama":
-        base_url = settings.eval_judge_base_url or "http://localhost:11434/v1"
+        raw_url = (settings.eval_judge_base_url or "http://localhost:11434").rstrip("/")
+        base_url = raw_url if raw_url.endswith("/v1") else raw_url + "/v1"
         api_key = settings.eval_judge_api_key or "ollama"
     else:
         base_url = settings.eval_judge_base_url
@@ -249,24 +292,27 @@ def is_non_empty(output: dict[str, object]) -> bool:
     return len(str(output.get("answer", "")).strip()) > 50
 
 
-def has_warnings(output: dict[str, object]) -> bool:
-    """Check whether the answer contains at least one unsubstantiated claim.
+def no_unsubstantiated_claims(output: dict[str, object]) -> bool:
+    """Check that the answer contains no unsubstantiated claims (true = good).
 
-    A non-zero count indicates the model made claims that were not covered by
-    any citation token in the response — a signal of incomplete attribution.
+    Returns ``True`` when ``unsubstantiated_claim_count`` is zero, meaning all
+    model claims are covered by a citation token.  A ``False`` result indicates
+    the model made at least one claim without citing a source — a signal of
+    incomplete attribution.
     """
     count = output.get("unsubstantiated_claim_count", 0)
-    return isinstance(count, int) and count > 0
+    return not (isinstance(count, int) and count > 0)
 
 
-def has_hallucinations(output: dict[str, object]) -> bool:
-    """Check whether the answer contains at least one hallucinated citation.
+def no_hallucinated_citations(output: dict[str, object]) -> bool:
+    """Check that the answer contains no hallucinated citations (true = good).
 
-    A non-zero count means the model referenced a citation token that could
-    not be resolved to any retrieved chunk — a signal of fabricated sourcing.
+    Returns ``True`` when ``hallucinated_citation_count`` is zero, meaning
+    every citation token the model emitted could be resolved to an actual
+    retrieved chunk.  A ``False`` result is a signal of fabricated sourcing.
     """
     count = output.get("hallucinated_citation_count", 0)
-    return isinstance(count, int) and count > 0
+    return not (isinstance(count, int) and count > 0)
 
 
 def _build_faithfulness_evaluator(settings: Settings) -> Any:
@@ -427,6 +473,15 @@ def main() -> None:
         action="store_true",
         help="Run against 1 example only without uploading results to Phoenix.",
     )
+    parser.add_argument(
+        "--experiment-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "Re-run evaluators on an existing experiment without executing tasks again. "
+            "The ID is shown in the Phoenix UI experiment detail page."
+        ),
+    )
     args = parser.parse_args()
 
     dataset_file = Path(args.dataset_file)
@@ -458,31 +513,48 @@ def main() -> None:
     evaluators = [
         has_citations,
         is_non_empty,
-        has_warnings,
-        has_hallucinations,
+        no_unsubstantiated_claims,
+        no_hallucinated_citations,
         _build_faithfulness_evaluator(_settings),
     ]
 
+    metadata = _collect_experiment_metadata(_settings)
+
     if args.dry_run:
-        logger.info("dry_run.start")
+        logger.info("dry_run.start", **metadata)
         experiment = client.experiments.run_experiment(
             dataset=_get_or_create_dataset(client, dataset_file, args.dataset_name),
             task=_sync_task,
             evaluators=evaluators,
+            experiment_metadata=metadata,
             dry_run=1,
         )
         logger.info("dry_run.complete", experiment=str(experiment))
         return
 
+    if args.experiment_id:
+        logger.info("evaluate_only.start", experiment_id=args.experiment_id, **metadata)
+        existing = client.experiments.get_experiment(experiment_id=args.experiment_id)
+        result = client.experiments.evaluate_experiment(
+            experiment=existing,
+            evaluators=evaluators,
+        )
+        logger.info(
+            "evaluate_only.complete",
+            experiment_id=getattr(result, "id", str(result)),
+        )
+        return
+
     experiment_name: str = args.experiment_name or f"chatbot-eval-{uuid4().hex[:8]}"
     dataset = _get_or_create_dataset(client, dataset_file, args.dataset_name)
 
-    logger.info("experiment.start", name=experiment_name)
+    logger.info("experiment.start", name=experiment_name, **metadata)
     experiment = client.experiments.run_experiment(
         dataset=dataset,
         task=_sync_task,
         evaluators=evaluators,
         experiment_name=experiment_name,
+        experiment_metadata=metadata,
     )
     logger.info("experiment.complete", experiment_id=getattr(experiment, "id", str(experiment)))
 

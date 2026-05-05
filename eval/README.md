@@ -109,10 +109,31 @@ uv run --group eval python eval/run_experiment.py \
 
 # Dry run (sanity-check task function against 1 example, no Phoenix upload)
 uv run --group eval python eval/run_experiment.py --dry-run
+
+# Re-run only evaluators on an existing experiment (tasks do not re-execute)
+uv run --group eval python eval/run_experiment.py --experiment-id <ID>
 ```
+
+The experiment ID is shown in the Phoenix UI on the experiment detail page.
+Use `--experiment-id` when you have changed or added evaluators but want to
+score a previously completed task run without paying the cost of re-running
+the full RAG pipeline.
 
 After the run, open the Phoenix UI at `http://localhost:6006` and navigate to
 **Datasets → rag-questions-v1** to compare experiment runs.
+
+Every experiment run is tagged with a `metadata` dict so runs with different
+configurations can be filtered and compared in the UI:
+
+| Key | Source |
+|-----|--------|
+| `chat_model` | `CHAT_MODEL` env var |
+| `chat_model_provider` | `CHAT_MODEL_PROVIDER` env var |
+| `embedding_model` | `EMBEDDING_MODEL` env var |
+| `embedding_model_provider` | `EMBEDDING_MODEL_PROVIDER` env var |
+| `eval_judge_model` | `EVAL_JUDGE_MODEL` env var |
+| `eval_judge_provider` | `EVAL_JUDGE_PROVIDER` env var |
+| `git_commit` | `git rev-parse --short HEAD` |
 
 ---
 
@@ -133,12 +154,28 @@ evaluators that compare output against a ground-truth string.
 ## Adding Evaluators
 
 Edit `run_experiment.py` and add evaluator functions to the `evaluators` list in
-`main()`. Evaluators receive the task output dict and return a `bool | float`:
+`main()`. Evaluators receive the task output dict and return a `bool | float`.
+
+**Convention: `True` / `1.0` = good, `False` / `0.0` = bad.** This ensures that
+Phoenix displays consistent score bars — a high score always means high quality.
+Never write an evaluator where `True` signals a problem; invert the logic and
+rename accordingly (e.g. `no_hallucinated_citations` instead of `has_hallucinations`).
+
+Built-in code evaluators:
+
+| Name | Returns `True` when … |
+|------|----------------------|
+| `has_citations` | answer contains at least one `[N]` marker |
+| `is_non_empty` | answer is longer than 50 characters |
+| `no_unsubstantiated_claims` | `unsubstantiated_claim_count == 0` |
+| `no_hallucinated_citations` | `hallucinated_citation_count == 0` |
+
+Example:
 
 ```python
-def has_citations(output: dict[str, str]) -> bool:
+def has_citations(output: dict[str, object]) -> bool:
     """Check that the answer contains at least one citation marker [N]."""
-    return bool(re.search(r"\[\d+\]", output.get("answer", "")))
+    return bool(re.search(r"\[\d+\]", str(output.get("answer", ""))))
 ```
 
 For LLM-as-judge evaluators, see `arize-phoenix-evals`:
