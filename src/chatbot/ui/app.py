@@ -483,6 +483,13 @@ async def on_message(message: cl.Message) -> None:
             hallucinated=hallucinated,
         )
 
+        # Finalize the open streaming message.  When citations were present,
+        # set_content() already called msg.update() — this is a harmless
+        # second update.  When there were no citations (e.g. unsubstantiated
+        # claim only, or a pure-text answer), this is the only update call,
+        # and without it the Chainlit "pulsating dot" never disappears.
+        await response.finalize_current_message()
+
     logger.info("session.message_handled", length=len(user_text))
 
 
