@@ -315,6 +315,31 @@ def no_hallucinated_citations(output: dict[str, object]) -> bool:
     return not (isinstance(count, int) and count > 0)
 
 
+def _build_code_evaluators() -> list[Any]:
+    """Wrap the plain code evaluator functions with Phoenix ``create_evaluator``.
+
+    Using ``create_evaluator`` (rather than passing raw callables) ensures
+    ``direction="maximize"`` is attached to every evaluator so Phoenix renders
+    True as green in the UI for all of them.
+
+    The plain functions remain importable and callable without Phoenix for unit
+    tests — this factory is only called at experiment runtime after the
+    phoenix.evals lazy import succeeds.
+    """
+    from phoenix.evals import create_evaluator  # type: ignore[import-not-found]
+
+    return [
+        create_evaluator(name="has_citations", kind="code", direction="maximize")(has_citations),
+        create_evaluator(name="is_non_empty", kind="code", direction="maximize")(is_non_empty),
+        create_evaluator(name="no_unsubstantiated_claims", kind="code", direction="maximize")(
+            no_unsubstantiated_claims
+        ),
+        create_evaluator(name="no_hallucinated_citations", kind="code", direction="maximize")(
+            no_hallucinated_citations
+        ),
+    ]
+
+
 def _build_faithfulness_evaluator(settings: Settings) -> Any:
     """Construct a Phoenix ``ClassificationEvaluator`` for faithfulness scoring.
 
@@ -384,6 +409,60 @@ def _build_faithfulness_evaluator(settings: Settings) -> Any:
             return await classifier.async_evaluate(self._remap(input))
 
     return _FaithfulnessEvaluator()
+
+
+def _build_correctness_evaluator(settings: Settings) -> Any:
+    """Construct a Phoenix ``CorrectnessEvaluator`` for answer quality scoring.
+
+    Evaluates whether the chatbot's answer is factually accurate and complete
+    for the given question — without requiring ground-truth reference answers.
+    Complements faithfulness (which tests grounding) with a general facticity
+    signal.
+
+    Input mapping:  experiment envelope ``{"input": {"query": ...},
+    "output": {"answer": ...}}``  →  flat ``{"input": query, "output": answer}``
+    expected by ``CorrectnessEvaluator``.
+
+    Args:
+        settings: Application settings carrying ``eval_judge_*`` fields.
+    """
+    from phoenix.evals.metrics import CorrectnessEvaluator  # type: ignore[import-not-found]
+
+    llm = _build_eval_judge_llm(settings)
+    evaluator = CorrectnessEvaluator(llm=llm)
+
+    class _CorrectnessEvaluator:
+        """Thin remapping wrapper satisfying the ``EvalsEvaluator`` protocol.
+
+        Translates the experiment-framework envelope
+        ``{"input": {"query": ...}, "output": {"answer": ...}}`` into the flat
+        ``{"input": <query>, "output": <answer>}`` shape expected by
+        ``CorrectnessEvaluator``.
+        """
+
+        name: str = "correctness"
+        direction: str = "maximize"
+        source: str = "LLM"
+        input_schema: Any = None  # no schema — remapping handles field access
+
+        @staticmethod
+        def _remap(input: dict[str, Any]) -> dict[str, Any]:
+            output = input.get("output", {})
+            dataset_input = input.get("input", {})
+            if isinstance(output, dict) and isinstance(dataset_input, dict):
+                return {
+                    "input": cast(dict[str, Any], dataset_input).get("query", ""),
+                    "output": cast(dict[str, Any], output).get("answer", ""),
+                }
+            return input
+
+        def evaluate(self, input: dict[str, Any]) -> Any:
+            return evaluator.evaluate(self._remap(input))
+
+        async def async_evaluate(self, input: dict[str, Any]) -> Any:
+            return await evaluator.async_evaluate(self._remap(input))
+
+    return _CorrectnessEvaluator()
 
 
 # ---------------------------------------------------------------------------
@@ -511,11 +590,9 @@ def main() -> None:
 
     client: Client = Client()
     evaluators = [
-        has_citations,
-        is_non_empty,
-        no_unsubstantiated_claims,
-        no_hallucinated_citations,
+        *_build_code_evaluators(),
         _build_faithfulness_evaluator(_settings),
+        _build_correctness_evaluator(_settings),
     ]
 
     metadata = _collect_experiment_metadata(_settings)
