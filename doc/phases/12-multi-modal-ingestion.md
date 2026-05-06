@@ -1,9 +1,8 @@
 # Phase 12: Multi-Modal Ingestion (Images and PDF Figures)
 
 ## Status
-Draft. Sequenced after [Phase 11](11-retrieval-quality.md) and (tentatively)
-before [Phase 8](08-parent-child-retrieval.md). Sequencing decision pending
-final confirmation \u2014 see Phase 11 "Open Sub-Decision".
+Ready for implementation. Sequenced after [Phase 11](11-retrieval-quality.md)
+and before [Phase 8](08-parent-child-retrieval.md).
 
 ## Motivation
 
@@ -91,14 +90,19 @@ For each image (standalone or PDF-extracted):
 
 ### 3. Vision model selection
 
-Decisions to be made during implementation, but the realistic candidates
-on the Ollama runtime we already operate are:
+Implementation decision:
+
+- Primary baseline: `qwen2.5vl:7b` on Ollama.
+- Provider remains swappable via `VisionDescriber` so we can move to an
+  OpenAI-compatible cloud vision model if quality gates are not met.
+
+Alternative candidates (kept for reference):
 
 - `llama3.2-vision` (11B / 90B) \u2014 Meta's vision-instruct model on
   Ollama. Good general descriptions, English-strong. Acceptable on
   Apple Silicon at 11B.
 - `qwen2.5vl` \u2014 strong on charts, diagrams and multilingual content.
-  Recommended primary candidate for our mixed DE/EN corpus.
+  Selected initial family for our mixed DE/EN corpus (`qwen2.5vl:7b`).
 - `granite3.2-vision` \u2014 IBM, lighter weight.
 
 Wrap behind a `VisionDescriber` Protocol (`describe(image_bytes,
@@ -179,8 +183,7 @@ description as evidence) instead of just the description text.
 - [src/settings/__init__.py](../../src/settings/__init__.py): add
   vision-model settings (`vision_model`, `vision_base_url`,
   `vision_provider`, `image_cache_dir`, image filter thresholds). All
-  optional with sensible defaults; ingestion of images can be feature-
-  flagged off for fast dev cycles.
+  optional with sensible defaults.
 - [src/chatbot/ui/citation_view.py](../../src/chatbot/ui/citation_view.py):
   small extension to render an image when a cited chunk carries
   `image_path`.
@@ -244,20 +247,6 @@ description as evidence) instead of just the description text.
 - Phase 11 text-retrieval eval scores within agreed tolerance of the
   text-only baseline (image chunks must not crowd out text chunks).
 
-## Migration Plan
-
-1. Add `VisionDescriber` Protocol + Ollama implementation + fake for
-   tests.
-2. Add image cache (description cache + extracted-image storage).
-3. Extend `_PdfPageConverter` to extract page images and emit
-   image-description `Document`s.
-4. Add image-suffix `_FormatHandler`s for standalone images.
-5. Add ingestion config + settings, gated behind a feature flag
-   (`ingest_images: bool`, default false during rollout).
-6. Add UI rendering of cited images.
-7. Run full reindex; compare retrieval quality vs. Phase 11 baseline.
-8. Flip the feature flag default once metrics are non-regressive.
-
 ## Sequencing
 
 Recommended: **after Phase 11, before Phase 8.** Rationale:
@@ -267,7 +256,6 @@ Recommended: **after Phase 11, before Phase 8.** Rationale:
 - Doing Phase 12 before Phase 8 means Phase 8's parent-child design can
   treat \"image\" as a first-class parent type from day one rather than
   retrofitting.
-- Pending final confirmation in Phase 11's "Open Sub-Decision".
 
 ## Out of Scope
 
