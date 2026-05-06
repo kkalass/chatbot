@@ -24,11 +24,11 @@ def build_retriever_config(settings: Settings) -> RetrieverConfig:
     """Map settings to :class:`~src.chatbot.infrastructure.retrieval.RetrieverConfig`."""
     return RetrieverConfig(
         top_k=settings.retrieval_top_k,
-        score_threshold=settings.retrieval_score_threshold,
         store_host=settings.qdrant_host,
         store_port=settings.qdrant_port,
         store_collection=settings.qdrant_collection,
         embedding_dim=settings.embedding_dim,
+        llm_top_k=settings.retrieval_llm_top_k,
         store_backend="qdrant",
     )
 

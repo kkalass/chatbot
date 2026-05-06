@@ -8,7 +8,7 @@ from src.chatbot.app.protocols import Retriever
 from src.chatbot.infrastructure.embeddings_text import TextEmbedder
 
 from ._config import RetrieverConfig
-from ._qdrant import build_qdrant_retriever
+from ._qdrant_hybrid import build_qdrant_hybrid_retriever
 
 
 def build_retriever(
@@ -18,7 +18,10 @@ def build_retriever(
     """Construct the retriever."""
     match config.store_backend:
         case "qdrant":
-            return build_qdrant_retriever(config=config, text_embedder=text_embedder)
+            return build_qdrant_hybrid_retriever(
+                config=config,
+                text_embedder=text_embedder,
+            )
         case _:
             assert_never(config.store_backend)
 

@@ -29,6 +29,9 @@ from pypdf import PdfReader
 
 from src.ingest.infrastructure.document_store import DocumentStore
 from src.ingest.infrastructure.embeddings_document import DocumentEmbedder
+from src.ingest.infrastructure.embeddings_sparse import (
+    SparseDocumentEmbedder,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -220,10 +223,12 @@ class IngestionPipeline:
         config: IngestionConfig,
         document_store: DocumentStore,
         embedder: DocumentEmbedder,
+        sparse_embedder: SparseDocumentEmbedder | None = None,
     ) -> None:
         self._config = config
         self._document_store = document_store
         self._embedder = embedder
+        self._sparse_embedder = sparse_embedder
 
     def _ingest_batch(self, file_paths: list[Path]) -> int:
         """Ingest one bounded file batch and return the number of chunks written."""
@@ -268,9 +273,19 @@ class IngestionPipeline:
 
         logger.info("ingestion.embedding_and_writing", chunk_count=len(chunks))
         embed_result = self._embedder.run(documents=chunks)
-        embedded = cast(list[Document], embed_result["documents"])
+        embedded_chunks = cast(list[Document], embed_result["documents"])
+
+        if self._sparse_embedder:
+            logger.info("ingestion.computing_sparse_vectors", chunk_count=len(embedded_chunks))
+            sparse_result = self._sparse_embedder.run(documents=embedded_chunks)
+            embedded_chunks = cast(list[Document], sparse_result["documents"])
+            sparse_chunk_count = sum(
+                1 for chunk in embedded_chunks if chunk.sparse_embedding is not None
+            )
+            logger.info("ingestion.sparse_vectors_computed", chunk_count=sparse_chunk_count)
+
         written: int = self._document_store.write_documents(
-            embedded, policy=DuplicatePolicy.OVERWRITE
+            embedded_chunks, policy=DuplicatePolicy.OVERWRITE
         )
         logger.info("ingestion.done", chunks_written=written)
         return written

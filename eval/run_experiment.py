@@ -32,6 +32,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never, cast
 from uuid import uuid4
@@ -176,13 +177,32 @@ def _build_eval_orchestrator() -> ChatOrchestrator:
 # ---------------------------------------------------------------------------
 
 
+def _eval_with_retry(
+    fn: Any, input: dict[str, Any], retries: int = 20, sleep_s: float = 15.0
+) -> Any:
+    """Call ``fn(input)`` retrying on ``RateLimitError`` up to *retries* times.
+
+    Phoenix's ``LLM`` wrapper creates ``RateLimiter`` with ``max_rate_limit_retries=0``
+    and does not expose a way to change that.  After the first 429 the limiter
+    raises immediately instead of sleeping.  Since we own the evaluator wrappers
+    we handle retries here rather than via private attribute patching.
+    """
+    from phoenix.evals.rate_limiters import RateLimitError  # type: ignore[import-not-found]
+
+    for _ in range(retries):
+        try:
+            return fn(input)
+        except RateLimitError:
+            time.sleep(sleep_s)
+    return fn(input)  # final attempt — let any exception propagate
+
+
 def _build_eval_judge_llm(settings: Settings) -> Any:
     """Construct a Phoenix ``LLM`` instance from eval judge settings.
 
-    Both ``ollama`` and ``openai_compatible`` providers are routed through the
-    OpenAI-compatible client: Ollama exposes an OpenAI-compatible API at
-    ``/v1``, and other providers (Groq, OpenAI, etc.) use the same wire
-    format.
+    All providers are routed through Phoenix's ``openai`` provider, which
+    uses the OpenAI-compatible wire format.  For Ollama, the ``/v1`` suffix
+    is appended automatically when absent.
 
     Args:
         settings: Application settings carrying ``eval_judge_*`` fields.
@@ -205,6 +225,7 @@ def _build_eval_judge_llm(settings: Settings) -> Any:
         model=settings.eval_judge_model,
         base_url=base_url,
         api_key=api_key,
+        initial_per_second_request_rate=settings.eval_judge_initial_per_second_request_rate,
     )
 
 
@@ -366,7 +387,7 @@ def _build_code_evaluators() -> list[Any]:
     ]
 
 
-def _build_faithfulness_evaluator(settings: Settings) -> Any:
+def _build_faithfulness_evaluator(llm: Any) -> Any:
     """Construct a Phoenix ``ClassificationEvaluator`` for faithfulness scoring.
 
     Uses the built-in Phoenix faithfulness prompt template
@@ -381,14 +402,13 @@ def _build_faithfulness_evaluator(settings: Settings) -> Any:
     delegating so that both the flat and nested forms are handled correctly.
 
     Args:
-        settings: Application settings carrying ``eval_judge_*`` fields.
+        llm: Shared ``phoenix.evals.LLM`` instance (shared rate limiter).
     """
     from phoenix.evals import create_classifier  # type: ignore[import-not-found]
     from phoenix.evals.__generated__.classification_evaluator_configs import (  # type: ignore[import-not-found]
         FAITHFULNESS_CLASSIFICATION_EVALUATOR_CONFIG as CFG,
     )
 
-    llm = _build_eval_judge_llm(settings)
     classifier = create_classifier(
         name="faithfulness",
         prompt_template=CFG.messages[0].content,
@@ -429,7 +449,7 @@ def _build_faithfulness_evaluator(settings: Settings) -> Any:
             return input
 
         def evaluate(self, input: dict[str, Any]) -> Any:
-            return classifier.evaluate(self._remap(input))
+            return _eval_with_retry(classifier.evaluate, self._remap(input))
 
         async def async_evaluate(self, input: dict[str, Any]) -> Any:
             return await classifier.async_evaluate(self._remap(input))
@@ -437,7 +457,7 @@ def _build_faithfulness_evaluator(settings: Settings) -> Any:
     return _FaithfulnessEvaluator()
 
 
-def _build_correctness_evaluator(settings: Settings) -> Any:
+def _build_correctness_evaluator(llm: Any) -> Any:
     """Construct a Phoenix ``CorrectnessEvaluator`` for answer quality scoring.
 
     Evaluates whether the chatbot's answer is factually accurate and complete
@@ -450,11 +470,10 @@ def _build_correctness_evaluator(settings: Settings) -> Any:
     expected by ``CorrectnessEvaluator``.
 
     Args:
-        settings: Application settings carrying ``eval_judge_*`` fields.
+        llm: Shared ``phoenix.evals.LLM`` instance (shared rate limiter).
     """
     from phoenix.evals.metrics import CorrectnessEvaluator  # type: ignore[import-not-found]
 
-    llm = _build_eval_judge_llm(settings)
     evaluator = CorrectnessEvaluator(llm=llm)
 
     class _CorrectnessEvaluator:
@@ -483,7 +502,7 @@ def _build_correctness_evaluator(settings: Settings) -> Any:
             return input
 
         def evaluate(self, input: dict[str, Any]) -> Any:
-            return evaluator.evaluate(self._remap(input))
+            return _eval_with_retry(evaluator.evaluate, self._remap(input))
 
         async def async_evaluate(self, input: dict[str, Any]) -> Any:
             return await evaluator.async_evaluate(self._remap(input))
@@ -492,7 +511,7 @@ def _build_correctness_evaluator(settings: Settings) -> Any:
 
 
 def _build_document_relevance_evaluator(
-    settings: Settings,
+    llm: Any,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Construct a per-document relevance evaluator and a shared result collector.
 
@@ -515,12 +534,11 @@ def _build_document_relevance_evaluator(
     4. Returns ``mean_document_relevance`` (0.0-1.0) as the experiment scalar.
 
     Args:
-        settings: Application settings carrying ``eval_judge_*`` fields.
+        llm: Shared ``phoenix.evals.LLM`` instance (shared rate limiter).
     """
     from phoenix.evals import create_evaluator  # type: ignore[import-not-found]
     from phoenix.evals.metrics import DocumentRelevanceEvaluator  # type: ignore[import-not-found]
 
-    llm = _build_eval_judge_llm(settings)
     doc_evaluator = DocumentRelevanceEvaluator(llm=llm)
 
     collector: list[dict[str, Any]] = []
@@ -544,9 +562,8 @@ def _build_document_relevance_evaluator(
             return 0.0
         scores: list[float] = []
         for doc in valid_docs:
-            result = doc_evaluator.evaluate(
-                {"input": query, "document_text": str(doc.get("content", ""))}
-            )
+            _eval_input = {"input": query, "document_text": str(doc.get("content", ""))}
+            result = _eval_with_retry(doc_evaluator.evaluate, _eval_input)
             score_obj = result[0] if result else None
             score: float | None = (
                 float(score_obj.score)
@@ -581,6 +598,115 @@ def _build_document_relevance_evaluator(
 # ---------------------------------------------------------------------------
 # Per-document results export
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Replay helpers
+# ---------------------------------------------------------------------------
+
+
+def _fetch_replay_cache(
+    client: Client,
+    experiment_id: str,
+) -> dict[str, dict[str, object]]:
+    """Build a ``{query: task_output}`` lookup from a completed Phoenix experiment.
+
+    Fetches the experiment's dataset examples (to resolve ``query`` from
+    ``dataset_example_id``) and its task runs (to retrieve cached outputs),
+    then joins on ``dataset_example_id``.
+
+    Handles paginated runs via the ``next_cursor`` continuation token.
+    Runs with ``error`` set or ``output`` absent are silently skipped.
+
+    Args:
+        client:        Authenticated Phoenix ``Client``.
+        experiment_id: The Phoenix experiment ID to replay.
+
+    Returns:
+        Mapping from query string to the original task output dict.
+    """
+    # Resolve dataset_id so we can fetch the example inputs.
+    exp_resp = client._client.get(  # pyright: ignore[reportPrivateUsage]
+        f"v1/experiments/{experiment_id}",
+    )
+    exp_resp.raise_for_status()
+    exp_data: dict[str, Any] = exp_resp.json()["data"]
+    dataset_id: str = exp_data["dataset_id"]
+    dataset_version_id: str = exp_data["dataset_version_id"]
+
+    # Fetch all dataset examples to map example_id → query.
+    ex_resp = client._client.get(  # pyright: ignore[reportPrivateUsage]
+        f"v1/datasets/{dataset_id}/examples",
+        params={"version_id": dataset_version_id},
+    )
+    ex_resp.raise_for_status()
+    examples: list[dict[str, Any]] = ex_resp.json()["data"]["examples"]
+    example_to_query: dict[str, str] = {
+        ex["id"]: cast(dict[str, Any], ex["input"]).get("query", "") for ex in examples
+    }
+
+    # Fetch all task runs (paginated) to map example_id → output.
+    example_to_output: dict[str, dict[str, object]] = {}
+    cursor: str | None = None
+    while True:
+        params: dict[str, Any] = {"limit": 100}
+        if cursor:
+            params["cursor"] = cursor
+        runs_resp = client._client.get(  # pyright: ignore[reportPrivateUsage]
+            f"v1/experiments/{experiment_id}/runs",
+            params=params,
+        )
+        runs_resp.raise_for_status()
+        body: dict[str, Any] = runs_resp.json()
+        for run in body.get("data", []):
+            if run.get("error") or run.get("output") is None:
+                continue
+            example_to_output[run["dataset_example_id"]] = cast(dict[str, object], run["output"])
+        cursor = body.get("next_cursor")
+        if not cursor:
+            break
+
+    # Join on example_id.
+    cache: dict[str, dict[str, object]] = {}
+    for example_id, output in example_to_output.items():
+        query = example_to_query.get(example_id, "")
+        if query:
+            cache[query] = output
+    logger.info(
+        "replay_cache.built",
+        experiment_id=experiment_id,
+        cached_examples=len(cache),
+    )
+    return cache
+
+
+def _build_replay_task(
+    cache: dict[str, dict[str, object]],
+) -> Any:
+    """Return a synchronous task function that serves cached outputs by query.
+
+    Intended for use with ``run_experiment`` when replaying task outputs from a
+    previous experiment — avoiding re-inference while still creating a fresh
+    Phoenix experiment entry with new name, metadata, and evaluators.
+
+    Queries not found in the cache return an empty stub so the experiment
+    run completes rather than erroring out.
+
+    Args:
+        cache: Mapping ``{query: task_output}`` built by ``_fetch_replay_cache``.
+    """
+    _stub: dict[str, object] = {
+        "answer": "",
+        "context": "",
+        "hallucinated_citation_count": 0,
+        "unsubstantiated_claim_count": 0,
+        "retrieved_documents": [],
+    }
+
+    def replay_task(input: dict[str, str]) -> dict[str, object]:
+        return cache.get(input.get("query", ""), _stub)
+
+    return replay_task
 
 
 def _write_per_document_results(
@@ -712,7 +838,25 @@ def main() -> None:
             "The ID is shown in the Phoenix UI experiment detail page."
         ),
     )
+    parser.add_argument(
+        "--replay-from",
+        default=None,
+        metavar="ID",
+        help=(
+            "Create a NEW Phoenix experiment by replaying task outputs from the given "
+            "experiment ID.  The task is not re-executed; cached outputs are returned "
+            "directly.  Use --experiment-name to name the new experiment.  "
+            "Evaluators (and their judge model) are taken from the current .env config."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.replay_from and args.experiment_id:
+        logger.error(
+            "args.conflict",
+            msg="--replay-from and --experiment-id are mutually exclusive",
+        )
+        sys.exit(1)
 
     dataset_file = Path(args.dataset_file)
     if not dataset_file.exists():
@@ -740,13 +884,15 @@ def main() -> None:
     # Lazy imports: phoenix.client and pandas are eval-group dependencies
     # not available in the default environment.
     from phoenix.client import Client  # type: ignore[import-not-found]
+    from phoenix.evals.rate_limiters import RateLimitError  # type: ignore[import-not-found]
 
     client: Client = Client()
-    doc_relevance_eval, doc_records = _build_document_relevance_evaluator(_settings)
+    llm = _build_eval_judge_llm(_settings)
+    doc_relevance_eval, doc_records = _build_document_relevance_evaluator(llm)
     evaluators = [
         *_build_code_evaluators(),
-        _build_faithfulness_evaluator(_settings),
-        _build_correctness_evaluator(_settings),
+        _build_faithfulness_evaluator(llm),
+        _build_correctness_evaluator(llm),
         doc_relevance_eval,
     ]
 
@@ -762,6 +908,8 @@ def main() -> None:
             experiment_metadata=metadata,
             experiment_description=description,
             dry_run=1,
+            rate_limit_errors=(RateLimitError,),
+            retries=12,
         )
         logger.info("dry_run.complete", experiment=str(experiment))
         return
@@ -772,14 +920,25 @@ def main() -> None:
         result = client.experiments.evaluate_experiment(
             experiment=existing,
             evaluators=evaluators,
+            rate_limit_errors=(RateLimitError,),
+            retries=12,
         )
         logger.info(
             "evaluate_only.complete",
             experiment_id=getattr(result, "id", str(result)),
         )
         if doc_records:
-            _write_per_document_results(doc_records, f"eval-{args.experiment_id}")
+            perdoc_name = args.experiment_name or f"eval-{args.experiment_id}"
+            _write_per_document_results(doc_records, perdoc_name)
         return
+
+    if args.replay_from:
+        logger.info("replay.start", replay_from=args.replay_from, **metadata)
+        replay_cache = _fetch_replay_cache(client, args.replay_from)
+        task_fn = _build_replay_task(replay_cache)
+        metadata = {**metadata, "replay_from": args.replay_from}
+    else:
+        task_fn = _sync_task
 
     experiment_name: str = args.experiment_name or f"chatbot-eval-{uuid4().hex[:8]}"
     dataset = _get_or_create_dataset(client, dataset_file, args.dataset_name)
@@ -787,11 +946,13 @@ def main() -> None:
     logger.info("experiment.start", name=experiment_name, **metadata)
     experiment = client.experiments.run_experiment(
         dataset=dataset,
-        task=_sync_task,
+        task=task_fn,
         evaluators=evaluators,
         experiment_name=experiment_name,
         experiment_metadata=metadata,
         experiment_description=description,
+        rate_limit_errors=(RateLimitError,),
+        retries=12,
     )
     logger.info("experiment.complete", experiment_id=getattr(experiment, "id", str(experiment)))
     if doc_records:

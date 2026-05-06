@@ -18,11 +18,11 @@ Concrete observations:
   bibliography lines, single captions like `Figure 6`, or headers/footers.
   These chunks appear to match because the source document is topically
   relevant, not because the chunk text itself answers the query.
-- **Experiment evidence (quantitative).** Phoenix experiment
-  `RXhwZXJpbWVudDoxMA==` on dataset `RGF0YXNldDox` (see
-  `http://localhost:6006/datasets/RGF0YXNldDox/compare?experimentId=RXhwZXJpbWVudDoxMA==`)
-  shows many examples with `mean_document_relevance` ≈ 0.4, i.e. only 2 of the
-  top-5 retrieved chunks were judged relevant.
+- **Experiment evidence (quantitative).** Frozen baseline for this phase is
+  Phoenix experiment `RXhwZXJpbWVudDoxMQ==` on dataset `RGF0YXNldDox` (see
+  `http://localhost:6006/datasets/RGF0YXNldDox/compare?experimentId=RXhwZXJpbWVudDoxMQ==`).
+  Aggregate `mean_document_relevance` for that run is `0.386`, i.e. fewer than
+  2 of the top-5 retrieved chunks were relevant on average.
 
 The remainder of this document records the current state, hypothesises why
 quality is poor, examines design alternatives (including non-vector
@@ -68,6 +68,79 @@ specifies a parent-child retrieval design (chunk search, parent return) that is
 relevant to several hypotheses below. The current code does **not** yet
 implement parent linkage; chunks are returned directly. Phase 11 should be
 sequenced and scoped against Phase 8 — see "Relationship to Phase 8".
+
+## Baseline Frozen (N1) / Index Inspection (N2)
+
+The first two planned next steps have been executed against the current
+production-like corpus and the agreed reference experiment.
+
+### N1. Frozen baseline
+- **Reference experiment.** `RXhwZXJpbWVudDoxMQ==`
+  (`chatbot-eval-f9f7d224`) on `rag-questions-v1`.
+- **Aggregate metrics.**
+  - `mean_document_relevance = 0.386`
+  - average latency in Phoenix compare view: `18.8s`
+- **Worst queries by mean document relevance.**
+  - `0.00` — `Welche Chancen und Risiken sieht das Fraunhofer-Institut beim Einsatz von KI in Unternehmensprozessen?`
+  - `0.10` — `How might generative AI affect employment and the future of work according to the IMF?`
+  - `0.1667` — `Was empfiehlt das BIBB zum Umgang mit KI in der Berufsausbildung?`
+  - `0.20` — `Which federal agencies are required to take action under Executive Order 14110?`
+  - `0.28` — `What does the IMF report say about which jobs are most exposed to generative AI?`
+- **Best queries by mean document relevance.**
+  - `1.00` — `Welche Auswirkungen hat KI auf die berufliche Bildung in Deutschland?`
+  - `0.6333` — `How do knowledge workers use AI tools to augment their work, and what skills become more important?`
+  - `0.60` — `Wie verändert die Digitalisierung und KI die Tätigkeitsprofile in deutschen Berufen laut IAB?`
+  - `0.48` — `What are GPTs in the context of economic history, and why might large language models qualify as general purpose technologies?`
+  - `0.40` — `What are the main AI safety requirements established by Executive Order 14110?`
+
+Interpretation:
+- The baseline confirms the qualitative impression that retrieval quality is
+  highly unstable across questions.
+- German coverage is not uniformly bad; the issue is retrieval selectivity,
+  not merely corpus language mismatch.
+- Even the "better" queries are mostly below a quality level that would be
+  acceptable for production grounding.
+
+### N2. Current index findings
+Direct inspection of the active Qdrant collection (`chatbot`) shows:
+
+- `623` indexed chunks total.
+- Word-count distribution:
+  - min `4`
+  - mean `143.57`
+  - median `154`
+  - max `295`
+- `27` chunks have fewer than `50` words.
+- `200` chunks have fewer than `100` words.
+- Source distribution (top 8):
+  - `corpus/executive_order_14110.txt` → `220`
+  - `corpus/imf_gen_ai_future_of_work.pdf` → `128`
+  - `corpus/gpts_are_gpts.pdf` → `83`
+  - `corpus/iab_digitalisierung.pdf` → `72`
+  - `corpus/bibb_ki_berufsbildung.pdf` → `56`
+  - `corpus/fraunhofer_ki_prozesse.pdf` → `36`
+  - `corpus/weizenbaum_dp_41.pdf` → `22`
+  - `corpus/ai_knowledge_worker.md` → `6`
+- Page provenance is present for `397` chunks and absent for `226` chunks
+  (expected: PDFs have page metadata, txt/md do not).
+
+Representative short-chunk samples confirm the failure modes from the initial
+anecdotal review:
+- `WORKING PAPER Figure 6` (`4` words, `corpus/gpts_are_gpts.pdf`)
+- bibliography / title-page fragments from `corpus/bibb_ki_berufsbildung.pdf`
+- table / axis fragments from `corpus/iab_digitalisierung.pdf`
+- footer / filing boilerplate from `corpus/executive_order_14110.txt`
+- appendix / classification fragments from `corpus/imf_gen_ai_future_of_work.pdf`
+
+Interpretation:
+- H1 and H5 are now supported by actual index data, not just anecdotal UI
+  inspection.
+- The dominant problem is not only that some chunks are too short; it is that
+  the current splitter emits many low-signal residual chunks and allows
+  structurally poor units (TOC entries, figure captions, filing footers,
+  appendix tables) into the index unchanged.
+- PDF page extraction preserves page provenance, but there is no structural
+  protection against indexing low-information page tails or figure-only text.
 
 ## Hypotheses for Poor Retrieval Quality
 
@@ -337,6 +410,11 @@ explicit re-approval.
    retrieval infrastructure so that a reranker can be plugged in without
    touching the orchestrator or tool layer. Concrete implementation and
    eval in the follow-up phase.
+   **Updated priority signal from N3f.4:** the N3f.4 experiment showed
+   that the hybrid retriever already achieves high recall (9.4 relevant
+   docs/q) — the limiting factor is precision, not recall.  A
+   cross-encoder reranker is the natural next step and should be treated
+   as **high priority** when retrieval quality work resumes.
 5. **Multi-modal scope.** Confirmed out of scope for Phase 11. Tracked
    as [Phase 12](12-multi-modal-ingestion.md).
 6. **Quality target.** No fixed numeric target up front. Approach: lock
@@ -363,30 +441,205 @@ production code; they produce the evidence needed to make the Decisions Needed
 above.
 
 ### N1. Quantify the current baseline
-- Re-run the Phoenix experiment with the existing corpus and record per-query
-  `mean_document_relevance`, recall@5, and latency as the locked baseline.
-- Bucket failing queries by failure mode (exact-name miss, paraphrase miss,
-  short-fragment hit, off-topic hit). This bucketing directly informs which
-  hypotheses (H1–H8) matter most for our corpus.
+- Done for the frozen baseline experiment `RXhwZXJpbWVudDoxMQ==`.
+- Next remaining sub-step: bucket the failing queries by failure mode
+  (exact-name miss, paraphrase miss, short-fragment hit, off-topic hit).
 
 ### N2. Inspect the current index
-- Dump chunk-length distribution (words, characters) from Qdrant.
-- Dump the top-5 chunks for each failing eval query and tag their failure
-  mode by hand on a sample (≈ 20 queries).
-- Confirm or refute H1 (short chunks) and H5 (boilerplate chunks)
-  empirically.
+- Done for chunk-length distribution and spot-check sampling.
+- H1 and H5 are empirically supported.
+- Next remaining sub-step: dump the top-5 chunks for each failing eval query
+  and tag their failure mode by hand on a sample (≈ 20 query-document pairs).
+
+### N3. Completed experiment snapshot (current state)
+
+> **⚠ Judge incompatibility notice.**  Early experiments (N3a–N3f, N3f-old)
+> were originally evaluated with `llama3.1:8b` running locally via Ollama.
+> Selected experiments (Baseline, N3a, N3f.3) were later replayed with
+> `llama-v3p3-70b-instruct` (Fireworks AI) as judge.  Scores from these two
+> judges are **not directly comparable** — the 70b model is more lenient and
+> produces systematically higher absolute scores.  Only compare within the same
+> judge column in the tables below.
+
+The following experiments have been executed and compared against the frozen
+baseline (`RXhwZXJpbWVudDoxMQ==`, `mean_document_relevance = 0.386`,
+`llama3.1:8b` judge):
+
+- **Baseline (replay with `llama-v3p3-70b-instruct` judge).**
+  - Same chatbot traces as `RXhwZXJpbWVudDoxMQ==`, re-evaluated with the
+    stronger judge to establish a comparable reference point.
+  - Replay experiment: `RXhwZXJpbWVudDozNQ==`.
+  - Result file: `eval/results/phase11-baseline-judge-llama33-70b-perdoc.jsonl`.
+  - Aggregate (`llama-v3p3-70b-instruct` judge): mean `0.399`, median `0.350`,
+    docs/q `18.0`.
+
+- **N3a (embedding model swap only).**
+  - Setup: `EMBEDDING_MODEL=bge-m3`, `EMBEDDING_DIM=1024`, low-signal filter
+    disabled, structure-aware segmentation disabled.
+  - Result file: `eval/results/phase11-n3a-bge-m3-only-perdoc.jsonl`.
+  - Aggregate (`llama3.1:8b` judge): mean `0.6182`, median `0.650`, docs/q
+    `13.3` (`+0.232` vs baseline).
+  - Aggregate (`llama-v3p3-70b-instruct` judge): mean `0.730`, median `0.750`.
+    Result file: `eval/results/phase11-n3a-judge-llama33-70b-v3-perdoc.jsonl`.
+  - Interpretation: strong positive signal; multilingual embedding swap is the
+    first change that clearly improves retrieval quality in this repo.
+
+- **N3b (embedding text augmentation: title/source prefix).**
+  - Setup: `EMBEDDING_MODEL=bge-m3`, `EMBEDDING_DIM=1024`,
+    `INGESTION_EMBEDDING_CONTEXT_PREFIX=true`, low-signal filter disabled,
+    structure-aware segmentation disabled.
+  - Experiment: `RXhwZXJpbWVudDoxOA==`
+    (`http://127.0.0.1:6006/datasets/RGF0YXNldDox/compare?experimentId=RXhwZXJpbWVudDoxOA==`).
+  - Result file: `eval/results/phase11-n3b-bge-m3-plus-context-prefix-perdoc.jsonl`.
+  - Aggregate (`llama3.1:8b` judge): mean `0.4793`, median `0.463`, docs/q `9.9`
+    (`+0.093` vs baseline, `-0.139` vs N3a — same judge).
+  - Interpretation: in this setup, prefix augmentation clearly underperforms
+    plain `bge-m3`; keep it disabled by default.
+
+- **N3c (low-signal chunk filter only).**
+  - Setup: `INGESTION_MIN_CHUNK_WORDS=40`, `INGESTION_MIN_ALPHA_RATIO=0.55`.
+  - Result file: `eval/results/phase11-n3c-low-signal-filter-rerun-perdoc.jsonl`.
+  - Aggregate (`llama3.1:8b` judge): mean `0.3724`, median `0.295`, docs/q `16.0`
+    (`-0.014` vs baseline — same judge).
+  - Interpretation: despite removing obvious junk chunks, this threshold pair
+    slightly hurts retrieval relevance on the current dataset.
+
+- **N3d (structure-aware segmentation).**
+  - Setup: heading-aware markdown segmentation + paragraph grouping before
+    split; tested behind `INGESTION_STRUCTURE_AWARE_SEGMENTATION=true`.
+  - Result file: `eval/results/phase11-n3d-structure-aware-splitting-perdoc.jsonl`.
+  - Aggregate (`llama3.1:8b` judge): mean `0.3360`, median `0.263`, docs/q `12.5`
+    (`-0.050` vs baseline, `-0.036` vs N3c — same judge).
+  - Interpretation: this first segmentation variant regresses quality and
+    should not be the default path.
+
+- **N3f-old (hybrid with home-grown TF sparse — INVALIDATED).**
+  - Result file: `eval/results/phase11-n3f-hybrid-dense-sparse-rrf-perdoc.jsonl`.
+  - Aggregate (`llama3.1:8b` judge): `0.5268` — **invalidated.** Sparse embedder
+    used TF + hash tokenisation without IDF; regex ASCII tokeniser silently
+    dropped all German tokens with umlauts. Not comparable to any
+    fastembed-based result.
+
+- **N3f (hybrid dense+sparse with fastembed `Qdrant/bm25` + RRF — invalidated, superseded by N3f.3/N3f.4).**
+  - Setup: `EMBEDDING_MODEL=bge-m3`, `EMBEDDING_DIM=1024`,
+    `INGESTION_ENABLE_SPARSE_VECTORS=true`, `RETRIEVAL_MODE=hybrid`.
+    Sparse vectors produced by fastembed `Qdrant/bm25` (pre-trained multilingual
+    IDF, Unicode tokenisation).  Dense + sparse fused via RRF.
+  - Experiment: `RXhwZXJpbWVudDoyMA==`
+    (`http://127.0.0.1:6006/datasets/RGF0YXNldDox/compare?experimentId=RXhwZXJpbWVudDoyMA==`).
+  - Result file: `eval/results/phase11-n3f-fastembed-bm25-hybrid-perdoc.jsonl`.
+  - Aggregate (`llama3.1:8b` judge): `0.5967` — **invalidated.**  The retriever
+    used `top_k * 2` as the candidate pool size for both dense and sparse
+    retrievers, giving hybrid an unfair advantage over dense-only N3a (which
+    uses exactly `top_k`). Fixed: both retrievers now use `top_k`; superseded
+    by N3f.3 and N3f.4.
+
+- **N3f.3 (hybrid + split-query: separate `query_dense` / `query_sparse` fields).**
+  - Setup: as N3f above plus `query_dense` and `query_sparse` tool-schema fields;
+    the LLM formulates a semantic paraphrase for dense and a keyword term list
+    for BM25 separately.  `DocumentJoiner` bounded to `top_k` candidates.
+  - Experiments: `llama3.1:8b` judge `RXhwZXJpbWVudDoyMw==`;
+    `llama-v3p3-70b-instruct` replay `RXhwZXJpbWVudDozNA==`.
+  - Result files: `eval/results/phase11-n3f3-split-query-perdoc.jsonl`
+    (`llama3.1:8b`), `eval/results/phase11-n3f3-judge-llama33-70b-perdoc.jsonl`
+    (`llama-v3p3-70b-instruct`).
+  - Aggregate (`llama3.1:8b` judge): mean `0.609`, median `0.536`, docs/q `6.3`
+    (`-0.009` vs N3a same judge, within noise).
+  - Aggregate (`llama-v3p3-70b-instruct` judge): mean `0.744`, median `1.000`,
+    docs/q `6.3` (`+0.014` vs N3a same judge — marginal positive).
+  - Interpretation: split-query yields fewer candidates per query (6.3 vs 13.3
+    for N3a), reducing noise in the LLM context.  Quality delta vs N3a is small
+    but non-negative.  The llama33-70b judge shows a clearer (though still
+    modest) improvement.  The halved docs/q is the stronger practical signal:
+    the LLM context is cleaner without losing relevant documents.
+
+- **N3f.4 (full RRF pool: `retrieval_pool_size=None`).**
+  - Setup: as N3f.3 (split-query: separate `query_dense` / `query_sparse`
+    fields); `DocumentJoiner` returns the complete fused list without a
+    `top_k` cut (`retrieval_pool_size=None`).  Both individual retrievers
+    still fetch exactly `top_k` candidates; the joiner merges them without
+    truncating.
+  - Experiment: `RXhwZXJpbWVudDozNg==` (`phase11-n3f4-hybrid-full-pool`).
+  - Result file: `eval/results/phase11-n3f4-hybrid-full-pool-perdoc.jsonl`.
+  - Aggregate (`llama-v3p3-70b-instruct` judge): mean `0.678`, median `0.686`,
+    docs/q `17.9` (relevant docs/q `9.4` at score > 0).
+  - Within-judge comparison vs N3f.3 (`llama-v3p3-70b-instruct`): mean
+    `0.678` vs `0.744` — N3f.4 is **worse** despite surfacing 9.4 relevant
+    docs/q vs 3.7 for N3f.3.  The full pool contains more relevant documents
+    in absolute terms, but dilutes the per-query mean because irrelevant
+    documents (score `0`) make up the larger share of the pool (8.5 of 17.9
+    total, vs 2.6 of 6.3 for N3f.3).  The `top_k` cut in N3f.3 acts as a
+    precision filter: it discards both noise *and* some relevant documents,
+    but the noise-to-signal ratio in the retained set is better.
+  - **Reranking signal:** N3f.4's recall (9.4 relevant docs/q) demonstrates
+    that the hybrid retriever *finds* the right documents — the bottleneck is
+    precision, not recall.  A cross-encoder reranker over the N3f.4 pool would
+    be able to surface those 9.4 relevant documents in a tight top-k, which a
+    blind `top_k` cut cannot.  This is strong empirical motivation to
+    prioritise reranking (N3e / Phase 13) as the next retrieval quality step.
+
+#### Judge comparison table
+
+The `llama-v3p3-70b-instruct` replays re-evaluate saved experiment traces with
+a stronger judge (Fireworks AI).  **Do not compare scores across judge columns**
+— the 70b model is more lenient and produces systematically higher absolute
+scores.  Only the within-column delta (e.g. N3a vs Baseline, same judge) is
+meaningful.
+
+| Config | llama3.1:8b mean | llama3.1:8b median | llama-v3p3-70b mean | llama-v3p3-70b median | docs/q | rel docs/q (>0) |
+|---|---|---|---|---|---|---|
+| Baseline | `0.386`† | — | `0.399` | `0.350` | 18.0 | — |
+| N3a — bge-m3 dense | `0.618` | `0.650` | `0.730` | `0.750` | 13.3 | — |
+| N3f.3 — split-query hybrid | `0.609` | `0.536` | `0.744` | `1.000` | 6.3 | 3.7 |
+| N3f.4 — full RRF pool | — | — | `0.678` | `0.686` | 17.9 | 9.4 |
+
+† Baseline `llama3.1:8b` = `0.386` from Phoenix experiment
+`RXhwZXJpbWVudDoxMQ==`; `llama-v3p3-70b-instruct` replay
+`RXhwZXJpbWVudDozNQ==`.
+
+For reference — experiments that showed regressions (`llama3.1:8b` judge only;
+no `llama-v3p3-70b-instruct` replay run; deltas are within-judge):
+
+| Config | llama3.1:8b mean | vs baseline | vs N3a |
+|---|---|---|---|
+| N3b — title/source prefix | `0.479` | `+0.093` | `-0.139` |
+| N3c — chunk filter 40w/0.55α | `0.372` | `-0.014` | `-0.246` |
+| N3d — structure-aware segmentation | `0.336` | `-0.050` | `-0.282` |
+
+Current decision from measured evidence:
+- **N3a** (`bge-m3` embedding swap) is the confirmed primary improvement and the
+  basis for all subsequent experiments.  Δ = `+0.232` vs baseline
+  (`llama3.1:8b` judge), `+0.331` (`llama-v3p3-70b-instruct` judge — same-judge
+  comparison only).
+- **N3f.3** (split-query hybrid) is at worst neutral vs N3a and halves LLM
+  context noise (docs/q 6.3 vs 13.3).  Considered a net positive.
+- **N3f.4** (full RRF pool, `llama-v3p3-70b-instruct` judge) is complete.
+  Mean `0.678` vs N3f.3's `0.744` (same judge) — **worse** despite surfacing
+  9.4 relevant docs/q (vs 3.7 for N3f.3).  The `top_k` cut in N3f.3 acts as
+  an effective precision filter: the noise-to-signal ratio of the uncut pool
+  drags the per-query mean down.  N3f.4 is discarded in favour of N3f.3.
+- **N3b** is disabled by default — prefix augmentation hurts vs N3a on this
+  corpus/model combination.
+- **N3c / N3d** are discarded in their current parameterisations; both
+  regress quality vs baseline.  No further tuning planned for Phase 11.
 
 ### N3. Cheap, isolated experiments (no code merge required)
 Run each as an isolated branch / experiment so its effect can be attributed:
 
 - **N3a.** Swap embedding model to a multilingual model (`bge-m3` or
   `multilingual-e5-large`), reindex, re-run eval. Targets H3.
+  - Status: done for `bge-m3` with strong gain (`+0.2322` vs baseline).
 - **N3b.** Augment embedding text with `title` + `source` prefix, keep
   display text unchanged, reindex, re-run eval. Targets H2.
+  - Status: done (tested on top of `bge-m3`), regression vs N3a
+    (`0.4793`, i.e. `-0.1389` vs N3a).
 - **N3c.** Add a minimum-length and alphanumeric-density filter at
   ingestion, reindex, re-run eval. Targets H5.
+  - Status: done (tested thresholds `40` / `0.55`), slight regression on this
+    dataset (`-0.0136` vs baseline).
 - **N3d.** Heading-aware splitter for markdown + sentence-aware splitter
   with size budget for txt/PDF. Targets H1.
+  - Status: done for first variant, regression (`-0.0500` vs baseline).
 - **N3e.** Define the `Reranker` Protocol and a stub no-op implementation;
   no concrete reranker model in Phase 11. The protocol boundary ensures
   the follow-up phase can wire in a `bge-reranker-v2-m3`
@@ -394,6 +647,54 @@ Run each as an isolated branch / experiment so its effect can be attributed:
   Targets H6 (preparation only).
 - **N3f.** Add BM25 sparse vectors in Qdrant + RRF fusion with dense.
   Targets H4.
+  - Status: implemented with fastembed `Qdrant/bm25`.  Previous result
+    (`0.5967`) invalidated: retriever used `top_k * 2` pool, giving hybrid an
+    unfair advantage.  Fixed; re-evaluation required.
+  - Note on reranking: RRF cannot resolve the case where dense and sparse
+    produce fully disjoint candidate lists — it assigns rank-based scores but
+    has no signal for absolute relevance across the two pools.  A
+    cross-encoder reranker over the merged pool (before the final `top_k` cut)
+    directly addresses this.  With two retrievers each fetching `top_k`, the
+    merged pool already contains up to `2 * top_k` candidates — exactly the
+    right input size for the reranker, no multiplier needed (N3e).
+  - Sub-experiments (run after valid N3f baseline is established):
+    - **N3f.2** — Tool description adapted for hybrid mode: instruct the LLM
+      to pass proper nouns, acronyms, and statute identifiers (e.g. "BIBB",
+      "Executive Order 14110") verbatim rather than paraphrasing them.
+      Hypothesis: the current description ("embedding based vector search")
+      biases the LLM toward paraphrasing away the exact terms that sparse
+      matching needs.
+    - **N3f.3** — Two query fields in the tool schema: `query_dense` (LLM
+      formulates a semantic paraphrase for dense) and `query_sparse` (LLM
+      formulates a keyword-oriented term list for BM25).  Each field is routed
+      to its respective retriever.  Measures whether explicit query splitting
+      beats feeding the same query to both sides.
+      - Status: **done**.  `_SearchInput` extended with optional
+        `query_dense` and `query_sparse`; `Retriever` Protocol and both
+        implementations updated; tool description updated to guide the LLM to
+        provide all three fields.
+      - Results: see snapshot above.  Mean `0.609` (orig judge), `0.744`
+        (llama33-70b).  Docs/q `6.3` vs `13.3` for N3a.  Considered net
+        positive; see decision in snapshot section.
+    - **N3f.4** — Full RRF pool (`retrieval_pool_size=None`): both dense and
+      sparse retrievers each fetch `top_k` candidates; the `DocumentJoiner`
+      returns the complete fused list without a cut (no `top_k` limit on the
+      joiner output), so the LLM receives all candidates ranked by RRF score.
+      Hypothesis: limiting the joiner to `top_k` or `2*top_k` discards
+      candidates that would be relevant for RRF — passing the full pool lets
+      the LLM see the complete signal from both retrievers.  Uses split-query
+      like N3f.3 (`query_dense` / `query_sparse` in tool schema).
+      - Status: **complete, discarded** (experiment `phase11-n3f4-hybrid-full-pool`
+        `RXhwZXJpbWVudDozNg==`).  Mean `0.678` vs N3f.3's `0.744` (same judge);
+        discarded in favour of N3f.3.
+      - Setting: `retrieval_pool_size: int | None = None` (default, no limit).
+    - **N3f.5** — Sparse query = unmodified original user message (bypasses
+      the LLM query formulation step for the BM25 side); dense query = LLM
+      formulated as today.  Simplest way to ensure exact named-entity terms
+      reach BM25 without extra LLM calls.
+    - **N3f.6** — Combine N3f.3 and N3f.5: three inputs to BM25 (LLM
+      keyword-optimised term + LLM dense query + original user message).
+      Highest recall potential; evaluate precision impact.
 - **N3g.** Generate per-document and per-page/section summaries at
   ingestion, index with `kind="summary"` metadata, evaluate impact on
   "what does document X say?" queries (extend eval set as needed).
@@ -402,12 +703,89 @@ Run each as an isolated branch / experiment so its effect can be attributed:
   queries:* dual-index BM25 with original + LLM-translated text, evaluate
   whether the translation side adds recall without polluting precision.
   Source text returned to the LLM is always the original.
+- **N3i.** *Alternative infrastructure experiment:* replace Qdrant sparse
+  vectors with Elasticsearch/OpenSearch for the BM25 side.
+  Motivation: ES/OS provides corpus-specific IDF (computed from the actual
+  index), per-language analyzers (German stemming, stop-words, umlaut
+  normalisation), and mature relevance tuning tooling — capabilities that
+  fastembed's pre-trained IDF approximates but does not fully replicate.
+  Implementation approach: build `ingest_es` and `retrieval_es` adapters
+  alongside the existing Qdrant adapters (do not remove Qdrant); wire them
+  behind the same `Protocol` boundaries; compare eval results.
+  Cost: new Docker service (elasticsearch or opensearch), Haystack ES
+  integration, hybrid fusion logic between the ES BM25 retriever and the
+  Qdrant dense retriever.  Worthwhile only if fastembed N3f results still
+  disappoint after N3f.2–N3f.5 are explored.
 
 ### N4. Decide and implement
 After N1–N3 produce evidence, return to Decisions Needed, agree on the
 implementation plan, and only then write a concrete delivery section
 (scope, acceptance criteria, migration, tests) to be appended to this
 document.
+
+## Experiment Decision Summary
+
+### Keep and ship (confirmed positive signal)
+
+- **N3a — bge-m3 multilingual embedding.**  Strongest single improvement
+  (`+0.232` orig, `+0.331` llama33-70b vs baseline).  Default for all further
+  experiments and for the final configuration.
+- **N3f — hybrid dense+sparse (Qdrant fastembed bm25 + RRF).**  Infrastructure
+  is implemented and stable.  Signal is positive after the `top_k*2` bug fix;
+  N3f.3 and N3f.4 are the active evaluation variants.
+- **N3f.3 — split-query (separate `query_dense` / `query_sparse` tool fields).**
+  Marginal quality gain; halves LLM context noise (docs/q 6.3 vs 13.3).
+  Implemented; default for hybrid mode going forward unless N3f.4 demonstrates
+  a clear advantage.
+
+### Discard — evaluated, net negative or superseded
+
+- **N3f.4 — full RRF pool (`retrieval_pool_size=None`).**  Evaluated with
+  `llama-v3p3-70b-instruct` judge: mean `0.678` vs N3f.3's `0.744` (same
+  judge) — worse.  9.4 relevant docs/q vs 3.7 for N3f.3 shows recall is
+  strong, but the noise-to-signal ratio of the uncut pool drags precision
+  down.  Discarded in favour of N3f.3.  The recall data is strong motivation
+  for reranking (N3e / Phase 13).
+
+### Postpone — not pursued in Phase 11
+
+- **N3f.5 — original user message as sparse query.**  Not evaluated; lower
+  priority given N3f.3 already handles this well enough.  Can be revisited
+  in Phase 13 together with reranking.
+- **N3f.6 — three-way BM25 input.**  Same; deferred to Phase 13.
+
+### Discard — empirically tested, net negative on this dataset
+
+- **N3b — title/source embedding prefix.** Regression vs N3a (`-0.139`).
+  Keep the setting flag for future experiments but do not enable by default.
+- **N3c — chunk filter (min 40 words / alpha ratio 0.55).** Slight regression
+  vs baseline (`-0.014`).  Thresholds are too aggressive; not worth tuning
+  further in Phase 11.
+- **N3d — structure-aware segmentation (first variant).** Regression vs
+  baseline (`-0.050`).  Heading-aware splitting alone does not improve
+  retrieval without a complementary parent-return mechanism (Phase 8).
+
+### Postpone indefinitely / out of scope for Phase 11
+
+- **N3e — Reranker Protocol + concrete cross-encoder.**  Protocol boundary
+  defined; concrete implementation (`bge-reranker-v2-m3`) deferred to
+  Phase 13.  Adding a second runtime process (outside Ollama) is not
+  warranted until the embedding + hybrid baseline is stable.
+  **High-priority next step:** N3f.4 demonstrated that recall is already
+  strong (9.4 relevant docs/q from the full RRF pool); a cross-encoder
+  reranker over that pool is the highest-ROI remaining improvement for
+  retrieval precision.  Should be the first experiment when Phase 13
+  starts.
+- **N3g — Per-document / per-page LLM summaries.**  High potential for H9
+  queries but requires ingestion-time LLM calls and routing logic.  Defer
+  to a dedicated sub-phase after Phase 11 hybrid is shipped.
+- **N3h — Dual-index BM25 with LLM-translated text.**  Only relevant if
+  hybrid fastembed still underperforms on German queries after N3f.3/N3f.4.
+  Current data does not indicate this is the bottleneck; park until needed.
+- **N3i — Elasticsearch / OpenSearch as BM25 backend.**  Infrastructure
+  complexity (new Docker service, new adapters) not justified while fastembed
+  variants are unexplored.  Keep as a last resort if fastembed BM25 quality
+  ceiling is reached.
 
 ## Out of Scope for Phase 11
 
@@ -445,10 +823,9 @@ them semantically.
 - ~~German-language eval dataset?~~ **Resolved.** The eval dataset
   ([eval/datasets/rag_questions.jsonl](../../eval/datasets/rag_questions.jsonl))
   is mixed: 6 English questions (covering EO 14110, IMF, GPTs-are-GPTs,
-  knowledge-worker), 4 German questions (BIBB, IAB, Fraunhofer). The
+  knowledge-worker), and the German subset has now been expanded beyond the
+  original 4 questions (BIBB, IAB, Fraunhofer, Weizenbaum). The
   corpus mirrors this split. Multilingual gains are therefore visible in
-  the eval, but the German subset is small (n=4) — the per-question
-  metric will be noisy. **Action item:** as part of N1, add 6–10 more
-  German questions covering the German PDFs to bring the German subset to
-  ~10 items, so multilingual ablations are statistically meaningful.
-  Cheap and decoupled from implementation.
+  the eval, but we still need to monitor balance between English and German
+  queries in future revisions so multilingual ablations remain statistically
+  meaningful.

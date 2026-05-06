@@ -43,17 +43,17 @@ Key variables (all have sensible defaults):
 | `CHAT_MODEL_PROVIDER` | `ollama` | `ollama` or `openai_compatible` |
 | `CHAT_BASE_URL` | `http://localhost:11434` | Chat model endpoint — Ollama URL or OpenAI-compatible base URL (e.g. `https://api.groq.com/openai/v1`) |
 | `CHAT_API_KEY` | — | API key for `openai_compatible` providers (not used for Ollama) |
-| `CHAT_MODEL` | `llama3.2` | Generation model identifier — Ollama name or provider model id (e.g. `qwen3-32b`, `Qwen/Qwen3-235B-A22B`) |
+| `CHAT_MODEL` | `qwen3.5:9b` | Generation model identifier — Ollama name or provider model id (e.g. `qwen3-32b`, `Qwen/Qwen3-235B-A22B`) |
 | `EMBEDDING_MODEL_PROVIDER` | `ollama` | Currently only `ollama` is supported |
 | `EMBEDDING_BASE_URL` | `http://localhost:11434` | Ollama server URL for embeddings |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model |
+| `EMBEDDING_MODEL` | `bge-m3` | Embedding model |
 | `QDRANT_HOST` | `localhost` | Qdrant hostname |
 | `QDRANT_PORT` | `6333` | Qdrant port |
 | `QDRANT_COLLECTION` | `chatbot` | Collection name |
 | `CORPUS_PATH` | `corpus` | Source document directory |
 | `RETRIEVAL_TOP_K` | `5` | Chunks returned per query |
 | `RETRIEVAL_SCORE_THRESHOLD` | `0.5` | Minimum similarity score |
-| `EMBEDDING_DIM` | `768` | Embedding vector dimension — must match `EMBEDDING_MODEL` output |
+| `EMBEDDING_DIM` | `1024` | Embedding vector dimension — must match `EMBEDDING_MODEL` output |
 | `SPLIT_LENGTH` | `200` | Words per ingestion chunk |
 | `SPLIT_OVERLAP` | `20` | Word overlap between adjacent chunks |
 | `LOG_FORMAT` | `console` | `console` (dev) or `json` (CI/prod) |
@@ -69,11 +69,18 @@ Key variables (all have sensible defaults):
 ### 3. Pull required Ollama models
 
 ```bash
+# Runtime default chat model
+ollama pull qwen3.5:9b
+
+# Embeddings
+ollama pull bge-m3
+
+# Test chat model (used by pytest via tests/conftest.py)
 ollama pull llama3.2
-ollama pull nomic-embed-text
 ```
 
 The embedding model always runs locally via Ollama. The chat model can alternatively run via a cloud provider — see [Using a cloud/remote chat model](#using-a-cloudremote-chat-model) below.
+For tests, the suite pins `CHAT_MODEL=llama3.2` to keep test environments fast and reproducible even when the runtime default model changes.
 
 ### 4. Start Qdrant
 
@@ -277,7 +284,7 @@ uv run python -m src.ingest.cli reset --wipe-only
 # Unit tests (no external services needed)
 uv run pytest tests/unit/
 
-# Integration tests (requires Qdrant + Ollama running)
+# Integration tests (requires Qdrant + Ollama running; pytest pins CHAT_MODEL=llama3.2)
 INTEGRATION_TESTS=1 uv run pytest tests/integration/
 
 # All tests

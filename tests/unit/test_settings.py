@@ -20,7 +20,6 @@ class TestSettingsDefaults:
                 "QDRANT_COLLECTION",
                 "CORPUS_PATH",
                 "RETRIEVAL_TOP_K",
-                "RETRIEVAL_SCORE_THRESHOLD",
                 "LOG_FORMAT",
                 "PHOENIX_PROJECT_NAME",
                 "OTEL_DEPLOYMENT_ENVIRONMENT",
@@ -40,19 +39,20 @@ class TestSettingsDefaults:
                 "EVAL_RETRIEVAL_VERSION",
                 "EVAL_CORPUS_VERSION",
                 "EVAL_DATASET_VERSION",
+                "EVAL_JUDGE_INITIAL_PER_SECOND_REQUEST_RATE",
             ):
                 mp.delenv(key, raising=False)
-            settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+            settings = Settings(_env_file="")  # pyright: ignore[reportCallIssue]
         assert settings.chat_base_url == "http://localhost:11434"
         assert settings.embedding_base_url == "http://localhost:11434"
-        assert settings.chat_model == "llama3.2"
-        assert settings.embedding_model == "nomic-embed-text"
+        assert settings.chat_model == "qwen3.5:9b"
+        assert settings.embedding_model == "bge-m3"
+        assert settings.embedding_dim == 1024
         assert settings.qdrant_host == "localhost"
         assert settings.qdrant_port == 6333
         assert settings.qdrant_collection == "chatbot"
         assert settings.corpus_path == "corpus"
         assert settings.retrieval_top_k == 5
-        assert settings.retrieval_score_threshold == 0.5
         assert settings.log_format == "console"
         assert settings.phoenix_project_name == "chatbot-local"
         assert settings.otel_deployment_environment == "development"
@@ -72,6 +72,7 @@ class TestSettingsDefaults:
         assert settings.eval_retrieval_version is None
         assert settings.eval_corpus_version is None
         assert settings.eval_dataset_version is None
+        assert settings.eval_judge_initial_per_second_request_rate == 1.5
 
     def test_get_settings_returns_settings_instance(self) -> None:
         settings = get_settings()
@@ -92,6 +93,7 @@ class TestSettingsDefaults:
             mp.setenv("MODEL_SEED", "42")
             mp.setenv("EVAL_NAME", "eval-2026-04")
             mp.setenv("EVAL_CANDIDATE_ID", "mistral__ans-7__cit-3__ret-1")
+            mp.setenv("EVAL_JUDGE_INITIAL_PER_SECOND_REQUEST_RATE", "0.8")
             settings = Settings()
             assert settings.chat_model == "mistral"
             assert settings.retrieval_top_k == 10
@@ -104,6 +106,7 @@ class TestSettingsDefaults:
             assert settings.model_seed == 42
             assert settings.eval_name == "eval-2026-04"
             assert settings.eval_candidate_id == "mistral__ans-7__cit-3__ret-1"
+            assert settings.eval_judge_initial_per_second_request_rate == 0.8
 
     def test_log_format_validation_rejects_invalid(self) -> None:
         import pytest

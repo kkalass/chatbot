@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # --- Chat model ---
     chat_model: str = Field(
-        default="llama3.2",
+        default="qwen3.5:9b",
         description="Model identifier used for chat generation.",
     )
     chat_model_provider: str = Field(
@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # --- Embedding model ---
     embedding_model: str = Field(
-        default="nomic-embed-text",
+        default="bge-m3",
         description="Ollama model used to produce embeddings.",
     )
     embedding_model_provider: str = Field(
@@ -95,7 +95,7 @@ class Settings(BaseSettings):
 
     # --- Ingestion ---
     embedding_dim: int = Field(
-        default=768,
+        default=1024,
         description="Embedding vector dimension. Must match the output dimension of EMBEDDING_MODEL.",
     )
     split_length: int = Field(
@@ -112,9 +112,13 @@ class Settings(BaseSettings):
         default=5,
         description="Number of top chunks to retrieve per query.",
     )
-    retrieval_score_threshold: float = Field(
-        default=0.5,
-        description="Minimum similarity score for a chunk to be included in the context.",
+    retrieval_llm_top_k: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of documents passed to the LLM after RRF fusion. "
+            "None (default) uses retrieval_top_k — N3f.3 precision-optimised behaviour. "
+            "Set higher to surface more candidates at the cost of LLM context noise."
+        ),
     )
 
     # --- Logging ---
@@ -223,7 +227,7 @@ class Settings(BaseSettings):
 
     # --- Evaluation LLM Judge ---
     eval_judge_model: str = Field(
-        default="llama3.2",
+        default="llama3.1:8b",
         description="Model identifier for the LLM judge used in eval evaluators (e.g. FaithfulnessEvaluator).",
     )
     eval_judge_provider: str = Field(
@@ -246,6 +250,14 @@ class Settings(BaseSettings):
     eval_judge_api_key: str | None = Field(
         default=None,
         description="API key for the LLM judge provider (required for openai_compatible).",
+    )
+    eval_judge_initial_per_second_request_rate: float = Field(
+        default=1.5,
+        gt=0.0,
+        description=(
+            "Initial request rate for Phoenix eval LLM judge calls. "
+            "Lower values reduce rate-limit errors on constrained providers."
+        ),
     )
 
 

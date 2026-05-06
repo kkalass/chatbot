@@ -13,9 +13,16 @@ class _StubRetriever:
     def __init__(self, chunks: list[SourceChunk]) -> None:
         self._chunks = chunks
         self.calls: list[str] = []
+        self.sparse_calls: list[str | None] = []
 
-    async def retrieve(self, query: str) -> list[SourceChunk]:
-        self.calls.append(query)
+    async def retrieve(
+        self,
+        query_dense: str,
+        *,
+        query_sparse: str | None = None,
+    ) -> list[SourceChunk]:
+        self.calls.append(query_dense)
+        self.sparse_calls.append(query_sparse)
         return self._chunks
 
 
@@ -65,7 +72,9 @@ class TestExecute:
         retriever = _StubRetriever([_chunk(source="s.md", chunk_id="c1")])
         tool = RetrievalTool(retriever)
 
-        result = await tool.execute({"query": "what is RAG?"})
+        result = await tool.execute(
+            {"query_dense": "what is RAG?", "query_sparse": "RAG retrieval augmented generation"}
+        )
 
         assert "chunks" in result
         assert retriever.calls == ["what is RAG?"]
@@ -74,9 +83,24 @@ class TestExecute:
     async def test_empty_results_include_message(self) -> None:
         tool = RetrievalTool(_StubRetriever([]))
 
-        result = await tool.execute({"query": "no hits"})
+        result = await tool.execute({"query_dense": "no hits", "query_sparse": "no hits"})
 
         assert result == {"chunks": [], "message": "No relevant documents found."}
+
+    @pytest.mark.asyncio
+    async def test_routes_dense_and_sparse_independently(self) -> None:
+        retriever = _StubRetriever([_chunk(source="s.md", chunk_id="c1")])
+        tool = RetrievalTool(retriever)
+
+        await tool.execute(
+            {
+                "query_dense": "impact of AI on employment",
+                "query_sparse": "BIBB KI Arbeitsmarkt",
+            }
+        )
+
+        assert retriever.calls == ["impact of AI on employment"]
+        assert retriever.sparse_calls == ["BIBB KI Arbeitsmarkt"]
 
     @pytest.mark.asyncio
     async def test_invalid_arguments_return_error(self) -> None:
@@ -85,6 +109,15 @@ class TestExecute:
         result = await tool.execute({})
 
         assert "error" in result
+
+
+class TestDescribeCall:
+    def test_uses_query_dense_for_display(self) -> None:
+        tool = RetrievalTool(_StubRetriever([]))
+        msg = tool.describe_call(
+            {"query_dense": "impact of AI on labour market", "query_sparse": "KI Arbeitsmarkt"}
+        )
+        assert msg.args["query"] == "impact of AI on labour market"
 
 
 class TestCiteInstructions:

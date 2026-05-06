@@ -20,6 +20,7 @@ def build_qdrant_document_store(
         port=port,
         index=collection,
         embedding_dim=embedding_dim,
+        use_sparse_embeddings=True,
         similarity=similarity,
         recreate_index=recreate_index,
     )

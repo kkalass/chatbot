@@ -24,7 +24,11 @@ from haystack.dataclasses import Document
 
 from src.chatbot.app.protocols import SourceChunk
 from src.chatbot.tools.retrieval.tool import RetrievalTool
-from src.ingest.pipeline import IngestionConfig, IngestionPipeline, load_sidecar_meta
+from src.ingest.pipeline import (
+    IngestionConfig,
+    IngestionPipeline,
+    load_sidecar_meta,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers / test doubles
@@ -38,8 +42,13 @@ class _FakeRetriever:
         self.chunks = chunks
         self.calls: list[str] = []
 
-    async def retrieve(self, query: str) -> list[SourceChunk]:
-        self.calls.append(query)
+    async def retrieve(
+        self,
+        query_dense: str,
+        *,
+        query_sparse: str | None = None,
+    ) -> list[SourceChunk]:
+        self.calls.append(query_dense)
         return list(self.chunks)
 
 
@@ -55,7 +64,7 @@ class TestRetrievalTool:
         retriever = _FakeRetriever(chunks)
         tool = RetrievalTool(retriever=retriever)
 
-        await tool.execute({"query": "what is the capital?"})
+        await tool.execute({"query_dense": "what is the capital?", "query_sparse": "capital"})
 
         assert retriever.calls == ["what is the capital?"]
 
@@ -68,7 +77,9 @@ class TestRetrievalTool:
         ]
         tool = RetrievalTool(retriever=_FakeRetriever(chunks))
 
-        result = await tool.execute({"query": "capital of France"})
+        result = await tool.execute(
+            {"query_dense": "capital of France", "query_sparse": "France capital"}
+        )
 
         assert "chunks" in result
         first = result["chunks"][0]
@@ -92,7 +103,12 @@ class TestRetrievalTool:
         ]
         tool = RetrievalTool(retriever=_FakeRetriever(chunks))
 
-        result = await tool.execute({"query": "EO 14110"})
+        result = await tool.execute(
+            {
+                "query_dense": "Executive Order 14110 AI policy",
+                "query_sparse": "Executive Order 14110",
+            }
+        )
 
         first = result["chunks"][0]
         assert first["title"] == "Executive Order 14110"
@@ -104,7 +120,9 @@ class TestRetrievalTool:
     async def test_returns_no_results_message_on_empty_retrieval(self) -> None:
         tool = RetrievalTool(retriever=_FakeRetriever([]))
 
-        result = await tool.execute({"query": "unknown topic"})
+        result = await tool.execute(
+            {"query_dense": "unknown topic", "query_sparse": "unknown topic"}
+        )
 
         assert result["chunks"] == []
         assert "message" in result
@@ -229,10 +247,12 @@ class _FakeEmbedder:
     def __init__(self) -> None:
         self.call_count = 0
         self.total_documents_seen = 0
+        self.last_documents: list[Document] = []
 
     def run(self, documents: list[Document]) -> dict[str, Any]:
         self.call_count += 1
         self.total_documents_seen += len(documents)
+        self.last_documents = [Document(content=d.content, meta=d.meta) for d in documents]
         # Attach a dummy embedding vector so the writer doesn't complain.
         embedded = [
             Document(content=d.content, meta=d.meta, embedding=[0.0] * 4) for d in documents
@@ -378,6 +398,46 @@ class TestIngestionPipelineEmbedderInjection:
         written = store.filter_documents()
         assert any(d.meta.get("title") == "Finance Report" for d in written)
         assert any(d.meta.get("author") == "Alice" for d in written)
+
+    def test_sparse_vectors_are_attached_to_written_documents(self, tmp_path: Path) -> None:
+        from haystack.dataclasses import SparseEmbedding
+        from haystack.document_stores.in_memory import InMemoryDocumentStore
+
+        doc = tmp_path / "keywords.txt"
+        doc.write_text("Hybrid retrieval improves exact term recall for labor market queries.")
+
+        store = InMemoryDocumentStore()
+        embedder = _FakeEmbedder()
+
+        class _FakeSparseEmbedder:
+            def run(self, documents: list[Document]) -> dict[str, Any]:
+                from dataclasses import replace
+
+                return {
+                    "documents": [
+                        replace(
+                            d, sparse_embedding=SparseEmbedding(indices=[1, 2], values=[0.5, 0.5])
+                        )
+                        for d in documents
+                    ]
+                }
+
+        pipeline = IngestionPipeline(
+            config=IngestionConfig(
+                split_length=200,
+                split_overlap=0,
+            ),
+            document_store=store,
+            embedder=embedder,
+            sparse_embedder=_FakeSparseEmbedder(),  # type: ignore[arg-type]
+        )
+
+        pipeline.ingest([doc])
+
+        written_docs = store.filter_documents()
+        assert written_docs
+        assert written_docs[0].sparse_embedding is not None
+        assert written_docs[0].sparse_embedding.indices
 
 
 # ---------------------------------------------------------------------------

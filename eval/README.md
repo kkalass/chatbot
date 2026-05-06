@@ -112,12 +112,26 @@ uv run --group eval python eval/run_experiment.py --dry-run
 
 # Re-run only evaluators on an existing experiment (tasks do not re-execute)
 uv run --group eval python eval/run_experiment.py --experiment-id <ID>
+
+# Replay: create a NEW experiment from cached task outputs of an existing one
+uv run --group eval python eval/run_experiment.py \
+  --replay-from <SOURCE_EXPERIMENT_ID> \
+  --experiment-name "phase11-n3a-judge-qwen25coder"
 ```
 
 The experiment ID is shown in the Phoenix UI on the experiment detail page.
-Use `--experiment-id` when you have changed or added evaluators but want to
-score a previously completed task run without paying the cost of re-running
-the full RAG pipeline.
+
+**`--experiment-id`** — re-runs evaluators on the *same* existing Phoenix experiment.
+The evaluator columns are overwritten in place (upsert by evaluator name).
+Use this to quickly rescore a run after fixing a buggy evaluator.
+
+**`--replay-from`** — fetches the cached task outputs from the source experiment and
+creates a **new** Phoenix experiment entry using `run_experiment`.  The task function
+is not re-executed; the RAG pipeline is not called.  The new experiment gets its own
+name, description, and metadata (reflecting the current `.env` judge config), and its
+evaluator columns are fully independent of the source experiment.
+Use this to compare different LLM judges side-by-side in the Phoenix experiment
+comparison view without re-running the full RAG pipeline.
 
 After the run, open the Phoenix UI at `http://localhost:6006` and navigate to
 **Datasets → rag-questions-v1** to compare experiment runs.

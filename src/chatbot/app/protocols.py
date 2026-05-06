@@ -293,8 +293,17 @@ class ModelProfile(Protocol):
 class Retriever(Protocol):
     """Structural boundary between orchestration and retrieval infrastructure."""
 
-    async def retrieve(self, query: str) -> list[SourceChunk]:
-        """Return ranked, score-filtered chunks relevant to *query*."""
+    async def retrieve(
+        self,
+        query_dense: str,
+        *,
+        query_sparse: str | None = None,
+    ) -> list[SourceChunk]:
+        """Return ranked, score-filtered chunks relevant to the retrieval queries.
+
+        *query_dense* is used for embedding-based retrieval. If *query_sparse* is
+        omitted, implementations should fall back to *query_dense* for sparse retrieval.
+        """
         ...
 
 

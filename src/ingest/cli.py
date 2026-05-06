@@ -27,6 +27,7 @@ from src.ingest.config import (
 )
 from src.ingest.infrastructure.document_store import DocumentStoreConfig, build_document_store
 from src.ingest.infrastructure.embeddings_document import build_document_embedder
+from src.ingest.infrastructure.embeddings_sparse import SparseDocumentEmbedder
 from src.ingest.pipeline import IngestionConfig, IngestionPipeline
 from src.settings import get_settings
 
@@ -46,7 +47,16 @@ def cmd_reindex(
     logger.info("cli.reindex.start", corpus=str(corpus_path))
     store = build_document_store(store_config)
     embedder = build_document_embedder(build_document_embedder_config(get_settings()))
-    pipeline = IngestionPipeline(config=ingestion_config, document_store=store, embedder=embedder)
+
+    sparse_embedder = SparseDocumentEmbedder()
+    logger.info("cli.reindex.sparse_vectors_enabled")
+
+    pipeline = IngestionPipeline(
+        config=ingestion_config,
+        document_store=store,
+        embedder=embedder,
+        sparse_embedder=sparse_embedder,
+    )
     try:
         count = pipeline.ingest_corpus(corpus_path)
         logger.info("cli.reindex.done", chunks_written=count)

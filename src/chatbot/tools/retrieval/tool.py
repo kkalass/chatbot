@@ -67,7 +67,8 @@ class RetrievalCallKey(StrEnum):
 
 
 class _SearchInput(ToolInputModel):
-    query: str
+    query_dense: str
+    query_sparse: str
 
 
 _CITE_FRAGMENT = f"""#### {_TOOL_NAME}
@@ -267,7 +268,11 @@ class RetrievalTool:
 
 Call this tool when the user's request may be answered from the uploaded documents.
 Returns relevant text chunks with source paths, chunk IDs, content, and similarity scores.
-Note that the search is an embedding based vector search, not a keyword search.
+
+Always provide both query fields:
+- query_dense: the information need in natural language, used for embedding-based vector search
+- query_sparse: exact terms for keyword matching — proper nouns, acronyms, statute identifiers,
+  and technical terms verbatim (e.g. "BIBB Executive Order 14110")
 """,
             parameters_schema=_SearchInput.model_json_schema(mode="validation"),  # type: ignore[arg-type]
         )
@@ -286,10 +291,14 @@ Note that the search is an embedding based vector search, not a keyword search.
                 )
                 return error_result
 
-            sources: list[SourceChunk] = await self._retriever.retrieve(search_input.query)
+            sources: list[SourceChunk] = await self._retriever.retrieve(
+                search_input.query_dense,
+                query_sparse=search_input.query_sparse,
+            )
             logger.info(
                 "retrieval_tool.executed",
-                query=search_input.query,
+                query_dense=search_input.query_dense,
+                query_sparse=search_input.query_sparse,
                 chunks=len(sources),
             )
             result: JsonObject = (
@@ -320,7 +329,7 @@ Note that the search is an embedding based vector search, not a keyword search.
     # --- CiteableTool ------------------------------------------------
 
     def describe_call(self, args: JsonObject) -> I18nMessage:
-        query = str(args.get("query", ""))
+        query = str(args.get("query_dense") or "")
         return I18nMessage(key=RetrievalCallKey.SEARCHING, args={"query": query})
 
     def cite_instructions(self) -> CiteInstructions:

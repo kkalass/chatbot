@@ -213,7 +213,7 @@ def _trace_request(
     retrieval_version = (
         _settings.eval_retrieval_version
         if _settings.eval_retrieval_version is not None
-        else f"top_k={_settings.retrieval_top_k};score_threshold={_settings.retrieval_score_threshold}"
+        else f"top_k={_settings.retrieval_top_k}"
     )
     metadata: dict[str, object] = {
         "run_id": _DEFAULT_EVAL_RUN_ID,

@@ -24,3 +24,8 @@ import os
 # starts, which would leave OTEL_ENABLED=true already in os.environ and make
 # setdefault a no-op.  Tests must never ship spans to a live Phoenix instance.
 os.environ["OTEL_ENABLED"] = "false"
+
+# Keep test runs independent from the runtime default chat model. The app
+# default can change for production quality, while tests should stay stable
+# and lightweight on typical local Ollama setups.
+os.environ["CHAT_MODEL"] = "llama3.2"

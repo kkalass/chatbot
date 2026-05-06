@@ -16,10 +16,10 @@ class RetrieverConfig:
     """
 
     top_k: int
-    score_threshold: float
     store_host: str
     store_port: int
     store_collection: str
     embedding_dim: int
+    llm_top_k: int | None = None
     store_similarity: str = "cosine"
     store_backend: Literal["qdrant"] = "qdrant"

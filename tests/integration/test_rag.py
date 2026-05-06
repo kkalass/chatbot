@@ -61,7 +61,6 @@ _TEXT_EMBEDDER_CONFIG = TextEmbedderConfig(
 
 _RETRIEVER_CONFIG = RetrieverConfig(
     top_k=5,
-    score_threshold=0.0,  # Accept all results in tests; correctness verified by citation presence.
     store_host="localhost",
     store_port=6333,
     store_collection=_TEST_COLLECTION,
