@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import re
 import subprocess
 import sys
 import threading
@@ -213,6 +212,7 @@ async def task(input: dict[str, str]) -> dict[str, object]:
         - ``"answer"``: concatenated streamed response text with citation markers
         - ``"context"``: JSON-serialized tool results concatenated across all
           tool calls; used as faithfulness context
+        - ``"citation_count"``: number of distinct numbered citations emitted by the model
         - ``"hallucinated_citation_count"``: number of hallucinated citation events
         - ``"unsubstantiated_claim_count"``: number of unsubstantiated claim events
     """
@@ -271,6 +271,7 @@ async def task(input: dict[str, str]) -> dict[str, object]:
     return {
         "answer": answer,
         "context": "\n\n".join(context_parts),
+        "citation_count": len(unique),
         "hallucinated_citation_count": hallucinated_citation_count,
         "unsubstantiated_claim_count": unsubstantiated_claim_count,
         "retrieved_documents": retrieved_documents,
@@ -294,12 +295,15 @@ def _sync_task(input: dict[str, str]) -> dict[str, object]:
 
 
 def has_citations(output: dict[str, object]) -> bool:
-    """Check that the answer contains at least one inline citation marker [N].
+    """Check that the answer contains at least one numbered citation.
 
-    The chatbot should always cite sources for retrieved content.  Answers
-    without any ``[1]``-style marker indicate a retrieval or citation failure.
+    Uses the ``citation_count`` field emitted by the task (derived from the
+    stream of ``NumberedCitation`` events) rather than regex-matching the
+    rendered answer text — consistent with how ``no_hallucinated_citations``
+    and ``no_unsubstantiated_claims`` work.
     """
-    return bool(re.search(r"\[\d+\]", str(output.get("answer", ""))))
+    count = output.get("citation_count", 0)
+    return isinstance(count, int) and count > 0
 
 
 def is_non_empty(output: dict[str, object]) -> bool:
@@ -666,6 +670,7 @@ def _build_replay_task(
     _stub: dict[str, object] = {
         "answer": "",
         "context": "",
+        "citation_count": 0,
         "hallucinated_citation_count": 0,
         "unsubstantiated_claim_count": 0,
         "retrieved_documents": [],
