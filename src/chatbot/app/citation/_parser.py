@@ -17,8 +17,7 @@ from typing import cast
 import structlog
 from pydantic import ValidationError
 
-from src.chatbot.app.protocols import RawCitation
-from src.chatbot.app.protocols_citeable_tool import QUOTE_END_MARKER, QUOTE_START_MARKER
+from src.chatbot.contracts.citation import QUOTE_END_MARKER, QUOTE_START_MARKER, RawCitation
 
 logger = structlog.get_logger(__name__)
 

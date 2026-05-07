@@ -5,7 +5,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.chatbot.app.protocols import RawCitation
+from src.chatbot.contracts.citation import RawCitation
 
 
 class TestRawCitation:

@@ -15,17 +15,14 @@ from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from openinference.semconv.trace import OpenInferenceSpanKindValues
 from opentelemetry import trace
 
-from src.chatbot.app.protocols import Retriever, SourceChunk
+from src.chatbot.contracts.observability import SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE
+from src.chatbot.contracts.retrieval import SourceChunk
 from src.chatbot.infrastructure.embeddings_text import TextEmbedder
-from src.chatbot.observability import to_attribute_text
-from src.chatbot.observability.openinference import (
+from src.chatbot.infrastructure.observability import (
     build_retriever_attributes,
-    build_span_kind_attributes,
 )
-from src.chatbot.observability.schema import SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE
-from src.ingest.infrastructure.embeddings_sparse import build_sparse_text
-
-from ._config import RetrieverConfig
+from src.shared.observability import build_span_kind_attributes, to_attribute_text
+from src.shared.qdrant.embeddings_sparse import build_sparse_text
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -59,26 +56,28 @@ class QdrantHybridRetriever:
 
     def __init__(
         self,
-        config: RetrieverConfig,
+        *,
+        top_k: int,
+        llm_top_k: int | None = None,
         document_store: QdrantDocumentStore,
         text_embedder: TextEmbedder,
     ) -> None:
-        self._config = config
+        self._top_k = top_k
         self._embedder = text_embedder
         self._dense_retriever = QdrantEmbeddingRetriever(
             document_store=document_store,
-            top_k=config.top_k,
+            top_k=top_k,
             score_threshold=None,  # No threshold pre-fusion
         )
         self._sparse_retriever = QdrantSparseEmbeddingRetriever(
             document_store=document_store,
-            top_k=config.top_k,
+            top_k=top_k,
             score_threshold=None,
         )
         self._joiner = DocumentJoiner(
             join_mode="reciprocal_rank_fusion",
             sort_by_score=True,
-            top_k=config.llm_top_k if config.llm_top_k is not None else config.top_k,
+            top_k=llm_top_k if llm_top_k is not None else top_k,
         )
 
     async def retrieve(
@@ -93,7 +92,7 @@ class QdrantHybridRetriever:
         to sparse retrieval and falls back to *query_dense* when omitted.
         """
         with tracer.start_as_current_span(SPAN_CHAT_RETRIEVER_QDRANT_RETRIEVE) as span:
-            _trace_request(span=span, top_k=self._config.top_k)
+            _trace_request(span=span, top_k=self._top_k)
 
             # Note that embedding and qdrant is currently so much faster than the LLM later,
             # that we simply run serially. If we should get performance issues here,
@@ -137,6 +136,8 @@ class QdrantHybridRetriever:
                     publication_date=doc.meta.get("publication_date"),
                     source_url=doc.meta.get("source_url"),
                     page=doc.meta.get("page"),
+                    kind=str(doc.meta.get("kind") or "text"),
+                    image_path=doc.meta.get("image_path"),
                 )
                 for doc in fused_docs
                 if doc.content
@@ -144,24 +145,3 @@ class QdrantHybridRetriever:
             logger.info("retriever.done", chunks_returned=len(chunks))
             _trace_response(span=span, query=query_dense, chunks=chunks)
             return chunks
-
-
-def build_qdrant_hybrid_retriever(
-    *,
-    config: RetrieverConfig,
-    text_embedder: TextEmbedder,
-) -> Retriever:
-    """Build a Qdrant-backed hybrid retriever (dense + sparse with RRF)."""
-    document_store = QdrantDocumentStore(
-        host=config.store_host,
-        port=config.store_port,
-        index=config.store_collection,
-        embedding_dim=config.embedding_dim,
-        use_sparse_embeddings=True,
-        similarity=config.store_similarity,
-    )
-    return QdrantHybridRetriever(
-        config=config,
-        document_store=document_store,
-        text_embedder=text_embedder,
-    )

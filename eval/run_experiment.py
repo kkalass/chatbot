@@ -43,35 +43,24 @@ if TYPE_CHECKING:
 
 import structlog
 
+from src.chatbot.app.chat_prompts import DEFAULT_PROMPTS
 from src.chatbot.app.orchestrator import ChatOrchestrator
-from src.chatbot.app.prompts import DEFAULT_PROMPTS
-from src.chatbot.app.protocols import (
-    AuthRequiredEvent,
+from src.chatbot.build_from_settings import build_chat_model_with_profile, build_retrieval_tool
+from src.chatbot.contracts.chat import ThinkingContent
+from src.chatbot.contracts.citation import (
     HallucinatedCitation,
     NumberedCitation,
-    ThinkingContent,
-    Tool,
-    ToolCallFinished,
-    ToolCallStarted,
     UnsubstantiatedClaim,
 )
-from src.chatbot.config import (
-    build_chat_model_config,
-    build_retriever_config,
-    build_text_embedder_config,
-)
-from src.chatbot.infrastructure.chat import build_chat_model, build_chat_model_profile
-from src.chatbot.infrastructure.embeddings_text import build_text_embedder
-from src.chatbot.infrastructure.retrieval import build_retriever
-from src.chatbot.observability import configure_tracing
-from src.chatbot.tools.retrieval.tool import RetrievalTool
+from src.chatbot.contracts.process import AuthRequiredEvent, ToolCallFinished, ToolCallStarted
 from src.chatbot.ui.citation_view import (
     build_citation_markdown,
     format_citation_marker,
     format_text_chunk,
 )
 from src.chatbot.ui.i18n_messages import resolve_message
-from src.settings import Settings, get_settings
+from src.shared.observability import configure_tracing
+from src.shared.settings import Settings, get_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -142,34 +131,6 @@ def _build_experiment_description(settings: Settings) -> str:
 # ---------------------------------------------------------------------------
 # Orchestrator factory
 # ---------------------------------------------------------------------------
-
-
-def _build_eval_orchestrator() -> ChatOrchestrator:
-    """Build a fresh, session-less ChatOrchestrator for one eval invocation.
-
-    Mirrors the factory in ``src/chatbot/ui/app.py::_build_orchestrator`` but
-    omits the vacation-days tool (irrelevant for RAG evaluation) and skips all
-    Chainlit session context.  A new instance must be created per task call to
-    prevent history from leaking between unrelated dataset examples.
-    """
-    chat_model_config = build_chat_model_config(_settings)
-    model_profile = build_chat_model_profile(chat_model_config)
-    chat_model = build_chat_model(
-        chat_model_config,
-        parse_text_tool_calls=model_profile.parse_text_tool_calls,
-    )
-    text_embedder = build_text_embedder(build_text_embedder_config(_settings))
-    retriever = build_retriever(
-        config=build_retriever_config(_settings),
-        text_embedder=text_embedder,
-    )
-    tools: list[Tool] = [RetrievalTool(retriever=retriever)]
-    return ChatOrchestrator.create(
-        chat_model,
-        tools=tools,
-        model_profile=model_profile,
-        prompts=DEFAULT_PROMPTS,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +216,14 @@ async def task(input: dict[str, str]) -> dict[str, object]:
         - ``"hallucinated_citation_count"``: number of hallucinated citation events
         - ``"unsubstantiated_claim_count"``: number of unsubstantiated claim events
     """
-    orchestrator = _build_eval_orchestrator()
+    chat_model, model_profile = build_chat_model_with_profile(_settings)
+    retrieval_tool = build_retrieval_tool(_settings)
+    orchestrator = ChatOrchestrator.create(
+        chat_model,
+        tools=[retrieval_tool],
+        model_profile=model_profile,
+        prompts=DEFAULT_PROMPTS,
+    )
     query: str = input["query"]
     text_parts: list[str] = []
     pending_whitespace: str = ""

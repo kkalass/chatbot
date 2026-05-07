@@ -3,7 +3,7 @@
 """Tests for :class:`InMemoryCredentialStore`."""
 
 from src.chatbot.app.credential_store import InMemoryCredentialStore
-from src.chatbot.app.protocols import UsernamePasswordCredentials
+from src.chatbot.contracts.credentials import UsernamePasswordCredentials
 
 
 class TestInMemoryCredentialStore:

@@ -3,12 +3,12 @@
 """Unit tests for ingestion chunking logic, retrieval tool, and sidecar loading.
 
 Covers:
-- :class:`~src.chatbot.tools.retrieval.tool.RetrievalTool` — execute contract, error handling,
+- :class:`~src.chatbot.infrastructure.tools.retrieval.RetrievalTool` — execute contract, error handling,
   and empty-result handling.
-- :class:`~src.ingest.pipeline.IngestionPipeline` chunking via real
+- :class:`~src.ingest.app.IngestionPipeline` chunking via real
   :class:`~haystack.components.preprocessors.DocumentSplitter` (no
   infrastructure dependencies — uses in-memory documents only).
-- :func:`~src.ingest.pipeline.load_sidecar_meta` — sidecar loading.
+- :func:`~src.ingest.app.load_sidecar_meta` — sidecar loading.
 - Converter routing and splitter strategy selection.
 - PDF extraction: per-page document creation, page metadata propagation, and
   extraction-failure isolation.
@@ -22,13 +22,14 @@ import pytest
 from haystack.components.preprocessors import DocumentSplitter
 from haystack.dataclasses import Document
 
-from src.chatbot.app.protocols import SourceChunk
-from src.chatbot.tools.retrieval.tool import RetrievalTool
-from src.ingest.pipeline import (
+from src.chatbot.contracts.retrieval import SourceChunk
+from src.chatbot.infrastructure.tools.retrieval import RetrievalTool
+from src.ingest.app import (
     IngestionConfig,
     IngestionPipeline,
     load_sidecar_meta,
 )
+from src.ingest.build_from_settings import build_format_handlers
 
 # ---------------------------------------------------------------------------
 # Helpers / test doubles
@@ -292,7 +293,12 @@ def _make_pipeline(
         split_overlap=0,
         batch_size=batch_size,
     )
-    pipeline = IngestionPipeline(config=config, document_store=store, embedder=embedder)
+    pipeline = IngestionPipeline(
+        config=config,
+        document_store=store,
+        embedder=embedder,
+        format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
+    )
     return pipeline, embedder, store  # type: ignore[return-value]
 
 
@@ -391,7 +397,12 @@ class TestIngestionPipelineEmbedderInjection:
             split_length=200,
             split_overlap=0,
         )
-        pipeline = IngestionPipeline(config=config, document_store=store, embedder=embedder)
+        pipeline = IngestionPipeline(
+            config=config,
+            document_store=store,
+            embedder=embedder,
+            format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
+        )
         pipeline.ingest([doc])
 
         # Verify written docs have sidecar metadata merged in.
@@ -429,6 +440,7 @@ class TestIngestionPipelineEmbedderInjection:
             ),
             document_store=store,
             embedder=embedder,
+            format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
             sparse_embedder=_FakeSparseEmbedder(),  # type: ignore[arg-type]
         )
 
@@ -513,40 +525,40 @@ class TestPdfPageConverter:
     """Unit tests for _PdfPageConverter in isolation (no pipeline infrastructure)."""
 
     def test_single_page_pdf_yields_one_document(self, tmp_path: Path) -> None:
-        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+        from src.ingest.infrastructure.converters import PdfPageConverter
 
         pdf = _write_pdf(tmp_path, "single.pdf", _MINIMAL_PDF_PAGE1)
-        converter = _PdfPageConverter()
+        converter = PdfPageConverter()
         result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
 
         docs = result["documents"]
         assert len(docs) == 1
 
     def test_extracted_text_present_in_document(self, tmp_path: Path) -> None:
-        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+        from src.ingest.infrastructure.converters import PdfPageConverter
 
         pdf = _write_pdf(tmp_path, "text.pdf", _MINIMAL_PDF_PAGE1)
-        converter = _PdfPageConverter()
+        converter = PdfPageConverter()
         result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
 
         assert result["documents"][0].content is not None
         assert "Hello World Page One" in (result["documents"][0].content or "")
 
     def test_page_metadata_set_to_1_for_single_page(self, tmp_path: Path) -> None:
-        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+        from src.ingest.infrastructure.converters import PdfPageConverter
 
         pdf = _write_pdf(tmp_path, "meta.pdf", _MINIMAL_PDF_PAGE1)
-        converter = _PdfPageConverter()
+        converter = PdfPageConverter()
         result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
 
         assert result["documents"][0].meta["page"] == "1"
         assert result["documents"][0].meta["total_pages"] == "1"
 
     def test_two_page_pdf_yields_two_documents(self, tmp_path: Path) -> None:
-        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+        from src.ingest.infrastructure.converters import PdfPageConverter
 
         pdf = _write_pdf(tmp_path, "two_pages.pdf", _MINIMAL_PDF_PAGE2)
-        converter = _PdfPageConverter()
+        converter = PdfPageConverter()
         result = converter.run(sources=[pdf], meta=[{"source": str(pdf)}])
 
         docs = result["documents"]
@@ -556,10 +568,10 @@ class TestPdfPageConverter:
         assert docs[0].meta["total_pages"] == "2"
 
     def test_sidecar_metadata_preserved_in_page_docs(self, tmp_path: Path) -> None:
-        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+        from src.ingest.infrastructure.converters import PdfPageConverter
 
         pdf = _write_pdf(tmp_path, "meta.pdf", _MINIMAL_PDF_PAGE1)
-        converter = _PdfPageConverter()
+        converter = PdfPageConverter()
         result = converter.run(
             sources=[pdf],
             meta=[{"source": str(pdf), "title": "My PDF", "author": "Bob"}],
@@ -571,21 +583,21 @@ class TestPdfPageConverter:
         assert doc.meta["page"] == "1"
 
     def test_extraction_failure_returns_empty_list(self, tmp_path: Path) -> None:
-        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+        from src.ingest.infrastructure.converters import PdfPageConverter
 
         bad = tmp_path / "corrupt.pdf"
         bad.write_bytes(b"not a pdf at all")
-        converter = _PdfPageConverter()
+        converter = PdfPageConverter()
         result = converter.run(sources=[bad], meta=[{"source": str(bad)}])
 
         assert result["documents"] == []
 
     def test_single_dict_meta_applied_to_all_sources(self, tmp_path: Path) -> None:
-        from src.ingest.pipeline import _PdfPageConverter  # type: ignore[attr-defined]
+        from src.ingest.infrastructure.converters import PdfPageConverter
 
         pdf1 = _write_pdf(tmp_path, "a.pdf", _MINIMAL_PDF_PAGE1)
         pdf2 = _write_pdf(tmp_path, "b.pdf", _MINIMAL_PDF_PAGE1)
-        converter = _PdfPageConverter()
+        converter = PdfPageConverter()
         result = converter.run(sources=[pdf1, pdf2], meta={"category": "report"})
 
         for doc in result["documents"]:
@@ -611,7 +623,12 @@ class TestPdfIngestionPipeline:
         store = InMemoryDocumentStore()
         embedder = _FakeEmbedder()
         config = IngestionConfig(split_length=200, split_overlap=0)
-        pipeline = IngestionPipeline(config=config, document_store=store, embedder=embedder)
+        pipeline = IngestionPipeline(
+            config=config,
+            document_store=store,
+            embedder=embedder,
+            format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
+        )
 
         pipeline.ingest([pdf])
 
@@ -640,7 +657,12 @@ class TestPdfIngestionPipeline:
         store = InMemoryDocumentStore()
         embedder = _FakeEmbedder()
         config = IngestionConfig(split_length=200, split_overlap=0)
-        pipeline = IngestionPipeline(config=config, document_store=store, embedder=embedder)
+        pipeline = IngestionPipeline(
+            config=config,
+            document_store=store,
+            embedder=embedder,
+            format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
+        )
         pipeline.ingest([pdf])
 
         written = store.filter_documents()

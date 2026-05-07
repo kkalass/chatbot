@@ -10,6 +10,19 @@ dist/
 build/
 *.egg-info/
 .venv/
+
+# --- UI artifacts ---
+# Chainlit Translations are automatically created by chainlit and stored here
 .chainlit/translations/
+# This is the directory where Chainlit stores sidebar elements (the source chunks we show). It is cleaned automatically.
 .files/
+# Our app stores images that are shown to the user in the sidebar here. For example images that were extracted from PDFs.
+public/citation_images/
+
+# --- Ingestion Cache ---
+# Because describing images with LLMs is expensive, we cache the images and descriptions.
+# The images here also are the source for the public/citation_images/ that are only created on demand for the UI.
+.cache/
+
+# --- Evaluation artifacts ---
 eval/results/

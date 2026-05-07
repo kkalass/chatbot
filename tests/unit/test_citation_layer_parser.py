@@ -5,8 +5,7 @@
 import json
 
 from src.chatbot.app.citation._parser import CitationStreamParser
-from src.chatbot.app.protocols import RawCitation
-from src.chatbot.app.protocols_citeable_tool import QUOTE_END_MARKER, QUOTE_START_MARKER
+from src.chatbot.contracts.citation import QUOTE_END_MARKER, QUOTE_START_MARKER, RawCitation
 
 
 def _ref_marker(token: str) -> str:

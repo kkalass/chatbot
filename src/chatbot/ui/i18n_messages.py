@@ -12,9 +12,9 @@ Adding a new tool requires:
 2. Adding one entry per key **and language** to :data:`TRANSLATIONS`.
 """
 
-from src.chatbot.app.protocols import I18nMessage
-from src.chatbot.tools.retrieval.tool import RetrievalCallKey
-from src.chatbot.tools.vacation_days.keys import VacationDaysCallKey
+from src.chatbot.contracts.i18n import I18nMessage
+from src.chatbot.infrastructure.tools.retrieval import RetrievalCallKey
+from src.chatbot.infrastructure.tools.vacation_days import VacationDaysCallKey
 from src.chatbot.ui.citation_view import CitationViewKey
 
 # ---------------------------------------------------------------------------
@@ -37,6 +37,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         CitationViewKey.PAGE_LABEL: "Page:",
         CitationViewKey.SOURCE_LABEL: "Source:",
         CitationViewKey.EXCERPT_LABEL: "Excerpt",
+        CitationViewKey.FIGURE_LABEL: "Figure:",
+        CitationViewKey.FIGURE_NAME: "Figure [{ref}]",
     },
     "de": {
         RetrievalCallKey.DISPLAY_NAME: "Dokumentensuche",
@@ -50,6 +52,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         CitationViewKey.PAGE_LABEL: "Seite:",
         CitationViewKey.SOURCE_LABEL: "Quelle:",
         CitationViewKey.EXCERPT_LABEL: "Auszug",
+        CitationViewKey.FIGURE_LABEL: "Abbildung:",
+        CitationViewKey.FIGURE_NAME: "Abbildung [{ref}]",
     },
 }
 

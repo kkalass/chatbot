@@ -30,42 +30,41 @@ from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferen
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
+from src.chatbot.app.chat_prompts import DEFAULT_PROMPTS
 from src.chatbot.app.citation import (
     CitationMessage,
     CitationModel,
 )
-from src.chatbot.app.prompts import DEFAULT_PROMPTS, Prompts
-from src.chatbot.app.protocols import (
-    AuthRequiredEvent,
-    AuthRequiredException,
-    ChatModel,
+from src.chatbot.contracts.chat import ChatModel, ModelProfile, ThinkingContent, ToolCallInfo
+from src.chatbot.contracts.citation import (
     Citation,
     DocumentCitation,
     HallucinatedCitation,
-    JsonObject,
-    ModelProfile,
     NumberedCitation,
-    ProcessEvent,
-    ThinkingContent,
-    Tool,
-    ToolCallFinished,
-    ToolCallInfo,
-    ToolCallStarted,
     ToolCitation,
-    ToolSchema,
     UnsubstantiatedClaim,
     canonical_key,
 )
-from src.chatbot.observability import to_attribute_text
-from src.chatbot.observability.openinference import (
+from src.chatbot.contracts.credentials import AuthRequiredException
+from src.chatbot.contracts.i18n import JsonObject
+from src.chatbot.contracts.observability import (
+    SPAN_CHAT_ORCHESTRATOR_STEP,
+    SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH,
+)
+from src.chatbot.contracts.process import (
+    AuthRequiredEvent,
+    ProcessEvent,
+    ToolCallFinished,
+    ToolCallStarted,
+)
+from src.chatbot.contracts.prompts import Prompts
+from src.chatbot.contracts.tools import Tool, ToolSchema
+from src.shared.observability import (
     build_input_attributes,
     build_output_attributes,
     build_span_kind_attributes,
     build_tool_execution_attributes,
-)
-from src.chatbot.observability.schema import (
-    SPAN_CHAT_ORCHESTRATOR_STEP,
-    SPAN_CHAT_ORCHESTRATOR_TOOL_DISPATCH,
+    to_attribute_text,
 )
 
 logger = structlog.get_logger(__name__)

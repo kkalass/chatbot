@@ -9,14 +9,14 @@ messages — see :mod:`src.chatbot.app.citation.citation_model`.
 
 from dataclasses import dataclass
 
-from src.chatbot.app.protocols import (
+from src.chatbot.contracts.chat import ToolCallInfo
+from src.chatbot.contracts.citation import (
+    CitableUnit,
     Citation,
     HallucinatedCitation,
-    JsonObject,
-    ToolCallInfo,
     UnsubstantiatedClaim,
 )
-from src.chatbot.app.protocols_citeable_tool import CitableUnit
+from src.chatbot.contracts.i18n import JsonObject
 
 
 @dataclass(frozen=True)

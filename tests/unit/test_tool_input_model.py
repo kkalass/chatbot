@@ -4,7 +4,7 @@
 
 from pydantic import ValidationError
 
-from src.chatbot.tools._input_model import ToolInputModel
+from src.chatbot.infrastructure.tools._input_model import ToolInputModel
 
 
 class _DummyInput(ToolInputModel):

@@ -5,21 +5,25 @@
 import pytest
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 
-from src.chatbot.app.protocols import ChatMessage, SourceChunk, ToolCallInfo, ToolSchema
-from src.chatbot.observability import tracing as tracing_module
-from src.chatbot.observability.openinference import (
+from src.chatbot.contracts.chat import ChatMessage, ToolCallInfo
+from src.chatbot.contracts.retrieval import SourceChunk
+from src.chatbot.contracts.tools import ToolSchema
+from src.chatbot.infrastructure.observability import (
     build_document,
-    build_input_attributes,
     build_llm_attributes,
     build_message,
-    build_output_attributes,
     build_retriever_attributes,
+    build_tool_call,
+)
+from src.shared.observability import tracing as tracing_module
+from src.shared.observability.openinference import (
+    build_input_attributes,
+    build_output_attributes,
     build_session_attributes,
     build_span_kind_attributes,
-    build_tool_call,
     build_tool_execution_attributes,
 )
-from src.chatbot.observability.tracing import configure_tracing, to_attribute_text
+from src.shared.observability.tracing import configure_tracing, to_attribute_text
 
 
 def _reset_tracing_state(monkeypatch: pytest.MonkeyPatch) -> None:

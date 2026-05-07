@@ -4,9 +4,10 @@
 
 import pytest
 
-from src.chatbot.app.protocols import DocumentCitation, JsonObject, RawCitation, SourceChunk
-from src.chatbot.app.protocols_citeable_tool import CitableUnit
-from src.chatbot.tools.retrieval.tool import RetrievalTool
+from src.chatbot.contracts.citation import CitableUnit, DocumentCitation, RawCitation
+from src.chatbot.contracts.i18n import JsonObject
+from src.chatbot.contracts.retrieval import SourceChunk
+from src.chatbot.infrastructure.tools.retrieval import RetrievalTool
 
 
 class _StubRetriever:

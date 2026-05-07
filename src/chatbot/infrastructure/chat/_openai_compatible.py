@@ -25,24 +25,26 @@ from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferen
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from src.chatbot.app.protocols import (
+from src.chatbot.contracts.chat import (
     ChatMessage,
     ChatModel,
     ChatStreamItem,
     ThinkingContent,
     ToolCallInfo,
-    ToolSchema,
 )
-from src.chatbot.app.tracing import summarize_messages
-from src.chatbot.observability import to_attribute_text
-from src.chatbot.observability.openinference import (
-    build_input_attributes,
+from src.chatbot.contracts.observability import SPAN_CHAT_MODEL_OPENAI_COMPATIBLE_STREAM
+from src.chatbot.contracts.tools import ToolSchema
+from src.chatbot.infrastructure.observability import (
     build_llm_attributes,
+    build_tool_call,
+    summarize_messages,
+)
+from src.shared.observability import (
+    build_input_attributes,
     build_output_attributes,
     build_span_kind_attributes,
-    build_tool_call,
+    to_attribute_text,
 )
-from src.chatbot.observability.schema import SPAN_CHAT_MODEL_OPENAI_COMPATIBLE_STREAM
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)

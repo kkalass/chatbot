@@ -10,8 +10,9 @@ of prompts, tool schemas, and adapter-level capabilities.
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
-from src.chatbot.app.prompts import Prompts
-from src.chatbot.app.protocols import JsonObject, ModelProfile
+from src.chatbot.contracts.chat import ModelProfile
+from src.chatbot.contracts.i18n import JsonObject
+from src.chatbot.contracts.prompts import Prompts
 
 
 @dataclass(frozen=True)

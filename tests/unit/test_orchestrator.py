@@ -16,18 +16,16 @@ from src.chatbot.app.citation.messages import (
     CitationUserMessage,
 )
 from src.chatbot.app.orchestrator import ChatOrchestrator, ToolCallFinished, ToolCallStarted
-from src.chatbot.app.protocols import (
+from src.chatbot.contracts.chat import ModelProfile, ToolCallInfo
+from src.chatbot.contracts.citation import (
     Citation,
     DocumentCitation,
     HallucinatedCitation,
-    I18nMessage,
-    JsonObject,
-    ModelProfile,
     NumberedCitation,
     RawCitation,
-    ToolCallInfo,
-    ToolSchema,
 )
+from src.chatbot.contracts.i18n import I18nMessage, JsonObject
+from src.chatbot.contracts.tools import ToolSchema
 
 # --- Stubs ------------------------------------------------------------------
 

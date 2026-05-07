@@ -38,28 +38,21 @@ from src.chatbot.app.citation.messages import (
     CitationToolMessage,
     CitationUserMessage,
 )
-from src.chatbot.app.protocols import (
-    ChatMessage,
-    ChatModel,
-    Citation,
-    HallucinatedCitation,
-    I18nMessage,
-    JsonObject,
-    RawCitation,
-    ThinkingContent,
-    Tool,
-    ToolCallInfo,
-    ToolCitation,
-    ToolSchema,
-    UnsubstantiatedClaim,
-)
-from src.chatbot.app.protocols_citeable_tool import (
+from src.chatbot.contracts.chat import ChatMessage, ChatModel, ThinkingContent, ToolCallInfo
+from src.chatbot.contracts.citation import (
     QUOTE_END_MARKER,
     QUOTE_START_MARKER,
     CitableUnit,
+    Citation,
     CiteableTool,
+    HallucinatedCitation,
+    RawCitation,
+    ToolCitation,
     ToolHistoryRendering,
+    UnsubstantiatedClaim,
 )
+from src.chatbot.contracts.i18n import I18nMessage, JsonObject
+from src.chatbot.contracts.tools import Tool, ToolSchema
 
 logger = structlog.get_logger(__name__)
 

@@ -12,27 +12,22 @@ from src.chatbot.app.citation.messages import (
     CitationSystemMessage,
     CitationUserMessage,
 )
-from src.chatbot.app.protocols import (
-    ChatMessage,
-    ChatStreamItem,
-    Citation,
-    DocumentCitation,
-    HallucinatedCitation,
-    I18nMessage,
-    JsonObject,
-    RawCitation,
-    ToolCallInfo,
-    ToolCitation,
-    ToolSchema,
-    UnsubstantiatedClaim,
-)
-from src.chatbot.app.protocols_citeable_tool import (
+from src.chatbot.contracts.chat import ChatMessage, ChatStreamItem, ToolCallInfo
+from src.chatbot.contracts.citation import (
     QUOTE_END_MARKER,
     QUOTE_START_MARKER,
     CitableUnit,
+    Citation,
     CiteInstructions,
+    DocumentCitation,
+    HallucinatedCitation,
+    RawCitation,
+    ToolCitation,
     ToolHistoryRendering,
+    UnsubstantiatedClaim,
 )
+from src.chatbot.contracts.i18n import I18nMessage, JsonObject
+from src.chatbot.contracts.tools import ToolSchema
 
 # --- Stub tools and chat model -----------------------------------------------
 

@@ -15,13 +15,8 @@ from typing import cast
 
 import structlog
 
-from src.chatbot.app.protocols import (
-    ChatMessage,
-    ChatModel,
-    ChatStreamItem,
-    ToolCallInfo,
-    ToolSchema,
-)
+from src.chatbot.contracts.chat import ChatMessage, ChatModel, ChatStreamItem, ToolCallInfo
+from src.chatbot.contracts.tools import ToolSchema
 
 logger = structlog.get_logger(__name__)
 

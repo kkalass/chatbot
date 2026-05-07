@@ -6,13 +6,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.chatbot.app.protocols import AuthRequiredException, UsernamePasswordCredentials
-from src.chatbot.tools.vacation_days.service import (
+from src.chatbot.contracts.credentials import AuthRequiredException, UsernamePasswordCredentials
+from src.chatbot.infrastructure.tools.vacation_days import (
     ToolAuthenticationError,
     VacationDaysInput,
     VacationDaysOutput,
 )
-from src.chatbot.tools.vacation_days.tool import VacationDaysTool
+from src.chatbot.infrastructure.tools.vacation_days import VacationDaysTool
 
 
 @dataclass

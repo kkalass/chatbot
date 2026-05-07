@@ -17,67 +17,59 @@ Session state keys
 - ``"orchestrator"`` — the :class:`~src.chatbot.app.orchestrator.ChatOrchestrator`.
 """
 
+from collections.abc import Callable
+from hashlib import sha256
+from pathlib import Path
 from typing import assert_never, cast
 from uuid import uuid4
 
 import chainlit as cl
 import structlog
+from chainlit.element import Element as ClElement
 from openinference.semconv.trace import OpenInferenceMimeTypeValues, OpenInferenceSpanKindValues
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from src.chatbot.app.credential_store import InMemoryCredentialStore
 from src.chatbot.app.orchestrator import ChatOrchestrator
-from src.chatbot.app.prompts import DEFAULT_PROMPTS
-from src.chatbot.app.protocols import (
-    AuthRequiredEvent,
+from src.chatbot.contracts.chat import ThinkingContent
+from src.chatbot.contracts.citation import (
     Citation,
-    CredentialStore,
     DocumentCitation,
     HallucinatedCitation,
     NumberedCitation,
-    ProcessEvent,
-    ThinkingContent,
-    Tool,
-    ToolCallFinished,
-    ToolCallStarted,
     ToolCitation,
     UnsubstantiatedClaim,
     canonical_key,
 )
-from src.chatbot.config import (
-    build_chat_model_config,
-    build_retriever_config,
-    build_text_embedder_config,
+from src.chatbot.contracts.observability import SPAN_CHAT_UI_ON_MESSAGE
+from src.chatbot.contracts.process import (
+    AuthRequiredEvent,
+    ProcessEvent,
+    ToolCallFinished,
+    ToolCallStarted,
 )
-from src.chatbot.infrastructure.chat import build_chat_model, build_chat_model_profile
-from src.chatbot.infrastructure.embeddings_text import build_text_embedder
-from src.chatbot.infrastructure.retrieval import build_retriever
-from src.chatbot.observability import configure_tracing, to_attribute_text
-from src.chatbot.observability.openinference import (
+from src.chatbot.ui.citation_view import (
+    build_citation_content,
+    build_citation_markdown,
+    format_citation_marker,
+    format_text_chunk,
+)
+from src.chatbot.ui.composition import (
+    bootstrap_observability,
+    build_orchestrator,
+)
+from src.chatbot.ui.i18n_messages import I18nMessage, detect_language, resolve_message
+from src.shared.observability import (
     build_input_attributes,
     build_metadata_attributes,
     build_output_attributes,
     build_session_attributes,
     build_span_kind_attributes,
+    to_attribute_text,
     using_session_attributes,
 )
-from src.chatbot.observability.schema import SPAN_CHAT_UI_ON_MESSAGE
-from src.chatbot.tools.retrieval.tool import RetrievalTool
-from src.chatbot.tools.vacation_days import (
-    SimulatedVacationDaysAdapter,
-    VacationDaysTool,
-)
-from src.chatbot.ui.citation_view import (
-    build_citation_content,
-    build_citation_markdown,
-    build_side_panel_label,
-    format_citation_marker,
-    format_text_chunk,
-)
-from src.chatbot.ui.i18n_messages import detect_language, resolve_message
-from src.chatbot.ui.logging_config import configure_logging
-from src.settings import get_settings
+from src.shared.settings import get_settings
 
 _SESSION_ORCHESTRATOR = "orchestrator"
 _SESSION_TRACE_ID = "trace_session_id"
@@ -86,22 +78,9 @@ _SESSION_CREDENTIAL_STORE = "credential_store"
 _SESSION_SHOWN_SIDEBAR_REFS = "shown_sidebar_refs"
 _tracer = trace.get_tracer(__name__)
 
-# Configure logging at module import time (before any logger is used).
+# Configure logging + tracing at module import time (before any logger is used).
 _settings = get_settings()
-configure_logging(_settings.log_format)
-configure_tracing(
-    enabled=_settings.otel_enabled,
-    service_name=_settings.otel_service_name,
-    project_name=_settings.phoenix_project_name,
-    deployment_environment=_settings.otel_deployment_environment,
-    phoenix_otlp_endpoint=_settings.otel_phoenix_otlp_endpoint,
-    phoenix_export=_settings.otel_export_phoenix,
-    jaeger_otlp_endpoint=_settings.otel_jaeger_otlp_endpoint,
-    jaeger_export=_settings.otel_export_jaeger,
-    sample_rate=_settings.otel_sample_rate,
-    console_export=_settings.otel_console_export,
-    auto_instrument_haystack=_settings.otel_auto_instrument_haystack,
-)
+bootstrap_observability(_settings)
 
 logger = structlog.get_logger(__name__)
 _DEFAULT_EVAL_RUN_ID = _settings.eval_run_id if _settings.eval_run_id else str(uuid4())
@@ -136,20 +115,61 @@ def _collect_unique_numbered_citations(
     return unique
 
 
-def _build_side_elements(unique: list[NumberedCitation], *, lang: str) -> list[cl.Text]:
-    """Aggregate all citations into a single side-panel element.
+def _build_side_elements(unique: list[NumberedCitation], *, lang: str) -> list[ClElement]:
+    """Build side-panel elements per citation in stable reference order.
 
-    One ``cl.Text`` element named with the localised panel title (e.g.
-    "Quellenangaben") is returned.  Each citation's content section begins
-    with a ``[N]``-prefixed heading so the reference numbers visible in the
-    answer text map directly to entries in the panel.
+    Each element is named ``(N)`` — matching the inline citation markers in
+    the answer text — so Chainlit can auto-link ``(1)`` in the text to the
+    corresponding side panel element. When a citation carries an image the
+    figure is embedded via a static ``/public/...`` URL in the ``cl.Text``
+    markdown, so each citation produces exactly one element.
     """
-    panel_title = build_side_panel_label(translate=lambda msg: resolve_message(msg, lang=lang))
-    content = "\n\n---\n\n".join(
-        build_citation_content(nc, translate=lambda msg: resolve_message(msg, lang=lang))
-        for nc in unique
-    )
-    return [cl.Text(name=panel_title, content=content, display="side")]
+    translate: Callable[[I18nMessage], str] = lambda msg: resolve_message(msg, lang=lang)  # noqa: E731
+    ordered = sorted(unique, key=lambda nc: nc.reference_number)
+    elements: list[ClElement] = []
+    for citation in ordered:
+        element_name = f"({citation.reference_number})"
+        image_markdown_src: str | None = None
+        if isinstance(citation.citation, DocumentCitation) and citation.citation.image_path:
+            image_markdown_src = _image_markdown_src(citation.citation.image_path)
+        elements.append(
+            cl.Text(
+                name=element_name,
+                content=build_citation_content(
+                    citation,
+                    translate=translate,
+                    image_markdown_src=image_markdown_src,
+                ),
+                display="side",
+            )
+        )
+    return elements
+
+
+def _image_markdown_src(image_path: str) -> str | None:
+    """Copy image to ``public/citation_images`` and return a markdown-safe URL."""
+    # TODO: this is definitely not production quality, copying files on demand to public directory...
+    source = Path(image_path)
+    if not source.is_file():
+        logger.warning("citation_image_not_found", image_path=image_path)
+        return None
+
+    try:
+        payload = source.read_bytes()
+        digest = sha256(payload).hexdigest()[:24]
+        suffix = source.suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            suffix = ".png"
+
+        relative = Path("citation_images") / f"{digest}{suffix}"
+        target = Path("public") / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_bytes(payload)
+        return f"/public/{relative.as_posix()}"
+    except OSError:
+        logger.warning("citation_image_copy_failed", image_path=image_path, exc_info=True)
+        return None
 
 
 def _has_renderable_side_element(citation: Citation) -> bool:
@@ -159,49 +179,6 @@ def _has_renderable_side_element(citation: Citation) -> bool:
             return True
         case ToolCitation():
             return "error" not in citation.result
-
-
-def _build_credential_store() -> CredentialStore:
-    """Create the credential store."""
-    return InMemoryCredentialStore()
-
-
-def _build_vacation_days_tool(credential_store: CredentialStore) -> VacationDaysTool:
-    """Create the vacation-days tool."""
-    service = SimulatedVacationDaysAdapter()
-    return VacationDaysTool(service=service, credential_store=credential_store)
-
-
-def _build_retrieval_tool() -> RetrievalTool:
-    """Create the retrieval tool and bind its retriever infrastructure."""
-    text_embedder = build_text_embedder(build_text_embedder_config(_settings))
-    retriever_config = build_retriever_config(_settings)
-    retriever = build_retriever(
-        config=retriever_config,
-        text_embedder=text_embedder,
-    )
-    return RetrievalTool(retriever=retriever)
-
-
-def _build_orchestrator() -> tuple[ChatOrchestrator, CredentialStore]:
-    """Compose one session-scoped chat orchestrator instance."""
-    chat_model_config = build_chat_model_config(_settings)
-    model_profile = build_chat_model_profile(chat_model_config)
-
-    chat_model = build_chat_model(
-        chat_model_config, parse_text_tool_calls=model_profile.parse_text_tool_calls
-    )
-    credential_store = _build_credential_store()
-    vacation_days_tool = _build_vacation_days_tool(credential_store)
-    retrieval_tool = _build_retrieval_tool()
-    tools: list[Tool] = [vacation_days_tool, retrieval_tool]
-    orchestrator = ChatOrchestrator.create(
-        chat_model,
-        tools=tools,
-        model_profile=model_profile,
-        prompts=DEFAULT_PROMPTS,
-    )
-    return orchestrator, credential_store
 
 
 def _trace_request(
@@ -272,7 +249,7 @@ def _trace_response(
 async def on_chat_start() -> None:
     """Compose and store one :class:`ChatOrchestrator` per user session."""
     lang = _detect_session_lang()
-    orchestrator, credential_store = _build_orchestrator()
+    orchestrator, credential_store = build_orchestrator(_settings)
     trace_session_id = str(uuid4())
 
     cl.user_session.set(_SESSION_ORCHESTRATOR, orchestrator)  # pyright: ignore[reportUnknownMemberType]
@@ -366,7 +343,7 @@ class ResponseManager:
             await self._message.update()  # send accumulated content immediately
             self._message = None
 
-    async def set_content(self, content: str, elements: list[cl.Text]) -> None:
+    async def set_content(self, content: str, elements: list[ClElement]) -> None:
         msg = await self._get_or_create_message()
         msg.content = content
         msg.elements = elements  # pyright: ignore[reportAttributeAccessIssue]
@@ -462,7 +439,7 @@ async def on_message(message: cl.Message) -> None:
             sources_markdown = build_citation_markdown(
                 unique_numbered, translate=lambda msg: resolve_message(msg, lang=lang)
             )
-            elements: list[cl.Text]
+            elements: list[ClElement]
             if new_renderable:
                 elements = _build_side_elements(new_renderable, lang=lang)  # pyright: ignore[reportAttributeAccessIssue]
                 cl.user_session.set(  # pyright: ignore[reportUnknownMemberType]

@@ -4,9 +4,12 @@
 
 # pyright: reportPrivateUsage=false
 
+from pathlib import Path
+from typing import Any, cast
+
 import pytest
 
-from src.chatbot.app.protocols import NumberedCitation, ToolCitation
+from src.chatbot.contracts.citation import DocumentCitation, NumberedCitation, ToolCitation
 from src.chatbot.ui.app import ResponseManager
 from src.chatbot.ui.citation_view import format_citation_marker, format_text_chunk
 
@@ -25,7 +28,7 @@ class TestCitationMarkerFormatting:
     def test_marker_keeps_pending_whitespace_buffered(self) -> None:
         tokens, pending = format_citation_marker(_numbered(1), "\n\n")
 
-        assert tokens == ["[1]"]
+        assert tokens == ["_(1)_"]
         assert pending == "\n\n"
 
     def test_consecutive_markers_do_not_emit_blank_lines_between_references(self) -> None:
@@ -39,14 +42,14 @@ class TestCitationMarkerFormatting:
         # Pending whitespace is flushed once at the end of the marker run.
         rendered.extend(pending)
 
-        assert "".join(rendered) == "[1][2][3]\n\n"
+        assert "".join(rendered) == "_(1)__(2)__(3)_\n\n"
 
     def test_pending_whitespace_is_reinserted_before_following_text(self) -> None:
         pending = "\n\n"
         marker_tokens, pending = format_citation_marker(_numbered(1), pending)
         text_tokens, pending = format_text_chunk("Next paragraph", pending)
 
-        assert marker_tokens == ["[1]"]
+        assert marker_tokens == ["_(1)_"]
         assert text_tokens == ["\n\n", "Next paragraph"]
         assert pending == ""
 
@@ -161,3 +164,101 @@ class TestResponseController:
         assert ctrl._message is sent_messages[0]
         assert "Fetching data" in ctrl._message.content  # type: ignore[union-attr]
         assert ctrl._message_is_transient is True
+
+
+class TestSideElements:
+    def test_side_elements_group_text_and_image_per_citation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import src.chatbot.ui.app as ui_app
+
+        class _StubText:
+            def __init__(self, *, name: str, content: str, display: str) -> None:
+                self.kind = "text"
+                self.name = name
+                self.content = content
+                self.display = display
+
+        def _stub_image_markdown_src(_path: str) -> str:
+            return "/public/citation_images/fake.png"
+
+        monkeypatch.setattr(ui_app.cl, "Text", _StubText)
+        monkeypatch.setattr(
+            ui_app,
+            "_image_markdown_src",
+            _stub_image_markdown_src,
+        )
+
+        doc_with_image = NumberedCitation(
+            reference_number=2,
+            citation=DocumentCitation(
+                raw_marker_text="<m>",
+                citation_token="c2",
+                source="corpus/a.pdf",
+                chunk_id="c2",
+                content="first excerpt",
+                score=0.9,
+                title="Doc A",
+                image_path="/tmp/a.png",
+                kind="image_description",
+            ),
+        )
+        doc_without_image = NumberedCitation(
+            reference_number=1,
+            citation=DocumentCitation(
+                raw_marker_text="<m>",
+                citation_token="c1",
+                source="corpus/b.pdf",
+                chunk_id="c1",
+                content="second excerpt",
+                score=0.8,
+                title="Doc B",
+            ),
+        )
+
+        elements = ui_app._build_side_elements([doc_with_image, doc_without_image], lang="en")
+        stub_elements = cast(list[Any], elements)
+
+        assert len(stub_elements) == 2
+        assert stub_elements[0].kind == "text"
+        assert "### 1." in stub_elements[0].content
+        assert "Doc B" in stub_elements[0].content
+        assert stub_elements[1].kind == "text"
+        assert "### 2." in stub_elements[1].content
+        assert "Doc A" in stub_elements[1].content
+        assert "/public/citation_images/fake.png" in stub_elements[1].content
+        assert stub_elements[0].name == "(1)"
+        assert stub_elements[1].name == "(2)"
+
+
+class TestImageMarkdownSrc:
+    def test_returns_public_url_and_copies_image(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import src.chatbot.ui.app as ui_app
+
+        monkeypatch.chdir(tmp_path)
+
+        source = tmp_path / "source.png"
+        payload = b"\x89PNG\r\n\x1a\nFAKE"
+        source.write_bytes(payload)
+
+        src = ui_app._image_markdown_src(str(source))
+
+        assert src is not None
+        assert src.startswith("/public/citation_images/")
+
+        written = Path(src.lstrip("/"))
+        assert written.is_file()
+        assert written.read_bytes() == payload
+
+    def test_returns_none_for_missing_image(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import src.chatbot.ui.app as ui_app
+
+        monkeypatch.chdir(tmp_path)
+
+        src = ui_app._image_markdown_src("/tmp/definitely-does-not-exist.png")
+
+        assert src is None

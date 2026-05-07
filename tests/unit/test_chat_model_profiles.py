@@ -9,13 +9,12 @@ reintroduce them.
 
 from datetime import datetime
 
-from src.chatbot.app.prompts import DEFAULT_PROMPTS
+from src.chatbot.app.chat_prompts import DEFAULT_PROMPTS
+from src.chatbot.build_from_settings import build_model_profile
 from src.chatbot.infrastructure.chat import (
-    ChatModelConfig,
     DefaultChatModelProfile,
     QwenCoderModelProfile,
     SmallModelProfile,
-    build_chat_model_profile,
 )
 
 
@@ -35,20 +34,16 @@ class TestDefaultPrompts:
 
 class TestProfileSelection:
     def test_llama_selects_small_profile(self) -> None:
-        config = ChatModelConfig(base_url="http://localhost:11434", model="llama3.1:8b")
-        assert isinstance(build_chat_model_profile(config), SmallModelProfile)
+        assert isinstance(build_model_profile("llama3.1:8b"), SmallModelProfile)
 
     def test_qwen_selects_small_profile(self) -> None:
-        config = ChatModelConfig(base_url="http://localhost:11434", model="qwen3.5:9b")
-        assert isinstance(build_chat_model_profile(config), SmallModelProfile)
+        assert isinstance(build_model_profile("qwen3.5:9b"), SmallModelProfile)
 
     def test_qwen_coder_selects_qwen_coder_profile(self) -> None:
-        config = ChatModelConfig(base_url="http://localhost:11434", model="qwen2.5-coder:14b")
-        assert isinstance(build_chat_model_profile(config), QwenCoderModelProfile)
+        assert isinstance(build_model_profile("qwen2.5-coder:14b"), QwenCoderModelProfile)
 
     def test_unknown_model_selects_default_profile(self) -> None:
-        config = ChatModelConfig(base_url="http://localhost:11434", model="some-unknown-model")
-        assert isinstance(build_chat_model_profile(config), DefaultChatModelProfile)
+        assert isinstance(build_model_profile("some-unknown-model"), DefaultChatModelProfile)
 
 
 class TestParseTextToolCallsFlag:

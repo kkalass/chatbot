@@ -9,7 +9,7 @@ in-memory implementation used by the composition root.
 
 import structlog
 
-from src.chatbot.app.protocols import UsernamePasswordCredentials
+from src.chatbot.contracts.credentials import UsernamePasswordCredentials
 
 logger = structlog.get_logger(__name__)
 

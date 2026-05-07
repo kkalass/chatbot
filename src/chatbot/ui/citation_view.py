@@ -18,13 +18,13 @@ from collections.abc import Callable, Sequence
 from enum import StrEnum
 from textwrap import dedent
 
-from src.chatbot.app.protocols import (
+from src.chatbot.contracts.citation import (
     Citation,
     DocumentCitation,
-    I18nMessage,
     NumberedCitation,
     ToolCitation,
 )
+from src.chatbot.contracts.i18n import I18nMessage
 
 
 class CitationViewKey(StrEnum):
@@ -37,6 +37,8 @@ class CitationViewKey(StrEnum):
     PAGE_LABEL = "citation_view.page_label"
     SOURCE_LABEL = "citation_view.source_label"
     EXCERPT_LABEL = "citation_view.excerpt_label"
+    FIGURE_LABEL = "citation_view.figure_label"
+    FIGURE_NAME = "citation_view.figure_name"
 
 
 # -- Display labels ------------------------------------------------------
@@ -73,17 +75,27 @@ def build_citation_content(
     numbered: NumberedCitation,
     *,
     translate: Callable[[I18nMessage], str],
+    image_markdown_src: str | None = None,
 ) -> str:
     """Structured Markdown for a citation entry in the side panel.
 
     The section heading is prefixed with the session-stable reference number
     so the entry is identifiable in the aggregated panel view.
+
+    When *image_markdown_src* is provided and the citation carries an
+    ``image_path``, the figure is embedded directly as a markdown image so
+    callers do not need a separate ``cl.Image`` element.
     """
     citation = numbered.citation
     ref = numbered.reference_number
     match citation:
         case DocumentCitation():
-            return _build_document_content(citation, ref=ref, translate=translate)
+            return _build_document_content(
+                citation,
+                ref=ref,
+                translate=translate,
+                image_markdown_src=image_markdown_src,
+            )
         case ToolCitation():
             return _build_tool_content(citation, ref=ref, translate=translate)
 
@@ -123,7 +135,7 @@ def format_citation_marker(
     This avoids inserting blank lines between consecutive citation references
     when the model emits multiple marker blocks separated by newlines.
     """
-    return [f"[{nc.reference_number}]"], pending_whitespace
+    return [f"_({nc.reference_number})_"], pending_whitespace
 
 
 # -- Bubble appendix -----------------------------------------------------
@@ -165,10 +177,14 @@ def _document_display_title(citation: DocumentCitation) -> str:
 
 
 def _build_document_content(
-    citation: DocumentCitation, *, ref: int, translate: Callable[[I18nMessage], str]
+    citation: DocumentCitation,
+    *,
+    ref: int,
+    translate: Callable[[I18nMessage], str],
+    image_markdown_src: str | None = None,
 ) -> str:
     header = _link_or_text(_document_display_title(citation), citation.source_url)
-    lines = [f"### [{ref}] {header}", ""]
+    lines = [f"### {ref}. {header}", ""]
     if citation.author:
         lines.append(
             f"**{translate(I18nMessage(key=CitationViewKey.AUTHOR_LABEL, args={}))}** {citation.author}  "
@@ -185,6 +201,15 @@ def _build_document_content(
         lines.append(
             f"**{translate(I18nMessage(key=CitationViewKey.SOURCE_LABEL, args={}))}** {citation.source}  "
         )
+    if citation.image_path:
+        figure_label = translate(I18nMessage(key=CitationViewKey.FIGURE_LABEL, args={}))
+        figure_name = translate(
+            I18nMessage(key=CitationViewKey.FIGURE_NAME, args={"ref": str(ref)})
+        )
+        if image_markdown_src:
+            lines.extend(["", f"![{figure_name}]({image_markdown_src})", ""])
+        else:
+            lines.append(f"**{figure_label}** {figure_name}  ")
     excerpt_label = translate(I18nMessage(key=CitationViewKey.EXCERPT_LABEL, args={}))
     lines.extend(["", f"**{excerpt_label}**", "", _normalize_excerpt(citation.content)])
     return "\n".join(lines)
@@ -227,7 +252,7 @@ def _build_tool_content(
 ) -> str:
     """Render a tool result as a property list; only called for successful results."""
     heading = _tool_display_label(citation, translate=translate)
-    lines = [f"### [{ref}] {heading}", ""]
+    lines = [f"### {ref}. {heading}", ""]
     for key, value in citation.result.items():
         if isinstance(value, (dict, list)):
             formatted = f"`{json.dumps(value, ensure_ascii=False)}`"

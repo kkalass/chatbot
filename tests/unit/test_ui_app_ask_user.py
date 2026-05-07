@@ -9,8 +9,9 @@ from typing import ClassVar
 
 import pytest
 
-from src.chatbot.app.protocols import AuthRequiredEvent, I18nMessage
-from src.chatbot.tools.vacation_days.keys import VacationDaysCallKey
+from src.chatbot.contracts.i18n import I18nMessage
+from src.chatbot.contracts.process import AuthRequiredEvent
+from src.chatbot.infrastructure.tools.vacation_days import VacationDaysCallKey
 from src.chatbot.ui import app as ui_app
 
 

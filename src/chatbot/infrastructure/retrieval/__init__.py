@@ -2,28 +2,31 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Public retrieval infrastructure API."""
 
-from typing import assert_never
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
-from src.chatbot.app.protocols import Retriever
 from src.chatbot.infrastructure.embeddings_text import TextEmbedder
 
-from ._config import RetrieverConfig
-from ._qdrant_hybrid import build_qdrant_hybrid_retriever
+from ._qdrant_hybrid import QdrantHybridRetriever
 
 
-def build_retriever(
-    config: RetrieverConfig,
+def build_qdrant_retriever(
+    *,
+    top_k: int,
+    llm_top_k: int | None = None,
     text_embedder: TextEmbedder,
-) -> Retriever:
-    """Construct the retriever."""
-    match config.store_backend:
-        case "qdrant":
-            return build_qdrant_hybrid_retriever(
-                config=config,
-                text_embedder=text_embedder,
-            )
-        case _:
-            assert_never(config.store_backend)
+    document_store: QdrantDocumentStore,
+) -> QdrantHybridRetriever:
+    """Construct a Qdrant hybrid (dense + sparse) retriever.
+
+    The document store is injected from the composition root so that the
+    retriever does not own connection details.
+    """
+    return QdrantHybridRetriever(
+        top_k=top_k,
+        llm_top_k=llm_top_k,
+        document_store=document_store,
+        text_embedder=text_embedder,
+    )
 
 
-__all__ = ["RetrieverConfig", "build_retriever"]
+__all__ = ["build_qdrant_retriever"]

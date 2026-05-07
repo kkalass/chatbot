@@ -15,15 +15,16 @@ import uuid
 from pathlib import Path
 
 import pytest
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from src.chatbot.infrastructure.embeddings_text import TextEmbedderConfig, build_text_embedder
-from src.chatbot.infrastructure.retrieval import RetrieverConfig, build_retriever
-from src.ingest.infrastructure.document_store import DocumentStoreConfig, build_document_store
+from src.chatbot.infrastructure.retrieval import build_qdrant_retriever
+from src.ingest.app import IngestionConfig, IngestionPipeline
+from src.ingest.build_from_settings import build_format_handlers
 from src.ingest.infrastructure.embeddings_document import (
-    DocumentEmbedderConfig,
-    build_document_embedder,
+    build_ollama_document_embedder,
 )
-from src.ingest.pipeline import IngestionConfig, IngestionPipeline
+from src.shared.qdrant import build_qdrant_document_store
 
 # Skip the entire module unless integration tests are explicitly opted-in.
 pytestmark = pytest.mark.skipif(
@@ -42,40 +43,37 @@ _INGESTION_CONFIG = IngestionConfig(
     split_overlap=10,
 )
 
-_STORE_CONFIG = DocumentStoreConfig(
-    host="localhost",
-    port=6333,
-    collection=_TEST_COLLECTION,
-    embedding_dim=768,
-)
 
-_DOCUMENT_EMBEDDER_CONFIG = DocumentEmbedderConfig(
-    url="http://localhost:11434",
-    embedding_model="nomic-embed-text",
-)
+def _build_test_store() -> QdrantDocumentStore:
+    """Build a test-scoped Qdrant document store."""
+    return build_qdrant_document_store(
+        host="localhost",
+        port=6333,
+        collection=_TEST_COLLECTION,
+        embedding_dim=768,
+    )
+
 
 _TEXT_EMBEDDER_CONFIG = TextEmbedderConfig(
     url="http://localhost:11434",
     embedding_model="nomic-embed-text",
 )
 
-_RETRIEVER_CONFIG = RetrieverConfig(
-    top_k=5,
-    store_host="localhost",
-    store_port=6333,
-    store_collection=_TEST_COLLECTION,
-    embedding_dim=768,
-)
+_RETRIEVAL_TOP_K = 5
 
 
 @pytest.fixture(scope="module")
 def ingested_store() -> None:
     """Ingest the fixture corpus once for the entire module."""
-    store = build_document_store(_STORE_CONFIG)
+    store = _build_test_store()
     pipeline = IngestionPipeline(
         config=_INGESTION_CONFIG,
         document_store=store,
-        embedder=build_document_embedder(_DOCUMENT_EMBEDDER_CONFIG),
+        embedder=build_ollama_document_embedder(
+            model="nomic-embed-text",
+            url="http://localhost:11434",
+        ),
+        format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
     )
     count = pipeline.ingest_corpus(_FIXTURE_DIR)
     assert count > 0, f"Expected > 0 chunks to be written; got {count}"
@@ -83,17 +81,19 @@ def ingested_store() -> None:
 
 class TestGroundedRetrieval:
     async def test_zurich_query_returns_chunks(self, ingested_store: None) -> None:
-        retriever = build_retriever(
-            config=_RETRIEVER_CONFIG,
+        retriever = build_qdrant_retriever(
+            top_k=_RETRIEVAL_TOP_K,
             text_embedder=build_text_embedder(_TEXT_EMBEDDER_CONFIG),
+            document_store=_build_test_store(),
         )
         chunks = await retriever.retrieve("What is the largest city in Switzerland?")
         assert len(chunks) > 0, "Expected at least one chunk for a known topic"
 
     async def test_citation_source_points_to_fixture_file(self, ingested_store: None) -> None:
-        retriever = build_retriever(
-            config=_RETRIEVER_CONFIG,
+        retriever = build_qdrant_retriever(
+            top_k=_RETRIEVAL_TOP_K,
             text_embedder=build_text_embedder(_TEXT_EMBEDDER_CONFIG),
+            document_store=_build_test_store(),
         )
         chunks = await retriever.retrieve("financial center")
         sources = {c.source for c in chunks}
@@ -102,9 +102,10 @@ class TestGroundedRetrieval:
         )
 
     async def test_chunk_content_not_empty(self, ingested_store: None) -> None:
-        retriever = build_retriever(
-            config=_RETRIEVER_CONFIG,
+        retriever = build_qdrant_retriever(
+            top_k=_RETRIEVAL_TOP_K,
             text_embedder=build_text_embedder(_TEXT_EMBEDDER_CONFIG),
+            document_store=_build_test_store(),
         )
         chunks = await retriever.retrieve("Zurich old town")
         for chunk in chunks:
@@ -125,28 +126,21 @@ class TestOrchestratorWithCitationModel:
     ) -> None:
         from src.chatbot.app.citation import CitationModel
         from src.chatbot.app.orchestrator import ChatOrchestrator
-        from src.chatbot.app.protocols import (
+        from src.chatbot.build_from_settings import build_chat_model_with_profile
+        from src.chatbot.contracts.citation import (
             HallucinatedCitation,
             NumberedCitation,
             UnsubstantiatedClaim,
         )
-        from src.chatbot.infrastructure.chat import (
-            ChatModelConfig,
-            build_chat_model,
-            build_chat_model_profile,
-        )
-        from src.chatbot.tools.retrieval.tool import RetrievalTool
-        from src.settings import get_settings
+        from src.chatbot.infrastructure.tools.retrieval import RetrievalTool
+        from src.shared.settings import get_settings
 
         settings = get_settings()
-        config = ChatModelConfig(base_url=settings.chat_base_url, model=settings.chat_model)
-        model_profile = build_chat_model_profile(config)
-        chat_model = build_chat_model(
-            config, parse_text_tool_calls=model_profile.parse_text_tool_calls
-        )
-        retriever = build_retriever(
-            config=_RETRIEVER_CONFIG,
+        chat_model, model_profile = build_chat_model_with_profile(settings)
+        retriever = build_qdrant_retriever(
+            top_k=_RETRIEVAL_TOP_K,
             text_embedder=build_text_embedder(_TEXT_EMBEDDER_CONFIG),
+            document_store=_build_test_store(),
         )
         retrieval_tool = RetrievalTool(retriever=retriever)
         citation_layer = CitationModel(chat_model, tools=[retrieval_tool])
