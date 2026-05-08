@@ -11,8 +11,8 @@ from src.chatbot.infrastructure.tools.vacation_days import (
     ToolAuthenticationError,
     VacationDaysInput,
     VacationDaysOutput,
+    VacationDaysTool,
 )
-from src.chatbot.infrastructure.tools.vacation_days import VacationDaysTool
 
 
 @dataclass

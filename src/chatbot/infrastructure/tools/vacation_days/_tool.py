@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from src.chatbot.contracts.credentials import AuthRequiredException, CredentialStore
 from src.chatbot.contracts.i18n import I18nMessage, JsonObject
 from src.chatbot.contracts.tools import ToolSchema
+
 from ._keys import VacationDaysCallKey
 from ._service import (
     ToolAuthenticationError,
