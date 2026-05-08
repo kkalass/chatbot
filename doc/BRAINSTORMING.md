@@ -45,22 +45,20 @@ Decisions
 
 --- 
 Future Improvements
- * Tool-call attribution in UI: emit a `ToolCallAttributionEvent` (deterministically from history, no LLM call needed) so the UI can show e.g. "via Urlaubskalender 2025" badges for answers derived from tool calls rather than documents.
  * Implement document upload
- * Make model switchable
+ * Convert into monorepo and use uv workspace 
  * Think about client/server, maybe server as docker image
  * Maybe MCP support (just for the fun of it :-))
  * Probably improve auth by integrating actually realistic SSO or such - gradio apparently even supports this natively
- * Use Chainlint instead of Gradio (less simple, but so much more impressive)
  * Red Teaming my own project
- * evaluate and improve accuracy
+ * further evaluate and improve accuracy
  * automated tests / CI Pipeline for evaluations (CircleCI)
- * implement advanced RAG retrieval methods
+ 
 
 ---
 Tech Stack:
 
-* gradio for UI
+* chainlit for UI
 * First version: lets see how far we can go with privacy-friendly local solutions
   * haystack with LLM Document Content Extractor for multimodal
   * qdrant (faster than chromadb)
