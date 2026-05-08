@@ -52,19 +52,46 @@ Key variables (all have sensible defaults):
 | `QDRANT_COLLECTION` | `chatbot` | Collection name |
 | `CORPUS_PATH` | `corpus` | Source document directory |
 | `RETRIEVAL_TOP_K` | `5` | Chunks returned per query |
-| `RETRIEVAL_SCORE_THRESHOLD` | `0.5` | Minimum similarity score |
+| `RETRIEVAL_LLM_TOP_K` | — | Max documents passed to LLM after RRF fusion; default uses `RETRIEVAL_TOP_K` |
 | `EMBEDDING_DIM` | `1024` | Embedding vector dimension — must match `EMBEDDING_MODEL` output |
 | `SPLIT_LENGTH` | `200` | Words per ingestion chunk |
 | `SPLIT_OVERLAP` | `20` | Word overlap between adjacent chunks |
+| `VISION_INGESTION_ENABLED` | `true` | Ingest images via a vision model; set `false` to skip all image content |
+| `VISION_MODEL` | `qwen2.5vl:7b` | Vision model for image description generation |
+| `VISION_PROVIDER` | `ollama` | Vision model backend — currently only `ollama` |
+| `VISION_BASE_URL` | `http://localhost:11434` | Ollama server URL for vision-model calls |
+| `IMAGE_CACHE_DIR` | `.cache/image_descriptions` | Cache directory for vision-model descriptions (keyed by content hash) |
+| `EXTRACTED_IMAGE_DIR` | `.cache/extracted_images` | Directory for PDF-extracted images (surfaced as citation images) |
+| `IMAGE_MIN_DIMENSION` | `64` | Drop images whose width or height is below this value (pixels) |
+| `IMAGE_MIN_DESCRIPTION_LENGTH` | `40` | Drop descriptions shorter than this (chars) — filters decorative images |
 | `LOG_FORMAT` | `console` | `console` (dev) or `json` (CI/prod) |
 | `OTEL_ENABLED` | `false` | Enables OpenTelemetry tracing export |
 | `OTEL_SERVICE_NAME` | `chatbot` | Trace resource service name |
+| `PHOENIX_PROJECT_NAME` | `chatbot-local` | Phoenix project name shown in the UI |
+| `OTEL_DEPLOYMENT_ENVIRONMENT` | `development` | OTel deployment environment resource attribute |
 | `OTEL_PHOENIX_OTLP_ENDPOINT` | `http://localhost:6006/v1/traces` | Phoenix OTLP/HTTP trace endpoint |
 | `OTEL_EXPORT_PHOENIX` | `true` | Enables Phoenix export when `OTEL_ENABLED=true` |
 | `OTEL_EXPORT_JAEGER` | `true` | Enables Jaeger export when `OTEL_ENABLED=true` |
 | `OTEL_JAEGER_OTLP_ENDPOINT` | `http://localhost:4318/v1/traces` | Jaeger OTLP endpoint (HTTP default; non-`/v1/traces` endpoints use gRPC mode) |
 | `OTEL_SAMPLE_RATE` | `1.0` | Root trace sampling ratio (`0.0` to `1.0`) |
 | `OTEL_CONSOLE_EXPORT` | `false` | Also print spans to stdout |
+| `OTEL_AUTO_INSTRUMENT_HAYSTACK` | `true` | Enable OpenInference auto-instrumentation for Haystack |
+| `MODEL_TEMPERATURE` | `0.0` | Chat model temperature (0.0 = deterministic, 1.0 = creative) |
+| `MODEL_SEED` | `42` | Chat model seed for reproducible generations |
+| `EVAL_ENVIRONMENT` | `local` | Evaluation environment label attached to all traces |
+| `EVAL_NAME` | — | Evaluation cycle name (e.g. `rag-prompt-tuning-2026-04`) |
+| `EVAL_RUN_ID` | — | Run identifier; auto-generated per process if unset |
+| `EVAL_CANDIDATE_ID` | — | Candidate ID for comparing prompt/model variants |
+| `EVAL_PROMPT_VERSION_ANSWER` | — | Version label for the answer-generation prompt |
+| `EVAL_PROMPT_VERSION_CITATION` | — | Version label for the citation-pass prompt |
+| `EVAL_RETRIEVAL_VERSION` | — | Version label for retrieval config; auto-derived from `RETRIEVAL_TOP_K` if unset |
+| `EVAL_CORPUS_VERSION` | — | Corpus snapshot identifier |
+| `EVAL_DATASET_VERSION` | — | Dataset snapshot identifier |
+| `EVAL_JUDGE_MODEL` | `llama3.1:8b` | LLM judge model for eval evaluators |
+| `EVAL_JUDGE_PROVIDER` | `ollama` | LLM judge backend: `ollama` or `openai_compatible` |
+| `EVAL_JUDGE_BASE_URL` | — | Judge provider URL; defaults to `http://localhost:11434` for Ollama |
+| `EVAL_JUDGE_API_KEY` | — | API key for `openai_compatible` judge provider |
+| `EVAL_JUDGE_INITIAL_PER_SECOND_REQUEST_RATE` | `1.5` | Initial judge request rate (lower to avoid rate-limit errors) |
 
 ### 3. Pull required Ollama models
 
@@ -75,11 +102,14 @@ ollama pull qwen3.5:9b
 # Embeddings
 ollama pull bge-m3
 
+# Vision model (for multi-modal ingestion — can be skipped if VISION_INGESTION_ENABLED=false)
+ollama pull qwen2.5vl:7b
+
 # Test chat model (used by pytest via tests/conftest.py)
 ollama pull llama3.2
 ```
 
-The embedding model always runs locally via Ollama. The chat model can alternatively run via a cloud provider — see [Using a cloud/remote chat model](#using-a-cloudremote-chat-model) below.
+The embedding and vision models always run locally via Ollama. The chat model can alternatively run via a cloud provider — see [Using a cloud/remote chat model](#using-a-cloudremote-chat-model) below.
 For tests, the suite pins `CHAT_MODEL=llama3.2` to keep test environments fast and reproducible even when the runtime default model changes.
 
 ### 4. Start Qdrant
@@ -312,14 +342,21 @@ All four commands must pass cleanly before merging any branch. CI enforces this 
 ## Evaluation
 
 ```bash
-uv run python -m src.evaluation.cli run
+# Run experiment against the default dataset (eval/datasets/rag_questions.jsonl)
+uv run --group eval python eval/run_experiment.py
+
+# Custom dataset / experiment name
+uv run --group eval python eval/run_experiment.py \
+  --dataset-file eval/datasets/rag_questions.jsonl \
+  --experiment-name "retrieval-top-k-5"
+
+# Quick sanity check (1 example, no Phoenix upload)
+uv run --group eval python eval/run_experiment.py --dry-run
 ```
 
-Runs the benchmark dataset against the live system and prints correctness, citation relevance, and unsupported-claim metrics. CI enforces MVP thresholds:
+Drives the `ChatOrchestrator` directly (bypasses Chainlit) and records results in Arize Phoenix. Requires `OTEL_ENABLED=true` and a running Phoenix instance. See `eval/README.md` for a full feature overview and dataset management guide.
 
-- Correctness ≥ 80 %
-- Citation relevance ≥ 90 % (for answerable questions)
-- Unsupported claim rate ≤ 10 %
+Evaluation metadata (run ID, prompt versions, candidate ID, …) is controlled via `EVAL_*` env vars — see the configuration table above.
 
 ---
 
@@ -327,26 +364,38 @@ Runs the benchmark dataset against the live system and prints correctness, citat
 
 ```
 src/
-  settings/     Shared pydantic-settings configuration (Settings + get_settings)
+  shared/       Cross-cutting infrastructure shared by chatbot and ingest
+    settings/     Settings + get_settings (pydantic-settings, single source of truth)
+    observability/  Logging (structlog) and OpenTelemetry tracing bootstrap
+    qdrant/       Shared Qdrant document-store factory and sparse embedder
   chatbot/      Chatbot application
-    app/          Orchestrator, protocols, prompts
-      citation/   CitationModel, default tool citation, CiteableTool extension for custom validation
-    ui/           Chainlit UI layer and session lifecycle
-    tools/        Typed tool schemas and external-service adapters
-      retrieval/  Document retrieval tool (CiteableTool)
-      vacation_days/  Vacation-days lookup tool
+    app/          Orchestrator, credential store, prompts
+      citation/   CitationModel, citation parser, citeable-tool messages
+    contracts/    Protocol interfaces: ChatModel, Retriever, CredentialStore, …
+    ui/           Chainlit UI layer, session lifecycle, composition root
     infrastructure/
-      chat/       Ollama chat model adapter
-      embeddings_text/  Query-time text embedder
-      retrieval/  Qdrant vector search adapter
-    config.py     Settings → chatbot infrastructure config converters
+      chat/       Ollama and OpenAI-compatible chat model adapters
+      embeddings_text/  Query-time text embedder (Ollama)
+      retrieval/  Hybrid Qdrant vector+sparse retriever
+      tools/
+        retrieval/      Document retrieval tool (CiteableTool)
+        vacation_days/  Vacation-days lookup tool
+    build_from_settings.py  Settings → chatbot component factory
   ingest/       Ingestion pipeline
-    pipeline.py   File discovery, chunking, embedding, indexing
-    cli.py        Developer CLI (reindex / reset)
+    app/          Ingestion pipeline logic (chunking, embedding, indexing)
+    contracts/    Protocol interfaces: FormatHandler, DocumentConverter, …
+    cli/          Developer CLI (reindex / reset / wipe-only)
     infrastructure/
+      converters/       Format converters (PDF, image)
       embeddings_document/  Document embedder (Ollama)
-      document_store/       Qdrant document store
-    config.py     Settings → ingest infrastructure config converters
+      image_cache/      Content-hash cache for vision-model descriptions
+      image_description.py  Image description service and filter config
+      vision/           Vision model adapter (Ollama)
+    build_from_settings.py  Settings → ingest component factory
+eval/
+  run_experiment.py  Offline evaluation runner (Phoenix Experiments)
+  datasets/          Curated evaluation datasets (JSONL)
+  results/           Stored experiment result files
 tests/
   unit/         Fast, self-contained tests for business logic
   integration/  End-to-end tests requiring live services
@@ -364,6 +413,5 @@ Module boundaries use `Protocol`-based interfaces — orchestration code never i
 - **Local model quality variance**: Answer quality depends on the model chosen. Model pinning and benchmark-based acceptance gates mitigate regressions.
 - **PDF extraction quality**: Complex layouts (tables, columns) may degrade extraction fidelity, which directly affects retrieval quality.
 - **No production IAM**: Auth is simulated via username/password at tool-call time. Session-scoped only; no OAuth2/OIDC integration.
-- **Password visible in chat**: Chainlit's `AskUserMessage` only supports plain-text input (`AskSpec.type = "text"`); there is no masked/password input in the current API. The user's password is therefore visible as plain text in the chat transcript. Resolution requires either a Chainlit custom element or a future API addition.
 - **Prompt injection**: Partially mitigated via source-grounded answering and instruction policy. Full red-teaming is post-MVP.
 - **No dynamic document upload**: Corpus changes require a CLI re-index. End-user upload is out of MVP scope.
