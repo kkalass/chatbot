@@ -65,6 +65,9 @@ logger = structlog.get_logger(__name__)
 
 _settings = get_settings()
 
+# Persistent event loop reused across _sync_task calls — see _get_task_loop().
+_task_event_loop: asyncio.AbstractEventLoop | None = None
+
 
 # ---------------------------------------------------------------------------
 # Experiment metadata
@@ -279,13 +282,30 @@ async def task(input: dict[str, str]) -> dict[str, object]:
     }
 
 
+def _get_task_loop() -> asyncio.AbstractEventLoop:
+    """Return a persistent event loop for use in :func:`_sync_task`.
+
+    Reusing one loop avoids ``RuntimeError: Event loop is closed`` from the
+    OpenAI async httpx client, which schedules background connection-cleanup
+    tasks that fire after ``asyncio.run()`` has already closed and GC-ed the
+    loop.
+    """
+    global _task_event_loop
+    loop = _task_event_loop
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _task_event_loop = loop
+    return loop
+
+
 def _sync_task(input: dict[str, str]) -> dict[str, object]:
     """Sync wrapper around ``task`` for the synchronous Phoenix ``Client``.
 
     ``run_experiment`` on the sync client cannot accept a coroutine function.
-    ``asyncio.run`` creates a fresh event loop per invocation, which is safe
-    here because each call is independent and the orchestrator is stateless
-    across invocations.
+    Uses a persistent event loop (see :func:`_get_task_loop`) so that the
+    OpenAI async httpx client can schedule its connection-cleanup tasks on an
+    open loop rather than one that ``asyncio.run()`` has already closed.
 
     Delegates to ``_eval_with_retry`` so that 429 rate-limit errors from the
     chat model are handled with the same sleep-and-retry logic used for the
@@ -293,7 +313,7 @@ def _sync_task(input: dict[str, str]) -> dict[str, object]:
     completions consume more of the rate-limit budget than judge calls.
     """
     return _eval_with_retry(  # type: ignore[return-value]
-        lambda inp: asyncio.run(task(inp)),  # type: ignore[arg-type]
+        lambda inp: _get_task_loop().run_until_complete(task(inp)),  # type: ignore[arg-type]
         input,  # type: ignore[arg-type]
         retries=5,
         sleep_s=90.0,
