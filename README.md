@@ -6,6 +6,58 @@ Answers domain questions grounded in static company documents (txt / md) with ci
 
 ---
 
+## About This Project
+
+This started as a structured learning exercise: build a real RAG chatbot from scratch, make deliberate architectural choices, and see what it actually takes to get a system like this to work well. It is not production software — it is a **showcase** of the concepts, patterns, and tradeoffs encountered along the way.
+
+### Highlights
+
+**AI-assisted, human-steered development** — The code was written in close collaboration with an AI agent, but the architectural structures, module boundaries, and design decisions are mine. The agent helped with implementation; I decided what to build and how to structure it.
+
+**Clean ingestion + chatbot boundaries** — The system cleanly separates document ingestion (`src/ingest`) from the chatbot runtime (`src/chatbot`), with `Protocol`-based interfaces at every module boundary. No orchestration code imports infrastructure directly.
+
+**Citations as a first-class concern** — Source attribution is not an afterthought. A dedicated citation layer uses tailored prompts and a streaming parser to embed citation markers directly in the answer stream, parsed and rendered in the UI as the response flows.
+
+**Multi-modal ingestion** — PDFs are ingested page by page, including images. Each image is described by a vision model (Ollama), and those descriptions become searchable chunks alongside the text, making image-heavy documents genuinely retrievable.
+
+**Instrumentation as a development discipline** — OpenTelemetry tracing (Phoenix + Jaeger) proved indispensable. Without it, tuning retrieval, prompts, and model behavior is guesswork. Tracing made the difference between "something is off" and "this specific retrieval step returned the wrong chunks."
+
+**Evaluation matters — and LLM-as-a-judge is tricky** — Running systematic experiments with Phoenix Experiments gave concrete signal on what actually improves quality. The catch: results vary dramatically depending on which model acts as the judge.
+
+**Local vs. cloud models** — Ollama is excellent for local iteration, but on aging hardware (a 5-year-old machine) some models are too slow for a comfortable feedback loop. Switching to a cloud provider via the `openai_compatible` adapter fixed that without any code changes.
+
+### On RAG — What It Actually Means
+
+RAG (Retrieval-Augmented Generation) is fundamentally about fetching relevant data and placing it in the LLM's context so the model answers based on that information rather than on its inherent, potentially stale, training knowledge.
+
+At its simplest, you could just load all your documents and feed them to the model — "it all fits in the context window, problem solved." That is still technically RAG. The retrieval source does not have to be a vector store; a classic database query, a filesystem read, or a full-text search engine (Elasticsearch, OpenSearch) all qualify just as well.
+
+What does matter is **retrieval quality**:
+- Include all *relevant* documents — but as few *irrelevant* ones as possible. The more noise in the context, the higher the risk that the model gets confused and produces a poor answer.
+- Larger context means more tokens, which means higher cost when using cloud models. (Token caching can help with cost, but the confusion risk from irrelevant content remains.)
+
+This is why evaluation, tracing, and careful tuning of chunk size, overlap, and `top_k` are not optional extras — they are the core of making RAG work reliably.
+
+### What I Learned
+
+Modern Python — with `pyright` strict mode, `@dataclass(frozen=True)`, `Protocol` interfaces, and Pydantic at system boundaries — is genuinely pleasant to work in, even for developers who come from strictly typed languages.
+
+More broadly: in the age of LLMs, fluency in a specific language's syntax matters less than the ability to **read and understand code**, apply the right design concepts, and work with an AI collaborator to produce idiomatic, clean solutions. This project reinforced that lesson throughout.
+
+### If This Were Production
+
+A few things would need to be reconsidered before running this in a real environment:
+
+**Stateful architecture** — This is a Chainlit application, which is inherently stateful (WebSocket-based, one process per session). That is fine for a local showcase, but it is a problem for horizontal scaling, e.g. in Kubernetes. A production deployment would need to evaluate whether statefulness is appropriate or whether to move toward a stateless design — which in turn raises questions about WebSocket handling and session affinity at the load-balancer level.
+
+**Do you actually need Qdrant?** — In a real deployment, the right question is whether a dedicated vector store is warranted at all. If the corpus is small, a simple database query or a full-text search against an existing Elasticsearch/OpenSearch cluster might be entirely sufficient — and avoids adding another piece of infrastructure to operate and maintain. And if semantic search *is* the right choice, be prepared to tune it: in this project, the choice of embedding model alone had an outsized impact on retrieval quality.
+
+### Status
+
+No further development is planned. This repository is a showcase now.
+
+---
+
 ## Prerequisites
 
 | Requirement | Version | Notes |
@@ -36,62 +88,18 @@ cp .env.example .env
 # Edit .env as needed — defaults work for a standard local setup
 ```
 
-Key variables (all have sensible defaults):
+The most commonly changed variables:
 
 | Variable | Default | Description |
 |---|---|---|
 | `CHAT_MODEL_PROVIDER` | `ollama` | `ollama` or `openai_compatible` |
-| `CHAT_BASE_URL` | `http://localhost:11434` | Chat model endpoint — Ollama URL or OpenAI-compatible base URL (e.g. `https://api.groq.com/openai/v1`) |
-| `CHAT_API_KEY` | — | API key for `openai_compatible` providers (not used for Ollama) |
-| `CHAT_MODEL` | `qwen3.5:9b` | Generation model identifier — Ollama name or provider model id (e.g. `qwen3-32b`, `Qwen/Qwen3-235B-A22B`) |
-| `EMBEDDING_MODEL_PROVIDER` | `ollama` | Currently only `ollama` is supported |
-| `EMBEDDING_BASE_URL` | `http://localhost:11434` | Ollama server URL for embeddings |
-| `EMBEDDING_MODEL` | `bge-m3` | Embedding model |
+| `CHAT_MODEL` | `qwen3.5:9b` | Model name — Ollama tag or provider model id |
+| `CHAT_BASE_URL` | `http://localhost:11434` | Model endpoint URL |
+| `CHAT_API_KEY` | — | Required for `openai_compatible` providers |
+| `EMBEDDING_MODEL` | `bge-m3` | Embedding model (must match the indexed collection) |
 | `QDRANT_HOST` | `localhost` | Qdrant hostname |
-| `QDRANT_PORT` | `6333` | Qdrant port |
-| `QDRANT_COLLECTION` | `chatbot` | Collection name |
-| `CORPUS_PATH` | `corpus` | Source document directory |
-| `RETRIEVAL_TOP_K` | `5` | Chunks returned per query |
-| `RETRIEVAL_LLM_TOP_K` | — | Max documents passed to LLM after RRF fusion; default uses `RETRIEVAL_TOP_K` |
-| `EMBEDDING_DIM` | `1024` | Embedding vector dimension — must match `EMBEDDING_MODEL` output |
-| `SPLIT_LENGTH` | `200` | Words per ingestion chunk |
-| `SPLIT_OVERLAP` | `20` | Word overlap between adjacent chunks |
-| `VISION_INGESTION_ENABLED` | `true` | Ingest images via a vision model; set `false` to skip all image content |
-| `VISION_MODEL` | `qwen2.5vl:7b` | Vision model for image description generation |
-| `VISION_PROVIDER` | `ollama` | Vision model backend — currently only `ollama` |
-| `VISION_BASE_URL` | `http://localhost:11434` | Ollama server URL for vision-model calls |
-| `IMAGE_CACHE_DIR` | `.cache/image_descriptions` | Cache directory for vision-model descriptions (keyed by content hash) |
-| `EXTRACTED_IMAGE_DIR` | `.cache/extracted_images` | Directory for PDF-extracted images (surfaced as citation images) |
-| `IMAGE_MIN_DIMENSION` | `64` | Drop images whose width or height is below this value (pixels) |
-| `IMAGE_MIN_DESCRIPTION_LENGTH` | `40` | Drop descriptions shorter than this (chars) — filters decorative images |
-| `LOG_FORMAT` | `console` | `console` (dev) or `json` (CI/prod) |
-| `OTEL_ENABLED` | `false` | Enables OpenTelemetry tracing export |
-| `OTEL_SERVICE_NAME` | `chatbot` | Trace resource service name |
-| `PHOENIX_PROJECT_NAME` | `chatbot-local` | Phoenix project name shown in the UI |
-| `OTEL_DEPLOYMENT_ENVIRONMENT` | `development` | OTel deployment environment resource attribute |
-| `OTEL_PHOENIX_OTLP_ENDPOINT` | `http://localhost:6006/v1/traces` | Phoenix OTLP/HTTP trace endpoint |
-| `OTEL_EXPORT_PHOENIX` | `true` | Enables Phoenix export when `OTEL_ENABLED=true` |
-| `OTEL_EXPORT_JAEGER` | `true` | Enables Jaeger export when `OTEL_ENABLED=true` |
-| `OTEL_JAEGER_OTLP_ENDPOINT` | `http://localhost:4318/v1/traces` | Jaeger OTLP endpoint (HTTP default; non-`/v1/traces` endpoints use gRPC mode) |
-| `OTEL_SAMPLE_RATE` | `1.0` | Root trace sampling ratio (`0.0` to `1.0`) |
-| `OTEL_CONSOLE_EXPORT` | `false` | Also print spans to stdout |
-| `OTEL_AUTO_INSTRUMENT_HAYSTACK` | `true` | Enable OpenInference auto-instrumentation for Haystack |
-| `MODEL_TEMPERATURE` | `0.0` | Chat model temperature (0.0 = deterministic, 1.0 = creative) |
-| `MODEL_SEED` | `42` | Chat model seed for reproducible generations |
-| `EVAL_ENVIRONMENT` | `local` | Evaluation environment label attached to all traces |
-| `EVAL_NAME` | — | Evaluation cycle name (e.g. `rag-prompt-tuning-2026-04`) |
-| `EVAL_RUN_ID` | — | Run identifier; auto-generated per process if unset |
-| `EVAL_CANDIDATE_ID` | — | Candidate ID for comparing prompt/model variants |
-| `EVAL_PROMPT_VERSION_ANSWER` | — | Version label for the answer-generation prompt |
-| `EVAL_PROMPT_VERSION_CITATION` | — | Version label for the citation-pass prompt |
-| `EVAL_RETRIEVAL_VERSION` | — | Version label for retrieval config; auto-derived from `RETRIEVAL_TOP_K` if unset |
-| `EVAL_CORPUS_VERSION` | — | Corpus snapshot identifier |
-| `EVAL_DATASET_VERSION` | — | Dataset snapshot identifier |
-| `EVAL_JUDGE_MODEL` | `llama3.1:8b` | LLM judge model for eval evaluators |
-| `EVAL_JUDGE_PROVIDER` | `ollama` | LLM judge backend: `ollama` or `openai_compatible` |
-| `EVAL_JUDGE_BASE_URL` | — | Judge provider URL; defaults to `http://localhost:11434` for Ollama |
-| `EVAL_JUDGE_API_KEY` | — | API key for `openai_compatible` judge provider |
-| `EVAL_JUDGE_INITIAL_PER_SECOND_REQUEST_RATE` | `1.5` | Initial judge request rate (lower to avoid rate-limit errors) |
+
+The chat model can also run via any OpenAI-compatible cloud provider (Groq, Together AI, …) by setting `CHAT_MODEL_PROVIDER=openai_compatible`. See [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference, provider examples, and vision/tracing/evaluation settings.
 
 ### 3. Pull required Ollama models
 
@@ -130,37 +138,6 @@ docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 
 Docker Desktop is not always required. For many local-dev setups, Colima is the simplest free alternative.
 
-### Qdrant Best Practices (Short)
-
-- Keep one embedding model (and vector dimension) per collection.
-- Use deterministic point IDs (`doc_id + chunk_index`) for idempotent re-indexing.
-- Persist data with a volume in real usage (not only ephemeral container state).
-- Treat retrieval params (`top_k`, score threshold, chunk size) as evaluation-controlled settings.
-
-### Using a cloud/remote chat model
-
-Set `CHAT_MODEL_PROVIDER=openai_compatible` to replace the local Ollama chat model with any OpenAI-API-compatible endpoint. Embeddings always remain local.
-
-**Groq** (free tier, fast):
-
-```bash
-CHAT_MODEL_PROVIDER=openai_compatible
-CHAT_BASE_URL=https://api.groq.com/openai/v1
-CHAT_API_KEY=gsk_...
-CHAT_MODEL=qwen3-32b
-```
-
-**Together AI** (pay-as-you-go, larger models):
-
-```bash
-CHAT_MODEL_PROVIDER=openai_compatible
-CHAT_BASE_URL=https://api.together.xyz/v1
-CHAT_API_KEY=...
-CHAT_MODEL=Qwen/Qwen3-235B-A22B
-```
-
-Any other provider with an OpenAI-compatible `/chat/completions` endpoint works the same way.
-
 ---
 
 ## Running the App
@@ -180,7 +157,9 @@ This project can emit OpenTelemetry traces for the full chat pipeline (UI turn, 
 ### 1. Start local Phoenix
 
 ```bash
-uv tool run --from arize-phoenix python -m phoenix.server.main serve
+podman run -d --name phoenix -p 6006:6006 docker.io/arizephoenix/phoenix:latest
+# or with Docker:
+# docker run -d --name phoenix -p 6006:6006 arizephoenix/phoenix:latest
 ```
 
 Phoenix UI: <http://localhost:6006>
@@ -356,7 +335,7 @@ uv run --group eval python eval/run_experiment.py --dry-run
 
 Drives the `ChatOrchestrator` directly (bypasses Chainlit) and records results in Arize Phoenix. Requires `OTEL_ENABLED=true` and a running Phoenix instance. See `eval/README.md` for a full feature overview and dataset management guide.
 
-Evaluation metadata (run ID, prompt versions, candidate ID, …) is controlled via `EVAL_*` env vars — see the configuration table above.
+Evaluation metadata (run ID, prompt versions, candidate ID, …) is controlled via `EVAL_*` env vars — see [CONFIGURATION.md](CONFIGURATION.md).
 
 ---
 
