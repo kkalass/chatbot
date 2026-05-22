@@ -4,6 +4,8 @@ Retrieval-augmented generation chatbot running on local infrastructure using **C
 
 Answers domain questions grounded in static company documents (txt / md) with citation-style source references. Includes a typed tool call for vacation-days lookup backed by a simple username/password simulation.
 
+<img src="doc/images/chat.png" alt="Chatbot answering a question about AI and the labour market, with inline citation markers and a linked source list" width="600" style="box-shadow: 0 2px 8px rgba(0,0,0,0.25); border-radius: 6px;">
+
 ---
 
 ## About This Project
@@ -23,6 +25,8 @@ This started as a structured learning exercise: build a real RAG chatbot from sc
 **Instrumentation as a development discipline** — OpenTelemetry tracing (Phoenix + Jaeger) proved indispensable. Without it, tuning retrieval, prompts, and model behavior is guesswork. Tracing made the difference between "something is off" and "this specific retrieval step returned the wrong chunks."
 
 **Evaluation matters — and LLM-as-a-judge is tricky** — Running systematic experiments with Phoenix Experiments gave concrete signal on what actually improves quality. The catch: results vary dramatically depending on which model acts as the judge.
+
+**i18n-ready by design** — No user-facing string is hardcoded in the backend. Every message a tool or citation layer emits is an `I18nMessage` value object; all display strings live in a single translation map in the UI layer (`i18n_messages.py`). Swapping in a real translation framework — or adding a language — requires touching exactly one file.
 
 **Local vs. cloud models** — Ollama is excellent for local iteration, but on aging hardware (a 5-year-old machine) some models are too slow for a comfortable feedback loop. Switching to a cloud provider via the `openai_compatible` adapter fixed that without any code changes.
 
@@ -51,12 +55,6 @@ A few things would need to be reconsidered before running this in a real environ
 **Stateful architecture** — This is a Chainlit application, which is inherently stateful (WebSocket-based, one process per session). That is fine for a local showcase, but it is a problem for horizontal scaling, e.g. in Kubernetes. A production deployment would need to evaluate whether statefulness is appropriate or whether to move toward a stateless design — which in turn raises questions about WebSocket handling and session affinity at the load-balancer level.
 
 **Do you actually need Qdrant?** — In a real deployment, the right question is whether a dedicated vector store is warranted at all. If the corpus is small, a simple database query or a full-text search against an existing Elasticsearch/OpenSearch cluster might be entirely sufficient — and avoids adding another piece of infrastructure to operate and maintain. And if semantic search *is* the right choice, be prepared to tune it: in this project, the choice of embedding model alone had an outsized impact on retrieval quality.
-
-### Status
-
-No further development is planned. This repository is a showcase now.
-
----
 
 ## Prerequisites
 
@@ -117,7 +115,7 @@ ollama pull qwen2.5vl:7b
 ollama pull llama3.2
 ```
 
-The embedding and vision models always run locally via Ollama. The chat model can alternatively run via a cloud provider — see [Using a cloud/remote chat model](#using-a-cloudremote-chat-model) below.
+The embedding and vision models always run locally via Ollama. The chat model can alternatively run via a cloud provider — see [CONFIGURATION.md](CONFIGURATION.md) for provider examples.
 For tests, the suite pins `CHAT_MODEL=llama3.2` to keep test environments fast and reproducible even when the runtime default model changes.
 
 ### 4. Start Qdrant
@@ -162,7 +160,7 @@ podman run -d --name phoenix -p 6006:6006 docker.io/arizephoenix/phoenix:latest
 # docker run -d --name phoenix -p 6006:6006 arizephoenix/phoenix:latest
 ```
 
-Phoenix UI: <http://localhost:6006>
+Phoenix UI: <http://127.0.0.1:6006>
 
 ### 2. Start local Jaeger
 
@@ -238,6 +236,8 @@ You can inspect the same traces in Phoenix (<http://localhost:6006>) and Jaeger 
 - Model call span (`chat.model.ollama.stream` or `chat.model.openai_compatible.stream`) with request/response previews
 - Tool spans (`chat.tool.search_documents`) with tool input and result summary
 - Retriever span (`chat.retriever.qdrant.retrieve`) with top-k result preview
+
+<img src="doc/images/jaeger.png" alt="Jaeger trace waterfall for a full chat request, showing the span hierarchy from UI turn through orchestrator, tool dispatch, Qdrant retrieval, and LLM stream" width="600" style="box-shadow: 0 2px 8px rgba(0,0,0,0.25); border-radius: 6px;">
 
 ### 5.1 Tracing Schema (Ownership Rules)
 
@@ -320,6 +320,8 @@ All four commands must pass cleanly before merging any branch. CI enforces this 
 
 ## Evaluation
 
+<img src="doc/images/phoenix.png" alt="Phoenix Experiments UI showing RAG evaluation results with score columns for correctness, faithfulness, has_citations, is_non_empty, and mean_document_relevance" width="600" style="box-shadow: 0 2px 8px rgba(0,0,0,0.25); border-radius: 6px;">
+
 ```bash
 # Run experiment against the default dataset (eval/datasets/rag_questions.jsonl)
 uv run --group eval python eval/run_experiment.py
@@ -394,3 +396,9 @@ Module boundaries use `Protocol`-based interfaces — orchestration code never i
 - **No production IAM**: Auth is simulated via username/password at tool-call time. Session-scoped only; no OAuth2/OIDC integration.
 - **Prompt injection**: Partially mitigated via source-grounded answering and instruction policy. Full red-teaming is post-MVP.
 - **No dynamic document upload**: Corpus changes require a CLI re-index. End-user upload is out of MVP scope.
+
+---
+
+## Status
+
+No further development is planned. This repository is a showcase now.
