@@ -80,6 +80,7 @@ Any other provider with an OpenAI-compatible `/chat/completions` endpoint works 
 | `RETRIEVAL_LLM_TOP_K` | — | Max documents passed to LLM after RRF fusion; default uses `RETRIEVAL_TOP_K` |
 | `SPLIT_LENGTH` | `200` | Words per ingestion chunk |
 | `SPLIT_OVERLAP` | `20` | Word overlap between adjacent chunks |
+| `INGEST_FILE_BATCH_SIZE` | `32` | Source files embedded and written per batch; reduce to 2–4 on CPU-only machines to prevent stale Qdrant connections |
 
 ---
 

@@ -158,6 +158,7 @@ def build_ingestion_config(settings: Settings) -> IngestionConfig:
     return IngestionConfig(
         split_length=settings.split_length,
         split_overlap=settings.split_overlap,
+        batch_size=settings.ingest_file_batch_size,
     )
 
 

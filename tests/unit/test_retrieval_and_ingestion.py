@@ -14,6 +14,7 @@ Covers:
   extraction-failure isolation.
 """
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -253,11 +254,9 @@ class _FakeEmbedder:
     def run(self, documents: list[Document]) -> dict[str, Any]:
         self.call_count += 1
         self.total_documents_seen += len(documents)
-        self.last_documents = [Document(content=d.content, meta=d.meta) for d in documents]
-        # Attach a dummy embedding vector so the writer doesn't complain.
-        embedded = [
-            Document(content=d.content, meta=d.meta, embedding=[0.0] * 4) for d in documents
-        ]
+        # Use dataclasses.replace to preserve document IDs, matching real Haystack embedder behaviour.
+        embedded = [dataclasses.replace(d, embedding=[0.0] * 4) for d in documents]
+        self.last_documents = embedded
         return {"documents": embedded}
 
 
@@ -450,6 +449,60 @@ class TestIngestionPipelineEmbedderInjection:
         assert written_docs
         assert written_docs[0].sparse_embedding is not None
         assert written_docs[0].sparse_embedding.indices
+
+    def test_already_indexed_chunks_are_not_re_embedded(self, tmp_path: Path) -> None:
+        """Re-running ingest on unchanged files skips embedding for existing chunks."""
+        from haystack.document_stores.in_memory import InMemoryDocumentStore
+
+        doc = tmp_path / "article.txt"
+        doc.write_text(" ".join(["word"] * 30))
+        store = InMemoryDocumentStore()
+        embedder = _FakeEmbedder()
+        config = IngestionConfig(split_length=10, split_overlap=0)
+        pipeline = IngestionPipeline(
+            config=config,
+            document_store=store,
+            embedder=embedder,
+            format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
+        )
+
+        pipeline.ingest([doc])
+        calls_after_first_run = embedder.call_count
+        docs_after_first_run = embedder.total_documents_seen
+
+        # Second ingest of the same unchanged file — embedder must not be called again.
+        pipeline.ingest([doc])
+
+        assert embedder.call_count == calls_after_first_run
+        assert embedder.total_documents_seen == docs_after_first_run
+
+    def test_new_file_is_embedded_when_other_files_already_indexed(self, tmp_path: Path) -> None:
+        """Re-run with one new file only embeds the new file's chunks."""
+        from haystack.document_stores.in_memory import InMemoryDocumentStore
+
+        existing = tmp_path / "old.txt"
+        existing.write_text(" ".join(["word"] * 30))
+        new_doc = tmp_path / "new.txt"
+        new_doc.write_text(" ".join(["thing"] * 30))
+        store = InMemoryDocumentStore()
+        embedder = _FakeEmbedder()
+        config = IngestionConfig(split_length=10, split_overlap=0)
+        pipeline = IngestionPipeline(
+            config=config,
+            document_store=store,
+            embedder=embedder,
+            format_handlers=build_format_handlers(image_service=None, extracted_image_store=None),
+        )
+
+        pipeline.ingest([existing])
+        docs_after_first_run = embedder.total_documents_seen
+
+        # Ingest both files; only new_doc's chunks should be embedded.
+        pipeline.ingest([existing, new_doc])
+
+        new_chunks_embedded = embedder.total_documents_seen - docs_after_first_run
+        # new_doc produces the same number of chunks as existing; none from existing again.
+        assert new_chunks_embedded == docs_after_first_run
 
 
 # ---------------------------------------------------------------------------

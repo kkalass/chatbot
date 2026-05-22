@@ -13,9 +13,11 @@ class TestConfigMappers:
         settings = Settings(
             split_length=180,
             split_overlap=15,
+            ingest_file_batch_size=4,
         )
 
         config = build_ingestion_config(settings)
 
         assert config.split_length == 180
         assert config.split_overlap == 15
+        assert config.batch_size == 4

@@ -106,6 +106,14 @@ class Settings(BaseSettings):
         default=20,
         description="Word overlap between adjacent ingestion chunks.",
     )
+    ingest_file_batch_size: int = Field(
+        default=32,
+        description=(
+            "Number of source files embedded and written to the vector store per batch. "
+            "Reduce on CPU-only machines to shorten the embedding window and keep the "
+            "Qdrant connection fresh (e.g. 2-4 for a small corpus)."
+        ),
+    )
 
     # --- Vision / Multi-modal ingestion ---
     vision_ingestion_enabled: bool = Field(

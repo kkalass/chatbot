@@ -131,6 +131,23 @@ class IngestionPipeline:
         self._format_handlers = tuple(format_handlers)
         self._format_handler_by_suffix = {h.suffix: h for h in self._format_handlers}
 
+    def _get_indexed_ids(self, candidate_ids: set[str]) -> set[str]:
+        """Return the subset of *candidate_ids* already present in the document store.
+
+        On any failure (e.g. collection not yet created, network error) the method
+        returns an empty set so the caller falls back to embedding all candidates.
+        """
+        if not candidate_ids:
+            return set()
+        try:
+            existing = self._document_store.filter_documents(
+                filters={"field": "id", "operator": "in", "value": list(candidate_ids)}
+            )
+            return {doc.id for doc in existing}
+        except Exception as exc:
+            logger.warning("ingestion.could_not_check_indexed_ids", error=str(exc))
+            return set()
+
     def _ingest_batch(self, file_paths: list[Path]) -> int:
         """Ingest one bounded file batch and return the number of chunks written."""
         by_suffix: dict[str, list[Path]] = {}
@@ -170,7 +187,20 @@ class IngestionPipeline:
                 splitter = handler.splitter_factory(self._config)
                 chunks.extend(_split_documents(splitter, converted))
 
-        logger.info("ingestion.splitting", document_count=raw_document_count)
+        logger.info("ingestion.splitting", document_count=raw_document_count, chunk_count=len(chunks))
+
+        # Skip chunks already in the store to avoid redundant embedding on re-runs.
+        indexed_ids = self._get_indexed_ids({c.id for c in chunks})
+        if indexed_ids:
+            chunks = [c for c in chunks if c.id not in indexed_ids]
+            logger.info(
+                "ingestion.skipping_indexed",
+                skipped=len(indexed_ids),
+                remaining=len(chunks),
+            )
+        if not chunks:
+            logger.info("ingestion.all_chunks_up_to_date")
+            return 0
 
         logger.info("ingestion.embedding_and_writing", chunk_count=len(chunks))
         embed_result = self._embedder.run(documents=chunks)
