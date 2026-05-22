@@ -140,19 +140,20 @@ def _build_experiment_description(settings: Settings) -> str:
 def _eval_with_retry(
     fn: Any, input: dict[str, Any], retries: int = 20, sleep_s: float = 15.0
 ) -> Any:
-    """Call ``fn(input)`` retrying on ``RateLimitError`` up to *retries* times.
+    """Call ``fn(input)`` retrying on any 429 rate-limit error up to *retries* times.
 
-    Phoenix's ``LLM`` wrapper creates ``RateLimiter`` with ``max_rate_limit_retries=0``
-    and does not expose a way to change that.  After the first 429 the limiter
-    raises immediately instead of sleeping.  Since we own the evaluator wrappers
-    we handle retries here rather than via private attribute patching.
+    Catches both ``phoenix.evals.rate_limiters.RateLimitError`` (raised by the
+    Phoenix LLM judge wrapper) and ``openai.RateLimitError`` (raised by the
+    OpenAI-compatible chat client used in tasks).  Phoenix's own retry layer
+    does not sleep meaningfully between attempts, so we own the backoff here.
     """
-    from phoenix.evals.rate_limiters import RateLimitError  # type: ignore[import-not-found]
+    from openai import RateLimitError as OpenAIRateLimitError  # type: ignore[import-not-found]
+    from phoenix.evals.rate_limiters import RateLimitError as PhoenixRateLimitError  # type: ignore[import-not-found]
 
     for _ in range(retries):
         try:
             return fn(input)
-        except RateLimitError:
+        except (PhoenixRateLimitError, OpenAIRateLimitError):
             time.sleep(sleep_s)
     return fn(input)  # final attempt — let any exception propagate
 
@@ -285,8 +286,18 @@ def _sync_task(input: dict[str, str]) -> dict[str, object]:
     ``asyncio.run`` creates a fresh event loop per invocation, which is safe
     here because each call is independent and the orchestrator is stateless
     across invocations.
+
+    Delegates to ``_eval_with_retry`` so that 429 rate-limit errors from the
+    chat model are handled with the same sleep-and-retry logic used for the
+    LLM judge evaluators.  A longer ``sleep_s`` is used here because chat
+    completions consume more of the rate-limit budget than judge calls.
     """
-    return asyncio.run(task(input))
+    return _eval_with_retry(  # type: ignore[return-value]
+        lambda inp: asyncio.run(task(inp)),  # type: ignore[arg-type]
+        input,  # type: ignore[arg-type]
+        retries=5,
+        sleep_s=90.0,
+    )
 
 
 # ---------------------------------------------------------------------------
